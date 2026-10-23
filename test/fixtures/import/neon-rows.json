@@ -1,0 +1,19 @@
+[
+  {
+    "title": "Copper Sky",
+    "metadata": {
+      "director": "Denise Villeneuve",
+      "genre": "Sci-Fi",
+      "duration": "1:49:00",
+      "collection": null,
+      "owned": true,
+      "status": "watched-2020s",
+      "rating": 8,
+      "imdbData": { "imdbID": "tt9000018", "Year": "2018" }
+    }
+  },
+  {
+    "title": "Night Ferry",
+    "metadata": { "director": "Dana Fincher", "genre": "Drama", "duration": "1:52:00", "collection": "", "owned": "" }
+  }
+]

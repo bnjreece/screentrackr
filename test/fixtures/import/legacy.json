@@ -1,0 +1,21 @@
+{
+  "movieList": [
+    { "title": "Quiet Ledger", "director": "Dana Fincher", "genre": "Thriller", "duration": "2:19:00", "collection": "Ledger Collection", "owned": "Yes" },
+    { "title": "Dune Static ", "director": "Denise Villeneuve", "genre": "Sci-Fi", "duration": "1:56:00", "collection": "", "owned": "" },
+    { "title": "Border Choir", "director": "Unknown", "genre": "Action", "duration": "2:01:00", "collection": "", "owned": "Yes" },
+    { "title": "Echo Valley", "director": "Teodor Brask", "genre": "Horror", "duration": "2:05:00", "collection": "", "owned": "Yes" }
+  ],
+  "movieStatuses": {
+    "Quiet Ledger": "watched-2010s",
+    "Dune Static ": "next",
+    "Border Choir": "watched-young",
+    "A Title Not In The List": "later"
+  },
+  "myRatings": {
+    "Quiet Ledger": 9,
+    "Border Choir": 7
+  },
+  "movieImdbData": {
+    "Border Choir": { "imdbID": "tt9000007", "Title": "Border Choir", "Year": "2015" }
+  }
+}

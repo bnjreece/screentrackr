@@ -1,0 +1,58 @@
+{
+  "name": "screentrackr",
+  "version": "0.1.0",
+  "description": "Query your movie library and the IMDb catalog from the terminal or an MCP client.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Benjamin Reece",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bnjreece/screentrackr.git"
+  },
+  "homepage": "https://github.com/bnjreece/screentrackr#readme",
+  "bugs": {
+    "url": "https://github.com/bnjreece/screentrackr/issues"
+  },
+  "bin": {
+    "screentrackr": "dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc -p . && node -e \"require('node:fs').copyFileSync('src/core/importers/apple-tv.jxa.js','dist/core/importers/apple-tv.jxa.js')\"",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+    "prepublishOnly": "npm run build && npm test",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "movies",
+    "imdb",
+    "mcp",
+    "model-context-protocol",
+    "cli",
+    "sqlite",
+    "apple-tv",
+    "watchlist",
+    "claude"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.5",
+    "eslint": "^10.13.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.0",
+    "vitest": "^5.0.5"
+  }
+}

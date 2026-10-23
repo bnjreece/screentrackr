@@ -1,0 +1,10 @@
+# Private planning docs: reference owner infrastructure, never publish
+docs/superpowers/
+docs/reviews/
+node_modules/
+dist/
+coverage/
+*.db
+*.db-*
+.DS_Store
+.env*
