@@ -23,7 +23,9 @@ import {
 } from '../core/importers/letterboxd.js';
 import { isExcludedTraktName, MAX_ZIP_BYTES, parseTrakt, readTraktExport, traktFileOf } from '../core/importers/trakt.js';
 import { jellyfinDeviceId, mapJellyfinItems, readJellyfinItems, type JellyfinAuth } from '../core/importers/jellyfin.js';
-import { applyImport, detectFormat, parseImportDetailed, type ImportFormat, type ImportSummary, type ParsedImport } from '../core/importers/index.js';
+import { applyImport, detectFormat, parseImportDetailed, type ImportFormat, type ImportRecord, type ImportSummary, type ParsedImport } from '../core/importers/index.js';
+import { getList, normListName } from '../core/lists.js';
+import { isFutureDate } from '../core/viewings.js';
 import { listZip } from '../core/zip.js';
 import { readPlexImport, type PlexImportOptions, type PlexParsed } from './commands/import-plex.js';
 import { UserError, type Ctx } from './context.js';
@@ -31,7 +33,8 @@ import { promptHidden, readStdinSecret } from './secret.js';
 
 export { readPlexImport, type PlexImportOptions };
 
-export const IMDB_FLAGS_ONLY = '--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files';
+export const IMDB_FLAGS_ONLY = '--as, --collection, --to-list, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files';
+export const LETTERBOXD_FLAGS_ONLY = '--owned-list, --lists, --list, --tags-as-lists, --with-reviews and --no-watchlist only apply to Letterboxd exports';
 
 /** The largest single file (a CSV, a JSON export, a paste) an import reads. */
 const MAX_IMPORT_FILE_BYTES = 256 * 1024 * 1024;
@@ -166,7 +169,7 @@ function archiveKind(path: string): 'letterboxd' | 'trakt' | null {
 }
 
 function fromLetterboxd(res: LetterboxdParse): Parsed {
-  return { format: 'letterboxd', records: res.records, warnings: res.warnings, notices: res.notices };
+  return { format: 'letterboxd', records: res.records, warnings: res.warnings, notices: res.notices, ...(res.lists ? { lists: res.lists } : {}) };
 }
 
 /**
@@ -299,7 +302,7 @@ export function readFileImport(ctx: Ctx, req: FileImportRequest): ParsedSource {
   const imdb = req.target === 'imdb';
   const letterboxd = req.target === 'letterboxd';
   const noLbFlags = () => {
-    if (req.letterboxdFlags) throw new UserError('--owned-list, --with-reviews and --no-watchlist only apply to Letterboxd exports');
+    if (req.letterboxdFlags) throw new UserError(LETTERBOXD_FLAGS_ONLY);
   };
   if (letterboxd && imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
 
@@ -369,6 +372,33 @@ export async function readAppleTvImport(ctx: Ctx, opts: AppleTvImportOptions = {
   return { format: 'apple-tv', records: await readAppleTvLibrary({ timeoutMs: opts.timeoutMs }), warnings: [], notices: [] };
 }
 
+/**
+ * Plays dated more than a day ahead (a clock or export error) are dropped,
+ * with one warning per movie, so no future date ever reaches the library.
+ * Returns the records with those plays (and such a watchedAt) left out.
+ */
+export function dropFutureDates(records: ImportRecord[], now: Date = new Date()): { records: ImportRecord[]; warnings: string[] } {
+  const warnings: string[] = [];
+  const out = records.map((r) => {
+    const future = (d: string | null | undefined) => typeof d === 'string' && d.trim() !== '' && isFutureDate(d.trim(), now);
+    const dropped: string[] = [];
+    let next = r;
+    if (Array.isArray(r.viewings) && r.viewings.some((v) => future(v?.watchedAt))) {
+      dropped.push(...r.viewings.filter((v) => future(v?.watchedAt)).map((v) => v.watchedAt as string));
+      next = { ...next, viewings: r.viewings.filter((v) => !future(v?.watchedAt)) };
+    }
+    if (future(r.watchedAt)) {
+      dropped.push(r.watchedAt as string);
+      next = { ...next };
+      delete next.watchedAt;
+      delete next.watchedAtSource;
+    }
+    if (dropped.length) warnings.push(`"${r.sourceTitle}": left out ${dropped.length === 1 ? 'a play' : `${dropped.length} plays`} dated in the future (${[...new Set(dropped)].join(', ')})`);
+    return next;
+  });
+  return { records: out, warnings };
+}
+
 /** One source's import: what was read and what applying it did (or, in a dry run, would do). */
 export interface ImportOutcome {
   parsed: ParsedSource;
@@ -380,8 +410,9 @@ export interface ImportOutcome {
  * (a --replace with nothing to import). Prints the source's notices and
  * warnings to stderr. Never prints the result; see emitImportOutcome.
  */
-export function applyParsed(ctx: Ctx, parsed: ParsedSource, opts: { replace?: boolean; dryRun?: boolean } = {}): ImportOutcome {
+export function applyParsed(ctx: Ctx, input: ParsedSource, opts: { replace?: boolean; dryRun?: boolean } = {}): ImportOutcome {
   const replace = opts.replace === true;
+  let parsed = input;
   // An empty IMDb export (only a header) is "no rows", never "delete everything".
   if ((parsed.format === 'imdb' || parsed.format === 'plex') && replace && parsed.records.length === 0) {
     throw new UserError(`Nothing to import from ${parsed.format === 'plex' ? 'Plex' : 'the IMDb file'}, so --replace would empty your library. Nothing was changed.`);
@@ -396,15 +427,35 @@ export function applyParsed(ctx: Ctx, parsed: ParsedSource, opts: { replace?: bo
   if (replace && parsed.format === 'jellyfin') throw new UserError('--replace does not apply to `import jellyfin`; it always merges. Nothing was changed.');
 
   const db = ctx.db();
+  const future = dropFutureDates(parsed.records);
+  if (future.warnings.length) parsed = { ...parsed, records: future.records, warnings: [...parsed.warnings, ...future.warnings] };
   for (const n of parsed.notices) ctx.log(n);
   const logged = new Set(parsed.logged);
   for (const w of parsed.warnings) if (!logged.has(w)) ctx.log(`Warning: ${w}`);
   if (!catalogReady(db)) ctx.log('The catalog is not built yet, so movies are left unmatched. Run `screentrackr setup` to match them.');
+  // Lists the import names that you already have: it adds to them (names compare without case), and says so.
+  const named = new Map<string, string>();
+  for (const n of [...(parsed.lists ?? []).map((l) => l.name), ...parsed.records.flatMap((r) => (Array.isArray(r.lists) ? r.lists : []))]) {
+    if (typeof n !== 'string' || !n.trim()) continue;
+    let key: string;
+    try {
+      key = normListName(n);
+    } catch {
+      continue;
+    }
+    if (!named.has(key)) named.set(key, n.trim());
+  }
+  const existing = [...named.entries()].map(([, n]) => ({ given: n, list: getList(db, n) })).filter((x) => x.list !== null);
   const summary = applyImport(db, parsed.records, {
     mode: replace ? 'replace' : 'merge',
     dryRun: opts.dryRun === true,
     ...(parsed.lists ? { lists: parsed.lists } : {}),
   });
+  if (existing.length && !replace) {
+    ctx.log(
+      `Added to lists you already have: ${existing.map((x) => (x.list?.name === x.given ? `"${x.given}"` : `"${x.given}" (as your "${x.list?.name ?? ''}")`)).join(', ')}.`,
+    );
+  }
   return { parsed, summary };
 }
 

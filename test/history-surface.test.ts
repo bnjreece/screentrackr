@@ -176,6 +176,22 @@ describe('screentrackr set --watched-at / --clear-watched-at', () => {
   });
 });
 
+describe('import imdb --to-list and --checkin-dates', () => {
+  const LIST = join(import.meta.dirname, 'fixtures', 'imdb-export', 'watchlist.csv');
+  it('puts a list export in one of your lists, and makes check-ins plays', () => {
+    const r = cli(['import', 'imdb', LIST, '--as', 'list', '--to-list', 'Harbor nights', '--json']);
+    expect(r.code, r.stderr).toBe(0);
+    expect((JSON.parse(r.stdout) as { listsCreated: string[] }).listsCreated).toEqual(['Harbor nights']);
+    expect(cli(['import', 'imdb', LIST, '--to-list', 'x']).stderr).toMatch(/--to-list only applies with --as list/);
+    const c = cli(['import', 'imdb', LIST, '--as', 'checkins', '--checkin-dates', '--json']);
+    expect(c.code, c.stderr).toBe(0);
+    withDb((db) => {
+      const n = db.sql.prepare("SELECT COUNT(*) AS n FROM viewings WHERE source = 'imdb' AND watched_at IS NOT NULL").get() as { n: number };
+      expect(n.n).toBeGreaterThan(0);
+    });
+  });
+});
+
 describe('MCP history tools', () => {
   let db: Db;
   let client: Client;
@@ -200,7 +216,7 @@ describe('MCP history tools', () => {
     expect(by.list_viewings?.annotations).toMatchObject({ readOnlyHint: true });
     expect(by.remove_viewing?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
     expect(by.log_viewing?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
-    for (const t of ['log_viewing', 'list_viewings', 'remove_viewing']) expect(by[t]?.description).not.toContain('—');
+    for (const t of ['log_viewing', 'list_viewings', 'remove_viewing']) expect(by[t]?.description).not.toContain(String.fromCharCode(0x2014));
   });
 
   it('log_viewing records a play; remove_viewing deletes it by id', async () => {

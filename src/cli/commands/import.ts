@@ -12,6 +12,7 @@ import {
   applyParsed,
   emitImportOutcome,
   IMDB_FLAGS_ONLY,
+  LETTERBOXD_FLAGS_ONLY,
   readAppleTvImport,
   readFileImport,
   readJellyfinImport,
@@ -28,11 +29,11 @@ export const importCmd: Command = {
   details: [
     `Formats: ${FORMATS.join(', ')}. The format is detected when --format is omitted.`,
     "`import apple-tv` (experimental, macOS only) reads the TV app's library directly. Movies with a recorded play date are marked watched; the rest keep their current status.",
-    "`import imdb <file.csv>...` reads IMDb CSV exports you downloaded from imdb.com (Your Ratings, your watchlist, check-ins or a list). Rated movies are marked watched with your rating; watchlist movies go in the queue only when they are new; nothing is marked owned. Several files are read together. --as says what a list export is (watchlist by default), --collection names a list's collection, --include-type brings in more than movies (repeatable or comma-separated: " +
+    "`import imdb <file.csv>...` reads IMDb CSV exports you downloaded from imdb.com (Your Ratings, your watchlist, check-ins or a list). Rated movies are marked watched with your rating; watchlist movies go in the queue only when they are new; nothing is marked owned. Several files are read together. --as says what a list export is (watchlist by default), --collection names a list's collection, --to-list puts a list's movies in one of your lists, --include-type brings in more than movies (repeatable or comma-separated: " +
       IMDB_INCLUDE_TYPES.join(', ') +
-      '), --checkin-dates uses check-in dates as watched dates, --notes-from-description keeps a list row\'s Description as notes.',
-    "`import letterboxd <export.zip|folder|file.csv>...` reads the export you downloaded from letterboxd.com (Settings, Data). Watched and rated films are marked watched, with half stars stored times two (1 to 10); the watched date comes from your diary; watchlist films go in the queue only when they are new; nothing is marked owned unless you name a list with --owned-list <slug> (repeatable). --with-reviews takes your latest review as notes for movies with none; --no-watchlist leaves the watchlist out.",
-    "`import trakt <export.zip|folder>` reads the data export you download from Trakt (Settings > Data > Raw export), or files from it. Only movie history, ratings, watchlist, collection and the export's error list are read. Watched movies are marked watched with the latest play's date, watchlist movies go in the queue only when they are new, and only the collection marks a movie owned. Plays logged in bulk (10 or more at the same second) lose their dates unless --keep-bulk-dates. It only merges (--replace is refused). A plain `import` of the export ZIP or one of those files does the same, and refuses the export's other files without opening them. Nothing is fetched from Trakt.",
+      '), --checkin-dates makes each check-in a play on its date, --notes-from-description keeps a list row\'s Description as notes.',
+    "`import letterboxd <export.zip|folder|file.csv>...` reads the export you downloaded from letterboxd.com (Settings, Data). Watched and rated films are marked watched, with half stars stored times two (1 to 10); every diary entry is a play (its date, rewatch flag and rating), and an entry you deleted on Letterboxd goes from your history on the next import (plays you logged or another source recorded stay); watchlist films go in the queue only when they are new; nothing is marked owned unless you name a list with --owned-list <slug> (repeatable). --lists brings in every list in the export as your lists (by each list's own name), --list <slug> (repeatable) only some, --tags-as-lists makes each diary tag a list. --with-reviews takes your latest review as notes for movies with none; --no-watchlist leaves the watchlist out.",
+    "`import trakt <export.zip|folder>` reads the data export you download from Trakt (Settings > Data > Raw export), or files from it. Only movie history, ratings, watchlist, collection and the export's error list are read. Watched movies are marked watched and every play in your history is kept (the export's history is the whole Trakt history of each movie, so a play deleted on Trakt goes on the next import, unless the export says the history is incomplete), watchlist movies go in the queue only when they are new, and only the collection marks a movie owned. Plays logged in bulk (10 or more at the same second), and plays at 1970 or before 1900, are kept without a date unless --keep-bulk-dates. It only merges (--replace is refused). A plain `import` of the export ZIP or one of those files does the same, and refuses the export's other files without opening them. Nothing is fetched from Trakt.",
     "`import plex [--url <server>] [--section <name|key>]...` reads the movie libraries of your own Plex Media Server, read-only, with the token from PLEX_TOKEN (never stored). Every movie is marked owned; movies Plex counts as played are marked watched, with your Plex rating unless --no-ratings; new unwatched movies get --unwatched-status (someday by default; skip leaves them out) and existing ones keep their status. With --dry-run, plex shows the counts it read and never opens your library.",
     '`import jellyfin --url <server> --user <name>` reads your movies from your own Jellyfin server, read only. The token comes from JELLYFIN_TOKEN (or --token-stdin); without one you sign in with your password (prompted, or --password-stdin) and the session is signed out afterwards. Nothing is stored. Played movies are marked watched; the rest keep their status (a new one goes in the queue). --ratings brings in your Jellyfin ratings.',
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
@@ -50,6 +51,7 @@ export const importCmd: Command = {
     },
     as: { type: 'string', value: `<${IMDB_LIST_KINDS.join('|')}>`, description: 'imdb only: what an IMDb list export is (default watchlist)' },
     collection: { type: 'string', value: '<name>', description: 'imdb --as list only: collection name for the list (fills a blank collection)' },
+    'to-list': { type: 'string', value: '<name>', description: "imdb --as list only: put the list's movies in this list of yours" },
     'include-type': {
       type: 'string',
       multiple: true,
@@ -63,6 +65,14 @@ export const importCmd: Command = {
       value: '<slug>',
       description: 'letterboxd only: mark the films of this list (lists/<slug>.csv in the export) owned (repeatable)',
     },
+    lists: { type: 'boolean', description: "letterboxd only: bring in every list in the export as your lists (an --owned-list only marks owned)" },
+    list: {
+      type: 'string',
+      multiple: true,
+      value: '<slug>',
+      description: 'letterboxd only: bring in this list (lists/<slug>.csv) as one of your lists (repeatable)',
+    },
+    'tags-as-lists': { type: 'boolean', description: 'letterboxd only: put each film in a list per tag on its diary entries' },
     'with-reviews': { type: 'boolean', description: 'letterboxd only: use your latest review as notes for movies with no notes' },
     'no-watchlist': { type: 'boolean', description: 'letterboxd only: leave the watchlist out' },
     'keep-bulk-dates': { type: 'boolean', description: 'trakt only: keep the dates of plays logged in bulk' },
@@ -123,10 +133,11 @@ export const importCmd: Command = {
 
     const as = str(values, 'as');
     const collection = str(values, 'collection');
+    const toList = str(values, 'to-list');
     const includeRaw = (strs(values, 'include-type') ?? []).flatMap((v) => v.split(',')).map((v) => v.trim()).filter(Boolean);
     const checkinDates = bool(values, 'checkin-dates');
     const notesFromDescription = bool(values, 'notes-from-description');
-    const imdbFlags = as !== undefined || collection !== undefined || includeRaw.length > 0 || checkinDates || notesFromDescription;
+    const imdbFlags = as !== undefined || collection !== undefined || toList !== undefined || includeRaw.length > 0 || checkinDates || notesFromDescription;
     if (as !== undefined && !(IMDB_LIST_KINDS as readonly string[]).includes(as)) {
       throw new UserError(`--as expects ${IMDB_LIST_KINDS.join(', ')} (got "${as}")`);
     }
@@ -137,10 +148,13 @@ export const importCmd: Command = {
     });
     if (collection !== undefined && as !== 'list') throw new UserError('--collection only applies with --as list');
     if (collection !== undefined && !collection.trim()) throw new UserError('--collection needs a name');
+    if (toList !== undefined && as !== 'list') throw new UserError('--to-list only applies with --as list');
+    if (toList !== undefined && !toList.trim()) throw new UserError('--to-list needs a list name');
     if (checkinDates && as !== 'checkins') throw new UserError('--checkin-dates only applies with --as checkins');
     const imdbOpts: ImdbOptions = {
       ...(as ? { as: as as ImdbListKind } : {}),
       ...(collection ? { collection } : {}),
+      ...(toList ? { toList } : {}),
       includeTypes,
       checkinDates,
       notesFromDescription,
@@ -148,9 +162,15 @@ export const importCmd: Command = {
 
     const ownedLists = strs(values, 'owned-list') ?? [];
     const lbOpts: LetterboxdOptions = { withReviews: bool(values, 'with-reviews'), watchlist: !bool(values, 'no-watchlist'), ownedLists };
-    const lbFlags = ownedLists.length > 0 || bool(values, 'with-reviews') || bool(values, 'no-watchlist');
+    const memberLists = strs(values, 'list') ?? [];
+    if (bool(values, 'lists') && memberLists.length) throw new UserError('Use either --lists (every list) or --list <slug>, not both');
+    if (memberLists.length) lbOpts.memberLists = memberLists;
+    if (bool(values, 'lists')) lbOpts.allLists = true;
+    if (bool(values, 'tags-as-lists')) lbOpts.tagsAsLists = true;
+    const lbFlags =
+      ownedLists.length > 0 || memberLists.length > 0 || bool(values, 'lists') || bool(values, 'tags-as-lists') || bool(values, 'with-reviews') || bool(values, 'no-watchlist');
     const noLbFlags = () => {
-      if (lbFlags) throw new UserError('--owned-list, --with-reviews and --no-watchlist only apply to Letterboxd exports');
+      if (lbFlags) throw new UserError(LETTERBOXD_FLAGS_ONLY);
     };
     if (letterboxd && imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
 

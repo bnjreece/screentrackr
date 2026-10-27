@@ -12,7 +12,8 @@
  * - diary.csv: one row per logged viewing, keyed by the entry's own URI; an
  *   entry belongs to the film with exactly its Name and Year;
  * - reviews.csv, with `withReviews` only: joined to diary entries by entry URI;
- * - lists/<slug>.csv, only for the lists named in `ownedLists`;
+ * - lists/<slug>.csv, only for the lists named in `ownedLists` or
+ *   `memberLists`, or every list with `allLists`;
  * - deleted/diary.csv and orphaned/diary.csv, only to count their rows.
  * profile.csv, comments.csv, likes/ and other lists are never opened.
  *
@@ -24,19 +25,31 @@
  *   is Letterboxd's own 10-point conversion. ratings.csv wins; the latest
  *   diary entry's rating (blank: none) is used only for a film with no
  *   ratings row.
- * - The watched date and era come from the latest diary Watched Date only,
- *   never from watched.csv's Date (when the row was logged). When the diary
- *   was read and a watched film has no entry in it, the record asks to clear
- *   the date only if an earlier Letterboxd import set it (clearWatchedAtIfOwn).
+ * - Every attached diary entry is a play (`viewings`): its Watched Date
+ *   (never watched.csv's Date, which is when the row was logged), its
+ *   Rewatch flag (Yes, else no), its rating and its own entry URI as the
+ *   play's ref. When the diary was read, those are the film's whole Letterboxd
+ *   history (`viewingsComplete`), so an entry deleted on Letterboxd goes from
+ *   the library too, and a film with no entry left has no Letterboxd play.
+ *   Plays you logged and other sources' plays are never touched. A film whose
+ *   entries could not be attached (two films with its Name and Year) gives
+ *   no plays and no complete set. The watched date is the latest play across
+ *   every source, and the era follows it (core/viewings.ts).
  * - Letterboxd has no idea of ownership in the export: `ownedIfNew: false`,
  *   never `owned`, except for films in a list the user names as owned.
  * - Descriptive fields (year, notes) only fill blanks (`fillOnly`).
- * - Tags, likes, rewatch flags and other lists are dropped.
+ * - Lists (`allLists`, `memberLists`): each list's own name (its metadata
+ *   row) is the ScreenTrackr list its films go in, add-only. A list named
+ *   only with `ownedLists` marks owned and is not a list here, unless it is
+ *   also named in `memberLists`. `tagsAsLists` puts each film in a list per
+ *   tag on its diary entries. A film that is only in a list is a new item in
+ *   the queue, not owned.
+ * - Likes and other lists are dropped, and tags unless `tagsAsLists`.
  */
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import type { WatchedEra } from '../types.js';
-import { cleanText, ImportError, type ImportRecord, type ParsedImport } from './common.js';
+import { cleanListName, normListName } from '../lists.js';
+import { cleanText, ImportError, type ImportList, type ImportRecord, type ImportViewing, type ParsedImport } from './common.js';
 import { parseCsvRows } from './csv.js';
 import { decodeImdbFile } from './imdb.js';
 import { listZip } from '../zip.js';
@@ -48,6 +61,12 @@ export interface LetterboxdOptions {
   watchlist?: boolean;
   /** Slugs of lists (lists/<slug>.csv) whose films are marked owned. */
   ownedLists?: readonly string[];
+  /** Bring in every list in lists/ as a ScreenTrackr list (except owned lists not also in memberLists). */
+  allLists?: boolean;
+  /** Slugs of lists to bring in as ScreenTrackr lists. */
+  memberLists?: readonly string[];
+  /** Make each diary tag a list. */
+  tagsAsLists?: boolean;
 }
 
 export interface LetterboxdParse extends ParsedImport {
@@ -132,11 +151,6 @@ function halfStars(v: string | undefined): number | undefined | null {
   return Number.isInteger(n) && n >= 1 && n <= 10 ? n : null;
 }
 
-const eraOf = (date: string): WatchedEra => {
-  const y = Number(date.slice(0, 4));
-  return y >= 2020 ? '2020s' : y >= 2010 ? '2010s' : 'long-ago';
-};
-
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0' };
 
 /** A review's HTML as plain text: line breaks and paragraphs kept, tags dropped, entities decoded. */
@@ -179,6 +193,8 @@ interface Film {
   ratingsRow: boolean;
   rating?: number;
   ownedList?: string;
+  /** ScreenTrackr lists the film goes in, by name (first spelling kept). */
+  lists: Map<string, string>;
 }
 
 interface DiaryEntry {
@@ -188,6 +204,9 @@ interface DiaryEntry {
   watchedDate: string | null;
   date: string | null;
   rating?: number;
+  /** The entry's Rewatch column: Yes is a rewatch, anything else is not. */
+  rewatch: boolean;
+  tags: string[];
   order: number;
 }
 
@@ -216,10 +235,19 @@ interface Inputs {
   diary?: Table;
   watchlist?: Table;
   reviews?: Table;
-  lists: { slug: string; table: Table }[];
+  /** List files read: `owned` marks their films owned, `member` puts them in a ScreenTrackr list. */
+  lists: { slug: string; table: Table; owned: boolean; member: boolean }[];
 }
 
-function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], notices: string[]): ImportRecord[] {
+/** What a list slug is read for, from the options: marking owned, a ScreenTrackr list, or nothing. */
+export function listRole(slug: string, opts: LetterboxdOptions): { owned: boolean; member: boolean } {
+  const key = slug.toLowerCase();
+  const has = (xs: readonly string[] | undefined) => (xs ?? []).some((v) => cleanListSlug(v).toLowerCase() === key);
+  const owned = has(opts.ownedLists);
+  return { owned, member: has(opts.memberLists) || (opts.allLists === true && !owned) };
+}
+
+function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], notices: string[]): { records: ImportRecord[]; lists: ImportList[] } {
   const films = new Map<string, Film>();
   const filmRows = (t: Table | undefined, apply: (f: Film, cells: string[], at: ReturnType<typeof reader>, where: string) => void) => {
     if (!t) return;
@@ -234,7 +262,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
       const year = /^\d{4}$/.test(rawYear) ? Number(rawYear) : null;
       let f = films.get(uri);
       if (!f) {
-        f = { uri, title, year, rawYear, watched: false, watchlist: false, ratingsRow: false };
+        f = { uri, title, year, rawYear, watched: false, watchlist: false, ratingsRow: false, lists: new Map() };
         films.set(uri, f);
       }
       apply(f, cells, at, where);
@@ -257,11 +285,25 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
     });
   }
 
-  for (const { slug, table: t } of inp.lists) {
+  const lists = new Map<string, ImportList>();
+  /** A list name as ScreenTrackr keeps it, or null (warned) when it can't be one. */
+  const listName = (raw: string, where: string): string | null => {
+    try {
+      return cleanListName(raw);
+    } catch (err) {
+      warnings.push(`${where}: "${raw.slice(0, 120)}" can't be a list name (${(err as Error).message}), so it was left out`);
+      return null;
+    }
+  };
+  const joinList = (f: Film, name: string) => {
+    const key = normListName(name);
+    if (!f.lists.has(key)) f.lists.set(key, name);
+  };
+  for (const { slug, table: t, owned, member } of inp.lists) {
     const rows = t.rows;
     const version = LIST_PREAMBLE.exec((rows[0]?.[0] ?? '').trim())?.[1];
     if (version !== LIST_VERSION) {
-      warnings.push(`${t.name}: a Letterboxd list export of a version this tool doesn't know (v${version ?? '?'}), so the list was skipped and nothing in it was marked owned`);
+      warnings.push(`${t.name}: a Letterboxd list export of a version this tool doesn't know (v${version ?? '?'}), so the list was skipped${owned ? ' and nothing in it was marked owned' : ''}`);
       continue;
     }
     const split = rows.findIndex((r) => sameCells(r, LIST_FILMS_HEADER));
@@ -271,7 +313,13 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
     }
     const metaHeader = rows.findIndex((r) => sameCells(r, LIST_META_HEADER));
     const meta = metaHeader >= 0 && metaHeader + 1 < split ? rows[metaHeader + 1] : undefined;
-    const listName = (meta ? cleanText(reader(LIST_META_HEADER)(meta, 'Name')) : null) ?? slug;
+    const metaAt = reader(LIST_META_HEADER);
+    const ownName = (meta ? cleanText(metaAt(meta, 'Name')) : null) ?? slug;
+    const memberName = member ? listName(ownName, t.name) : null;
+    if (memberName !== null && !lists.has(normListName(memberName))) {
+      const description = meta ? cleanText(metaAt(meta, 'Description')) : null;
+      lists.set(normListName(memberName), { name: memberName, ...(description ? { description } : {}) });
+    }
     const at = reader(LIST_FILMS_HEADER);
     let n = 0;
     rows.slice(split + 1).forEach((cells, i) => {
@@ -283,13 +331,16 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
       const rawYear = (at(cells, 'Year') ?? '').trim();
       let f = films.get(uri);
       if (!f) {
-        f = { uri, title, year: /^\d{4}$/.test(rawYear) ? Number(rawYear) : null, rawYear, watched: false, watchlist: false, ratingsRow: false };
+        f = { uri, title, year: /^\d{4}$/.test(rawYear) ? Number(rawYear) : null, rawYear, watched: false, watchlist: false, ratingsRow: false, lists: new Map() };
         films.set(uri, f);
       }
-      f.ownedList ??= listName;
+      if (owned) f.ownedList ??= ownName;
+      if (memberName !== null) joinList(f, memberName);
       n++;
     });
-    notices.push(`${t.name}: ${n} film${n === 1 ? '' : 's'} marked owned (list "${listName}")`);
+    const films_ = `${n} film${n === 1 ? '' : 's'}`;
+    if (owned) notices.push(`${t.name}: ${films_} marked owned (list "${ownName}")`);
+    if (memberName !== null) notices.push(`${t.name}: ${films_} in the list "${memberName}"`);
   }
 
   // Diary entries attach to the film with exactly their Name and Year.
@@ -316,6 +367,11 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
         rawYear,
         watchedDate: isoDate(at(cells, 'Watched Date')),
         date: isoDate(at(cells, 'Date')),
+        rewatch: (at(cells, 'Rewatch') ?? '').trim().toLowerCase() === 'yes',
+        tags: (at(cells, 'Tags') ?? '')
+          .split(',')
+          .map((x) => x.trim())
+          .filter(Boolean),
         order: i,
       };
       const r = halfStars(at(cells, 'Rating'));
@@ -376,19 +432,30 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
       rec.sourceOwnedRaw = f.ownedList;
     } else rec.ownedIfNew = false;
 
-    if (f.watched || entries.length) {
-      rec.status = 'watched';
-      const watchedAt = entries.map((e) => e.watchedDate).find((d) => d !== null);
-      if (watchedAt) {
-        rec.watchedAt = watchedAt;
-        rec.watchedEra = eraOf(watchedAt);
-      } else if (inp.diary && !entries.length && !unsure.has(f.uri)) {
-        // The diary was read and has no entry for this film (the user deleted
-        // it), so a date an earlier Letterboxd import set is cleared. A date
-        // the user or another source set is kept (see clearWatchedAtIfOwn).
-        rec.clearWatchedAtIfOwn = true;
+    if (f.watched || entries.length) rec.status = 'watched';
+    else rec.statusIfNew = 'queue';
+    if (entries.length) {
+      rec.viewings = entries.map(
+        (e): ImportViewing => ({ watchedAt: e.watchedDate, rewatch: e.rewatch, rating: e.rating ?? null, sourceRef: e.uri }),
+      );
+    }
+    // The diary was read and every entry that may be this film's was
+    // attached: these are its whole Letterboxd history, so an entry deleted
+    // on Letterboxd goes (and with no entry left, every Letterboxd play of
+    // the film). Plays you logged and other sources' plays stay.
+    if (inp.diary && !unsure.has(f.uri)) {
+      rec.viewings ??= [];
+      rec.viewingsComplete = true;
+    }
+    if (opts.tagsAsLists) {
+      for (const e of entries) {
+        for (const tag of e.tags) {
+          const name = listName(tag, `${inp.diary?.name ?? 'diary.csv'} tag`);
+          if (name !== null) joinList(f, name);
+        }
       }
-    } else rec.statusIfNew = 'queue';
+    }
+    if (f.lists.size) rec.lists = [...f.lists.values()];
 
     // ratings.csv decides when the film has a row there, even a blank one;
     // only a film with no ratings row takes its latest diary entry's rating,
@@ -402,7 +469,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
     }
     records.push(rec);
   }
-  return records;
+  return { records, lists: [...lists.values()] };
 }
 
 function countRows(source: LetterboxdSource, path: string, warnings: string[]): number {
@@ -450,12 +517,27 @@ export function parseLetterboxdExport(source: LetterboxdSource, opts: Letterboxd
   inputs.diary = open('diary.csv');
   if (opts.watchlist !== false) inputs.watchlist = open('watchlist.csv');
   if (opts.withReviews) inputs.reviews = open('reviews.csv');
-  for (const raw of opts.ownedLists ?? []) {
+  // The lists named (owned or as lists) must exist; with allLists every list file is read.
+  const slugs = new Map<string, string>();
+  for (const raw of [...(opts.ownedLists ?? []), ...(opts.memberLists ?? [])]) {
     const slug = cleanListSlug(raw);
+    if (!has(`lists/${slug}.csv`)) throw new ImportError(`No list "${slug}" in the export (looked for lists/${slug}.csv). Nothing was imported.`);
+    if (!slugs.has(slug.toLowerCase())) slugs.set(slug.toLowerCase(), slug);
+  }
+  if (opts.allLists) {
+    // The rest of the lists folder, in name order (archive and folder order varies).
+    const prefix = `${root}lists/`.toLowerCase();
+    const rest = source.paths
+      .filter((p) => p.toLowerCase().startsWith(prefix) && !p.slice(prefix.length).includes('/') && /\.csv$/i.test(p))
+      .map((p) => p.slice(prefix.length).replace(/\.csv$/i, ''))
+      .sort((x, y) => x.localeCompare(y));
+    for (const slug of rest) if (!slugs.has(slug.toLowerCase())) slugs.set(slug.toLowerCase(), slug);
+  }
+  for (const slug of slugs.values()) {
+    const role = listRole(slug, opts);
+    if (!role.owned && !role.member) continue;
     const name = `lists/${slug}.csv`;
-    const path = has(name);
-    if (!path) throw new ImportError(`No list "${slug}" in the export (looked for ${name}). Nothing was imported.`);
-    inputs.lists.push({ slug, table: table(name, decode(name, source.read(path), warnings)) });
+    inputs.lists.push({ slug, table: table(name, decode(name, source.read(has(name) as string), warnings)), ...role });
   }
 
   const skipped = {
@@ -465,8 +547,8 @@ export function parseLetterboxdExport(source: LetterboxdSource, opts: Letterboxd
   if (skipped.deleted) notices.push(`Skipped ${skipped.deleted} deleted diary entr${skipped.deleted === 1 ? 'y' : 'ies'} (deleted/).`);
   if (skipped.orphaned) notices.push(`Skipped ${skipped.orphaned} diary entr${skipped.orphaned === 1 ? 'y' : 'ies'} for films Letterboxd no longer lists (orphaned/).`);
 
-  const records = buildRecords(inputs, opts, warnings, notices);
-  return { records, warnings, notices, skipped };
+  const { records, lists } = buildRecords(inputs, opts, warnings, notices);
+  return { records, warnings, notices, skipped, ...(lists.length ? { lists } : {}) };
 }
 
 const LOOSE_NAMES = new Set(['watched.csv', 'ratings.csv', 'diary.csv', 'watchlist.csv', 'reviews.csv']);
@@ -476,13 +558,12 @@ const NEVER_DIRS = new Set(['deleted', 'orphaned', 'likes']);
  * Which loose files to open, decided from their paths alone so nothing else
  * is read: a file in deleted/, orphaned/ or likes/ never is; reviews.csv only
  * with `withReviews`, watchlist.csv unless `watchlist` is false; a list only
- * when `ownedLists` names it. With `byName` (`import letterboxd`), any other
+ * when `ownedLists` or `memberLists` names it, or with `allLists`. With `byName` (`import letterboxd`), any other
  * name is left unopened too (profile.csv, comments.csv, unnamed lists);
  * without it (plain import, which has already read the one file to detect
  * its format) the file's columns decide what it is.
  */
 export function chooseLooseFiles(paths: string[], opts: LetterboxdOptions = {}, byName = true): { open: string[]; warnings: string[]; notices: string[] } {
-  const owned = new Set((opts.ownedLists ?? []).map((v) => cleanListSlug(v).toLowerCase()));
   const open: string[] = [];
   const warnings: string[] = [];
   const notices: string[] = [];
@@ -495,11 +576,13 @@ export function chooseLooseFiles(paths: string[], opts: LetterboxdOptions = {}, 
       continue;
     }
     // A file in a lists/ folder is a list, whatever its name (lists/watchlist.csv
-    // is a list called watchlist), and is opened only when --owned-list names
-    // it; a list name never reaches a file outside lists/ (profile.csv).
+    // is a list called watchlist), and is opened only when --owned-list or
+    // --list names it, or with --lists; a list name never reaches a file
+    // outside lists/ (profile.csv).
     if (parts[parts.length - 1]?.toLowerCase() === 'lists') {
-      if (byName && !owned.has(base.replace(/\.csv$/, ''))) {
-        warnings.push(`${path}: a list that --owned-list does not name, so it was not opened`);
+      const role = listRole(base.replace(/\.csv$/, ''), opts);
+      if (byName && !role.owned && !role.member) {
+        warnings.push(`${path}: a list that --owned-list and --list do not name (and no --lists), so it was not opened`);
         continue;
       }
       open.push(path);
@@ -514,7 +597,7 @@ export function chooseLooseFiles(paths: string[], opts: LetterboxdOptions = {}, 
       continue;
     }
     if (byName && !LOOSE_NAMES.has(base)) {
-      warnings.push(`${path}: not a file this import reads (watched.csv, ratings.csv, diary.csv, watchlist.csv, reviews.csv or a lists/ file named with --owned-list), so it was not opened`);
+      warnings.push(`${path}: not a file this import reads (watched.csv, ratings.csv, diary.csv, watchlist.csv, reviews.csv or a lists/ file named with --owned-list or --list), so it was not opened`);
       continue;
     }
     open.push(path);
@@ -529,7 +612,7 @@ export function parseLetterboxdFiles(files: { name: string; text: string }[], op
   const notices: string[] = [];
   const inputs: Inputs = { lists: [] };
   // List slugs compare without case, as the whole-export reader finds files.
-  const owned = new Set((opts.ownedLists ?? []).map((v) => cleanListSlug(v).toLowerCase()));
+  const named = new Set([...(opts.ownedLists ?? []), ...(opts.memberLists ?? [])].map((v) => cleanListSlug(v).toLowerCase()));
   const found = new Set<string>();
   for (const f of files) {
     const t = table(f.name, f.text);
@@ -537,10 +620,12 @@ export function parseLetterboxdFiles(files: { name: string; text: string }[], op
     if (kind === null) throw new ImportError(`${f.name}: not a Letterboxd export file (watched, ratings, diary, watchlist, reviews or a list)`);
     if (kind === 'list') {
       const slug = basename(f.name).replace(/\.csv$/i, '');
-      if (owned.has(slug.toLowerCase())) {
-        inputs.lists.push({ slug, table: t });
+      const role = listRole(slug, opts);
+      if (found.has(slug.toLowerCase())) throw new ImportError(`${f.name}: the list ${slug} was given twice; import one export at a time`);
+      if (role.owned || role.member) {
+        inputs.lists.push({ slug, table: t, ...role });
         found.add(slug.toLowerCase());
-      } else warnings.push(`${f.name}: a list that --owned-list does not name, so it was ignored`);
+      } else warnings.push(`${f.name}: a list that --owned-list and --list do not name (and no --lists), so it was ignored`);
       continue;
     }
     if (inputs[kind]) throw new ImportError(`${f.name}: two ${kind} files were given; import one export at a time`);
@@ -551,11 +636,11 @@ export function parseLetterboxdFiles(files: { name: string; text: string }[], op
     }
     inputs[kind] = t;
   }
-  for (const slug of owned) {
-    if (!found.has(slug)) throw new ImportError(`--owned-list ${slug}: pass its file (lists/${slug}.csv) too, or import the whole export folder or ZIP. Nothing was imported.`);
+  for (const slug of named) {
+    if (!found.has(slug)) throw new ImportError(`List ${slug}: pass its file (lists/${slug}.csv) too, or import the whole export folder or ZIP. Nothing was imported.`);
   }
-  const records = buildRecords(inputs, opts, warnings, notices);
-  return { records, warnings, notices, skipped: { deleted: 0, orphaned: 0 } };
+  const { records, lists } = buildRecords(inputs, opts, warnings, notices);
+  return { records, warnings, notices, skipped: { deleted: 0, orphaned: 0 }, ...(lists.length ? { lists } : {}) };
 }
 
 /** Size caps for reading an export ZIP: one entry, and all the entries read together. */

@@ -16,10 +16,17 @@
  *   finds the same item; the IMDb id is a hint, checked against the catalog.
  * - Only movies come in. TV rows are counted; a row whose movie is null (a
  *   title deleted from Trakt) is skipped with a warning.
- * - Watched: any play in the history, or plays in watched-movies. The date is
- *   the latest play, as a local date. Plays dated at the epoch or before 1900
- *   are watched with no date, and when 10 or more plays share one second
- *   (a bulk "I've seen these" log) those dates are dropped too, unless asked.
+ * - Watched: any play in the history, or plays in watched-movies. Every
+ *   history play is a play (`viewings`) on its local date, with its history
+ *   id as its ref, a decimal string read from the JSON text itself (the ids
+ *   are int64 and can pass 2^53, so they are never parsed to a number).
+ *   Plays dated at the epoch or before 1900 are plays with no date, and when
+ *   10 or more plays share one second (a bulk "I've seen these" log) those
+ *   dates are dropped too, unless asked. The history is the movie's whole
+ *   Trakt history (`viewingsComplete`), so a play deleted on Trakt goes,
+ *   unless `_errors.json` (or a damaged page) says the history is incomplete
+ *   or the export has none: then the plays it does have, plus one play at
+ *   watched-movies' last_watched_at, are added and nothing is removed.
  * - The watchlist puts a NEW movie in the queue (`statusIfNew`), so it never
  *   moves an existing item, a watched one included. Watched beats watchlist.
  * - A rating is just a rating (1 to 10); it never means watched.
@@ -34,7 +41,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { Status } from '../types.js';
 import { listZip } from '../zip.js';
-import { cleanTconst, eraOf, ImportError, type ImportRecord, type ParsedImport } from './common.js';
+import { cleanTconst, ImportError, type ImportRecord, type ImportViewing, type ParsedImport } from './common.js';
 
 /** The export files the importer reads, by name stem. */
 export const TRAKT_KINDS = ['watched-history', 'watched-movies', 'ratings-movies', 'lists-watchlist', 'collection-movies'] as const;
@@ -228,8 +235,8 @@ interface Acc {
   year: number | null;
   imdb: string | null;
   traktId: number;
-  /** History plays: epoch ms, or null for an unknown date. */
-  plays: (number | null)[];
+  /** History plays: epoch ms (null for an unknown date) and the play's history id as a decimal string. */
+  plays: { t: number | null; ref: string | null }[];
   /** watched-movies: plays and its last-watched time. */
   wmPlays: number;
   wmLast: number | null;
@@ -253,6 +260,23 @@ function playTime(v: unknown): number | null {
 function localDate(ms: number, fmt: Intl.DateTimeFormat): string {
   const parts = Object.fromEntries(fmt.formatToParts(new Date(ms)).map((p) => [p.type, p.value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+/**
+ * JSON.parse reviver for history pages: a row's own `id` (the play's int64
+ * history id, the only `id` beside `watched_at`) is replaced by its exact
+ * source text, so an id past 2^53 is never rounded.
+ */
+function keepPlayIds(this: unknown, key: string, value: unknown, context?: { source?: string }): unknown {
+  if (key === 'id' && typeof value === 'number' && isObj(this) && 'watched_at' in this && typeof context?.source === 'string') return context.source;
+  return value;
+}
+
+/** A history id as a decimal string (its source text, or a safe integer), or null. */
+function playRef(v: unknown): string | null {
+  if (typeof v === 'string' && /^[1-9]\d{0,19}$/.test(v)) return v;
+  if (typeof v === 'number' && Number.isSafeInteger(v) && v > 0) return String(v);
+  return null;
 }
 
 /** The 10-plays-in-one-second threshold for a bulk log. */
@@ -336,7 +360,8 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   }
 
   const accs = new Map<number, Acc>();
-  const seenPlays = new Set<number>();
+  const seenPlays = new Set<string>();
+  let historyRead = false;
 
   /**
    * The movie a row is about, or null (TV, deleted, malformed: counted or
@@ -395,7 +420,8 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
     for (const page of list) {
       let rows: unknown;
       try {
-        rows = JSON.parse(page.text.replace(/^\uFEFF/, ''));
+        // A history row's own id is kept as its source text (an int64 can pass 2^53).
+        rows = kind === 'watched-history' ? JSON.parse(page.text.replace(/^\uFEFF/, ''), keepPlayIds) : JSON.parse(page.text.replace(/^\uFEFF/, ''));
       } catch {
         warnings.push(`${page.name}: not valid JSON, so your ${KIND_LABEL[kind]} from it were skipped and the import is incomplete`);
         incomplete.add(KIND_LABEL[kind]);
@@ -406,6 +432,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
         incomplete.add(KIND_LABEL[kind]);
         continue;
       }
+      if (kind === 'watched-history') historyRead = true;
       const deleted = { n: 0 };
       rows.forEach((row, i) => {
         const where = `${page.name} row ${i + 1}`;
@@ -414,12 +441,12 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
           const acc = movieOf(row, where, deleted, true);
           if (!acc) return;
           // A repeated play (the export can fetch past the last page) counts once.
-          const id = (row as Row).id;
-          if (typeof id === 'number' && Number.isSafeInteger(id)) {
-            if (seenPlays.has(id)) return;
-            seenPlays.add(id);
+          const ref = playRef((row as Row).id);
+          if (ref !== null) {
+            if (seenPlays.has(ref)) return;
+            seenPlays.add(ref);
           }
-          acc.plays.push(playTime((row as Row).watched_at));
+          acc.plays.push({ t: playTime((row as Row).watched_at), ref });
         } else if (kind === 'watched-movies') {
           const plays = isObj(row) ? row.plays : undefined;
           if (typeof plays !== 'number' || !(plays > 0)) return;
@@ -465,7 +492,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
     const bump = (sec: number) => n.set(sec, (n.get(sec) ?? 0) + 1);
     for (const a of accs.values()) {
       const secs = new Set<number>();
-      for (const t of a.plays) {
+      for (const { t } of a.plays) {
         if (t === null) continue;
         const sec = Math.floor(t / 1000);
         secs.add(sec);
@@ -477,6 +504,8 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   }
   const usable = (t: number | null): t is number => t !== null && !bulk.has(Math.floor(t / 1000));
 
+  // The history is each movie's whole Trakt history only when it was read and nothing says it is incomplete.
+  const historyComplete = historyRead && !incomplete.has('watch history');
   let bulkDated = 0;
   const records: ImportRecord[] = [];
   for (const a of accs.values()) {
@@ -491,23 +520,18 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
     const watched = a.plays.length > 0 || a.wmPlays > 0;
     if (watched) {
       rec.status = 'watched' satisfies Status;
-      // The latest history play; watched-movies' last play only when the history has none to use.
-      let at: number | null = null;
-      for (const t of a.plays) if (usable(t) && (at === null || t > at)) at = t;
-      if (at === null && usable(a.wmLast)) at = a.wmLast;
-      const anyKnown = a.wmLast !== null || a.plays.some((t) => t !== null);
-      if (at === null && anyKnown) {
-        bulkDated++;
-        // An earlier, partial export may have given this movie one of these
-        // dates before the log was big enough to count as bulk: clear it, but
-        // only if Trakt set it (never a date you or another source set).
-        rec.clearWatchedAtIfOwn = true;
+      const day = (t: number | null) => (usable(t) ? localDate(t, fmt) : null);
+      const viewings: ImportViewing[] = a.plays.map((p) => ({ watchedAt: day(p.t), sourceRef: p.ref }));
+      if (!historyComplete || !a.plays.length) {
+        // No whole history to go by: watched-movies' last play stands in (once
+        // per day; the history's play of that day, when it has one, is it).
+        const last = day(a.wmLast);
+        if (a.wmPlays > 0 && !(a.plays.length && last === null) && !viewings.some((v) => v.watchedAt === last)) viewings.push({ watchedAt: last });
       }
-      if (at !== null) {
-        const date = localDate(at, fmt);
-        rec.watchedAt = date;
-        rec.watchedEra = eraOf(date);
-      }
+      rec.viewings = viewings;
+      if (historyComplete && a.plays.length) rec.viewingsComplete = true;
+      const anyKnown = a.wmLast !== null || a.plays.some((p) => p.t !== null);
+      if (anyKnown && !viewings.some((v) => v.watchedAt !== null)) bulkDated++;
     } else if (a.watchlist) rec.statusIfNew = 'queue';
 
     if (a.ratings.length) {

@@ -13,6 +13,7 @@ import { applyImport, detectFormat, ImportError, parseImportDetailed, type Impor
 import { parseTrakt, readTraktExport, traktFileOf, type TraktFile, type TraktOptions } from '../src/core/importers/trakt.js';
 import { LIBRARY_COLUMNS, rowToItem, updateItem, type LibraryRow } from '../src/core/library.js';
 import type { LibraryItem } from '../src/core/types.js';
+import { addViewing, viewingsOf } from '../src/core/viewings.js';
 import { listZip } from '../src/core/zip.js';
 import { COMETS, COPPER, DUNE, exportFiles, GLASS, makeZip, SALT, toBytes } from './fixtures/trakt-export.js';
 
@@ -51,6 +52,14 @@ const parse = (files: Record<string, unknown>, opts: TraktOptions = {}) =>
     { timeZone: 'UTC', ...opts },
   );
 const rec = (records: ImportRecord[], traktId: number) => records.find((r) => r.externalIds?.trakt === String(traktId));
+/**
+ * 0.4.0: a record carries every play (viewings) instead of one watchedAt and
+ * era; the latest dated play is what the item's watched date becomes, and the
+ * era follows it in the library. These read the old facts off the plays.
+ */
+const latest = (r: ImportRecord | undefined): string | undefined =>
+  (r?.viewings ?? []).map((v) => v.watchedAt).filter((d): d is string => d !== null).sort().pop();
+const eraOf = (d: string | undefined) => (d === undefined ? undefined : Number(d.slice(0, 4)) < 2010 ? 'long-ago' : Number(d.slice(0, 4)) < 2020 ? '2010s' : '2020s');
 
 function folder(files: Record<string, unknown>): string {
   const dir = join(tmp, `export-${++n}`);
@@ -195,8 +204,11 @@ describe('parsing', () => {
       ownedIfNew: false,
       fillOnly: true,
       status: 'watched',
-      watchedAt: '2024-02-10',
-      watchedEra: '2020s',
+      viewings: [
+        { watchedAt: '2024-02-10', sourceRef: '9001' },
+        { watchedAt: '2023-05-01', sourceRef: '9002' },
+      ],
+      viewingsComplete: true,
       myRating: 8,
     });
     // Watchlist only: a new item goes in the queue, an existing one keeps its status.
@@ -210,12 +222,14 @@ describe('parsing', () => {
     expect(rec(res.records, 104)).toMatchObject({ owned: true, sourceOwnedRaw: 'trakt:collection', sourceYear: 2011 });
     expect(rec(res.records, 104)?.ownedIfNew).toBeUndefined();
     // watched-movies alone: watched with its last date; a null year is left out.
-    expect(rec(res.records, 105)).toMatchObject({ status: 'watched', watchedAt: '2015-06-01', watchedEra: '2010s' });
+    expect(rec(res.records, 105)).toMatchObject({ status: 'watched', viewings: [{ watchedAt: '2015-06-01' }] });
+    // Not in the history, so its one play is not a complete set.
+    expect(rec(res.records, 105)?.viewingsComplete).toBeUndefined();
     expect(rec(res.records, 105)).not.toHaveProperty('sourceYear');
     // An epoch-zero play is watched with no date.
     expect(rec(res.records, 106)).toMatchObject({ status: 'watched', sourceYear: 1994 });
-    expect(rec(res.records, 106)).not.toHaveProperty('watchedAt');
-    expect(rec(res.records, 106)).not.toHaveProperty('watchedEra');
+    expect(latest(rec(res.records, 106))).toBeUndefined();
+    expect(rec(res.records, 106)?.viewings?.length).toBeGreaterThan(0);
     for (const r of res.records) {
       if (r.externalIds?.trakt !== '104') {
         expect(r.owned).toBeUndefined();
@@ -236,7 +250,7 @@ describe('parsing', () => {
 
   it('gives the watch date in the time zone asked for (local by default)', () => {
     const denver = parse(exportFiles(), { timeZone: 'America/Denver' });
-    expect(rec(denver.records, 101)?.watchedAt).toBe('2024-02-09');
+    expect(latest(rec(denver.records, 101))).toBe('2024-02-09');
   });
 
   it('rejects ratings that are not whole numbers from 1 to 10', () => {
@@ -262,7 +276,7 @@ describe('parsing', () => {
     });
     expect(res.bulkDated).toBe(0);
     expect(res.records.map((r) => r.sourceTitle)).toEqual(Array.from({ length: 9 }, (_, i) => `Bulk Reel ${i + 1}`));
-    expect(res.records.every((r) => r.watchedAt === '2019-01-01')).toBe(true);
+    expect(res.records.every((r) => latest(r) === '2019-01-01' && r.viewings?.length === 1)).toBe(true);
   });
 
   it('treats 10 or more plays at the same second as bulk-logged: watched, but no date or era', () => {
@@ -273,17 +287,16 @@ describe('parsing', () => {
     expect(bulk).toHaveLength(10);
     for (const r of bulk) {
       expect(r.status).toBe('watched');
-      expect(r).not.toHaveProperty('watchedAt');
-      expect(r).not.toHaveProperty('watchedEra');
-      expect(r.clearWatchedAtIfOwn).toBe(true);
+      // A bulk play is still a play, with its ref, but no date.
+      expect(r.viewings).toEqual([{ watchedAt: null, sourceRef: expect.stringMatching(/^\d+$/) as unknown }]);
+      expect(r.viewingsComplete).toBe(true);
     }
-    expect(rec(res.records, 101)).toMatchObject({ watchedAt: '2021-03-03', watchedEra: '2020s' });
-    expect(rec(res.records, 101)).not.toHaveProperty('clearWatchedAtIfOwn');
+    expect(latest(rec(res.records, 101))).toBe('2021-03-03');
     expect(res.notices.join('\n')).toMatch(/10 watched movies/);
 
     const kept = parse(files, { keepBulkDates: true });
     expect(kept.bulkDated).toBe(0);
-    expect(kept.records.filter((r) => r.watchedAt === '2019-01-01')).toHaveLength(10);
+    expect(kept.records.filter((r) => latest(r) === '2019-01-01')).toHaveLength(10);
   });
 
   it('a movie with a real play and a bulk-logged one keeps the real date', () => {
@@ -294,7 +307,9 @@ describe('parsing', () => {
         { id: 2, watched_at: '2012-07-07T12:00:00.000Z', action: 'watch', type: 'movie', movie: (plays[0] as { movie: unknown }).movie },
       ],
     });
-    expect(res.records.find((r) => r.sourceTitle === 'Bulk Reel 1')).toMatchObject({ watchedAt: '2012-07-07', watchedEra: '2010s' });
+    const reel = res.records.find((r) => r.sourceTitle === 'Bulk Reel 1');
+    expect(latest(reel)).toBe('2012-07-07');
+    expect(reel?.viewings).toHaveLength(2);
   });
 
   it('maps watch years to eras', () => {
@@ -302,11 +317,10 @@ describe('parsing', () => {
     const res = parse({
       'watched-history.json': [play(1, '2009-12-31T12:00:00.000Z', GLASS), play(2, '2010-01-01T12:00:00.000Z', SALT), play(3, '1899-05-05T12:00:00.000Z', DUNE)],
     });
-    expect(rec(res.records, 101)).toMatchObject({ watchedEra: 'long-ago' });
-    expect(rec(res.records, 102)).toMatchObject({ watchedEra: '2010s' });
+    expect(eraOf(latest(rec(res.records, 101)))).toBe('long-ago');
+    expect(eraOf(latest(rec(res.records, 102)))).toBe('2010s');
     // Before 1900 counts as an unknown date.
-    expect(rec(res.records, 103)).toMatchObject({ status: 'watched' });
-    expect(rec(res.records, 103)).not.toHaveProperty('watchedAt');
+    expect(rec(res.records, 103)).toMatchObject({ status: 'watched', viewings: [{ watchedAt: null, sourceRef: '3' }] });
   });
 
   it('never lets one bad row or file stop the import', () => {
@@ -323,7 +337,7 @@ describe('parsing', () => {
     });
     expect(res.records.map((r) => r.sourceTitle)).toEqual(['Paper Comets']);
     expect(rec(res.records, 106)).toMatchObject({ status: 'watched' });
-    expect(rec(res.records, 106)).not.toHaveProperty('watchedAt');
+    expect(latest(rec(res.records, 106))).toBeUndefined();
     expect(res.warnings.join('\n')).toMatch(/ratings-movies\.json/);
     expect(res.warnings.join('\n')).toMatch(/lists-watchlist\.json/);
   });
@@ -331,7 +345,7 @@ describe('parsing', () => {
   it('a timestamp past year 9998 is an unknown date, never a broken one', () => {
     const res = parse({ 'watched-history.json': [{ id: 1, watched_at: '+010000-01-01T00:00:00.000Z', action: 'watch', type: 'movie', movie: GLASS }] });
     expect(rec(res.records, 101)).toMatchObject({ status: 'watched' });
-    expect(rec(res.records, 101)).not.toHaveProperty('watchedAt');
+    expect(latest(rec(res.records, 101))).toBeUndefined();
     expect(() => applyImport(db, res.records, { mode: 'merge' })).not.toThrow();
   });
 
@@ -364,7 +378,8 @@ describe('parsing', () => {
       ],
     });
     expect(rec(res.records, 702)).toMatchObject({ sourceYear: 2020, status: 'watched' });
-    expect(rec(res.records, 102)).toMatchObject({ status: 'watched', watchedAt: '2022-01-01' });
+    expect(rec(res.records, 102)).toMatchObject({ status: 'watched' });
+    expect(latest(rec(res.records, 102))).toBe('2022-01-01');
   });
 
   it('the history decides the date; watched-movies is only the fallback', () => {
@@ -372,7 +387,8 @@ describe('parsing', () => {
       'watched-history.json': [{ id: 1, watched_at: '2020-05-05T12:00:00.000Z', action: 'watch', type: 'movie', movie: GLASS }],
       'watched-movies.json': [{ plays: 3, last_watched_at: '2025-01-01T12:00:00.000Z', movie: GLASS }],
     });
-    expect(rec(res.records, 101)).toMatchObject({ watchedAt: '2020-05-05' });
+    // A whole history: its plays only, as a complete set.
+    expect(rec(res.records, 101)).toMatchObject({ viewings: [{ watchedAt: '2020-05-05', sourceRef: '1' }], viewingsComplete: true });
   });
 
   it('bulk detection counts history and watched-movies times together, each movie once', () => {
@@ -387,7 +403,7 @@ describe('parsing', () => {
     const again = plays.map((p) => ({ plays: 1, last_watched_at: at, movie: p.movie }));
     const res = parse({ 'watched-history.json': plays, 'watched-movies.json': [...others, ...again] });
     expect(res.bulkDated).toBe(10);
-    expect(res.records.every((r) => r.watchedAt === undefined)).toBe(true);
+    expect(res.records.every((r) => latest(r) === undefined)).toBe(true);
     const nine = parse({ 'watched-history.json': plays, 'watched-movies.json': [...others.slice(0, 4), ...again] });
     expect(nine.bulkDated).toBe(0);
   });
@@ -447,7 +463,8 @@ describe('parsing', () => {
       movie: GLASS,
     }));
     const res = parse({ 'watched-history.json': plays });
-    expect(rec(res.records, 101)).toMatchObject({ watchedAt: plays[plays.length - 1]?.watched_at.slice(0, 10) });
+    expect(latest(rec(res.records, 101))).toBe(plays[plays.length - 1]?.watched_at.slice(0, 10));
+    expect(rec(res.records, 101)?.viewings).toHaveLength(150_000);
   });
 
   it('ignores a malformed IMDb id but keeps the movie', () => {
@@ -467,7 +484,8 @@ describe('parsing', () => {
       { timeZone: 'UTC' },
     );
     expect(res.records).toHaveLength(1);
-    expect(res.records[0]).toMatchObject({ status: 'watched', watchedAt: '2024-01-02' });
+    expect(res.records[0]).toMatchObject({ status: 'watched' });
+    expect(latest(res.records[0])).toBe('2024-01-02');
     expect(res.records[0]?.statusIfNew).toBeUndefined();
   });
 });
@@ -491,8 +509,9 @@ describe('partial exports (_errors.json)', () => {
     expect(text).toMatch(/watched-movies/);
     expect(text).toMatch(/ratings.*incomplete/i);
     expect(res.warnings.filter((w) => /export/i.test(w)).length).toBeGreaterThanOrEqual(3);
-    // History failed, so watched comes from watched-movies, dates included.
-    expect(rec(res.records, 101)).toMatchObject({ status: 'watched', watchedAt: '2024-02-10' });
+    // History failed, so watched comes from watched-movies, its last play included, and nothing is a complete set.
+    expect(rec(res.records, 101)).toMatchObject({ status: 'watched', viewings: [{ watchedAt: '2024-02-10' }] });
+    expect(res.records.some((r) => r.viewingsComplete)).toBe(false);
   });
 
   it('warns when _errors.json itself cannot be read', () => {
@@ -672,6 +691,83 @@ describe('applying a Trakt import', () => {
     expect(items().map((i) => [i.sourceYear, i.myRating])).toEqual([
       [1990, 5],
       [2020, 6],
+    ]);
+  });
+});
+
+describe('history plays (0.4.0)', () => {
+  const play = (id: number | string, at: string, m: unknown = GLASS) => ({ id, watched_at: at, action: 'watch', type: 'movie', movie: m });
+  /** A history page as raw JSON text, so an id past 2^53 is written exactly. */
+  const page = (rows: { id: number | string; watched_at: string }[]) =>
+    `[${rows.map((r) => JSON.stringify({ ...r, id: 0 }).replace('"id":0', `"id":${String(r.id)}`)).join(',')}]`;
+  const glassPlays = () => {
+    const it = byTitle('The Glass Harbor')[0] as LibraryItem;
+    return viewingsOf(db, it.id).map((v) => [v.watchedAt, v.source, v.sourceRef]);
+  };
+
+  it('keeps int64 history ids exactly, as strings, and drops a repeat of one', () => {
+    const big = '9007199254740993';
+    const text = page([play(big, '2024-01-01T12:00:00.000Z'), play(big, '2024-01-01T12:00:00.000Z'), play('9007199254740995', '2024-02-02T12:00:00.000Z')]);
+    const res = parseTrakt([{ name: 'watched-history.json', text }], { timeZone: 'UTC' });
+    expect(rec(res.records, 101)?.viewings).toEqual([
+      { watchedAt: '2024-01-01', sourceRef: big },
+      { watchedAt: '2024-02-02', sourceRef: '9007199254740995' },
+    ]);
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(glassPlays()).toEqual([
+      ['2024-02-02', 'trakt', '9007199254740995'],
+      ['2024-01-01', 'trakt', big],
+    ]);
+  });
+
+  it('three plays, one in a bulk second of 10, one at the epoch: three plays, two dateless', () => {
+    const rows = [
+      play(1, '2018-04-04T12:00:00.000Z'),
+      play(2, '2019-01-01T00:00:00.000Z'),
+      play(3, '1970-01-01T00:00:00.000Z'),
+      ...(bulkPlays(9, '2019-01-01T00:00:00.000Z') as { id: number; watched_at: string }[]),
+    ];
+    const res = parse({ 'watched-history.json': rows });
+    expect(rec(res.records, 101)?.viewings).toEqual([
+      { watchedAt: '2018-04-04', sourceRef: '1' },
+      { watchedAt: null, sourceRef: '2' },
+      { watchedAt: null, sourceRef: '3' },
+    ]);
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(byTitle('The Glass Harbor')[0]).toMatchObject({ watchedAt: '2018-04-04', watchedEra: '2010s' });
+    expect(glassPlays()).toHaveLength(3);
+  });
+
+  it('a re-import changes nothing; a newer export without a play removes exactly it and keeps yours', () => {
+    const first = { 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z'), play(2, '2022-02-02T12:00:00.000Z')] };
+    applyImport(db, parse(first).records, { mode: 'merge' });
+    expect(applyImport(db, parse(first).records, { mode: 'merge' })).toMatchObject({ added: 0, updated: 0, unchanged: 1 });
+    const id = (byTitle('The Glass Harbor')[0] as LibraryItem).id;
+    addViewing(db, id, { watchedAt: '2020-01-01', source: 'manual', sourceRef: 'manual:00000000000000aa' });
+    addViewing(db, id, { watchedAt: '2021-01-01', source: 'letterboxd', sourceRef: 'https://boxd.it/e9' });
+    const s = applyImport(db, parse({ 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z')] }).records, { mode: 'merge' });
+    expect(s).toMatchObject({ updated: 1 });
+    expect(glassPlays()).toEqual([
+      ['2021-01-01', 'letterboxd', 'https://boxd.it/e9'],
+      ['2020-01-01', 'manual', 'manual:00000000000000aa'],
+      ['2018-04-04', 'trakt', '1'],
+    ]);
+  });
+
+  it('with the history incomplete, adds the plays it has plus last_watched_at and removes nothing', () => {
+    applyImport(db, parse({ 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z'), play(2, '2022-02-02T12:00:00.000Z')] }).records, { mode: 'merge' });
+    const partial = parse({
+      'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z')],
+      'watched-movies.json': [{ plays: 3, last_watched_at: '2024-05-05T12:00:00.000Z', movie: GLASS }],
+      '_errors.json': [{ endpoint: 'users/someone/history', error: 'HTTP 500', fetchedPages: 1, totalPages: 2 }],
+    });
+    expect(rec(partial.records, 101)).toMatchObject({ viewings: [{ watchedAt: '2018-04-04', sourceRef: '1' }, { watchedAt: '2024-05-05' }] });
+    expect(rec(partial.records, 101)?.viewingsComplete).toBeUndefined();
+    applyImport(db, partial.records, { mode: 'merge' });
+    expect(glassPlays()).toEqual([
+      ['2024-05-05', 'trakt', null],
+      ['2022-02-02', 'trakt', '2'],
+      ['2018-04-04', 'trakt', '1'],
     ]);
   });
 });

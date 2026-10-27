@@ -151,13 +151,28 @@ describe('parsing list exports', () => {
     expect(rec(records, 'tt9200001')).toMatchObject({ sourceTitle: 'Holiday Signal', statusIfNew: 'queue' });
   });
 
-  it('check-ins are watched; their dates are used only with checkinDates', () => {
+  // 0.4.0: a check-in with checkinDates is a play (viewings), no longer a watchedAt.
+  it('check-ins are watched; each is a play on its date only with checkinDates', () => {
     expect(rec(parse([file('watchlist.csv')], { as: 'checkins' }).records, 'tt9000004')).toMatchObject({ status: 'watched' });
-    expect(rec(parse([file('watchlist.csv')], { as: 'checkins' }).records, 'tt9000004')?.watchedAt ?? null).toBeNull();
+    expect(rec(parse([file('watchlist.csv')], { as: 'checkins' }).records, 'tt9000004')?.viewings).toBeUndefined();
     expect(rec(parse([file('watchlist.csv')], { as: 'checkins', checkinDates: true }).records, 'tt9000004')).toMatchObject({
       status: 'watched',
-      watchedAt: '2025-01-15',
+      viewings: [{ watchedAt: '2025-01-15' }],
     });
+    expect(rec(parse([file('watchlist.csv')], { as: 'checkins', checkinDates: true }).records, 'tt9000004')?.viewingsComplete).toBeUndefined();
+  });
+
+  it('check-ins of one film in two files are two plays', () => {
+    const row = (date: string) => `${LIST_HEADER}\n1,tt9000004,${date},${date},,"Seven Lanterns","Seven Lanterns",u,Movie,8.4,117,1995,"Crime",1,1995,"Dana Fincher",,\n`;
+    const res = parse([{ name: 'a.csv', text: row('2024-01-01') }, { name: 'b.csv', text: row('2025-02-02') }], { as: 'checkins', checkinDates: true });
+    expect(res.records).toHaveLength(1);
+    expect(res.records[0]?.viewings).toEqual([{ watchedAt: '2024-01-01' }, { watchedAt: '2025-02-02' }]);
+  });
+
+  it('--to-list puts a custom list in one of your lists', () => {
+    const { records } = parse([file('watchlist.csv')], { as: 'list', toList: 'Harbor nights' });
+    expect(records.every((r) => r.lists?.[0] === 'Harbor nights')).toBe(true);
+    expect(parse([file('watchlist.csv')], { as: 'watchlist', toList: 'x' }).records.some((r) => r.lists)).toBe(false);
   });
 
   it('a custom list sets no status and only names the collection given', () => {
@@ -186,7 +201,7 @@ describe('files saved again in a spreadsheet', () => {
     const decoded = decodeImdbFile(bytes);
     expect(decoded.warning).toMatch(/Windows-1252/);
     const res = parse([{ name: 'excel.csv', text: decoded.text }], { as: 'checkins', checkinDates: true });
-    expect(res.records.map((r) => [r.sourceTitle, r.watchedAt])).toEqual([
+    expect(res.records.map((r) => [r.sourceTitle, r.viewings?.[0]?.watchedAt])).toEqual([
       ['Seven Lanterns', '2025-05-29'],
       ['Café Marlow', '2025-06-03'],
     ]);
@@ -196,15 +211,15 @@ describe('files saved again in a spreadsheet', () => {
   it('lets any date column of the file decide the order of an ambiguous check-in date', () => {
     const text = `${LIST_HEADER}\n1,tt9000004,03/04/2025,13/04/2025,,"Seven Lanterns","Seven Lanterns",u,Movie,8.4,117,1995,"Crime",1,1995,"Dana Fincher",,\n`;
     const res = parse([{ name: 'l.csv', text }], { as: 'checkins', checkinDates: true });
-    expect(res.records[0]?.watchedAt).toBe('2025-04-03');
+    expect(res.records[0]?.viewings?.[0]?.watchedAt).toBe('2025-04-03');
     const rated = `${LIST_HEADER}\n1,tt9000004,03/04/2025,03/04/2025,,"Seven Lanterns","Seven Lanterns",u,Movie,8.4,117,1995,"Crime",1,1995,"Dana Fincher",8,04/25/2025\n`;
-    expect(parse([{ name: 'l.csv', text: rated }], { as: 'checkins', checkinDates: true }).records[0]?.watchedAt).toBe('2025-03-04');
+    expect(parse([{ name: 'l.csv', text: rated }], { as: 'checkins', checkinDates: true }).records[0]?.viewings?.[0]?.watchedAt).toBe('2025-03-04');
   });
 
   it('drops dates it cannot read as day-first or month-first, with a warning', () => {
     const text = `${LIST_HEADER}\n1,tt9000004,03/04/2025,03/04/2025,,"Seven Lanterns","Seven Lanterns",u,Movie,8.4,117,1995,"Crime",1,1995,"Dana Fincher",,\n`;
     const res = parse([{ name: 'l.csv', text }], { as: 'checkins', checkinDates: true });
-    expect(res.records[0]?.watchedAt ?? null).toBeNull();
+    expect(res.records[0]?.viewings).toBeUndefined();
     expect(res.warnings.join('\n')).toMatch(/date/i);
   });
 
