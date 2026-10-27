@@ -798,7 +798,8 @@ describe('0.4.0 foundation surface', () => {
 
   it('registers the 0.4.0 commands, each saying it is not built yet', () => {
     const help = run(['--help']);
-    for (const c of ['log', 'history', 'pick', 'where', 'lists', 'list', 'sync', 'config']) {
+    expect(help.stdout).toMatch(/^  sync /m); // built (Track C)
+    for (const c of ['log', 'history', 'pick', 'where', 'lists', 'list', 'config']) {
       expect(help.stdout).toMatch(new RegExp(`^  ${c} `, 'm'));
       const r = run([c], { home });
       expect(r.code, c).toBe(1);
