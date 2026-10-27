@@ -24,7 +24,9 @@
  *   is Letterboxd's own 10-point conversion. ratings.csv wins; the latest
  *   diary rating is used only for a film with no ratings row.
  * - The watched date and era come from the latest diary Watched Date only,
- *   never from watched.csv's Date (when the row was logged).
+ *   never from watched.csv's Date (when the row was logged). When the diary
+ *   was read and a watched film has no entry in it, the record asks to clear
+ *   the date only if an earlier Letterboxd import set it (clearWatchedAtIfOwn).
  * - Letterboxd has no idea of ownership in the export: `ownedIfNew: false`,
  *   never `owned`, except for films in a list the user names as owned.
  * - Descriptive fields (year, notes) only fill blanks (`fillOnly`).
@@ -36,7 +38,7 @@ import type { WatchedEra } from '../types.js';
 import { cleanText, ImportError, type ImportRecord, type ParsedImport } from './common.js';
 import { parseCsvRows } from './csv.js';
 import { decodeImdbFile } from './imdb.js';
-import { openZip, type ZipLimits } from './zip.js';
+import { listZip } from '../zip.js';
 
 export interface LetterboxdOptions {
   /** Take each film's latest non-blank review as its notes (fills blank notes only). */
@@ -287,6 +289,8 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
   }
   const entriesOf = new Map<string, DiaryEntry[]>();
   const entryFilm = new Map<string, string>();
+  // Films a diary entry may belong to but could not be attached to: their date is unknown, not absent.
+  const unsure = new Set<string>();
   let unplaced = 0;
   if (inp.diary) {
     const at = reader(inp.diary.rows[0] ?? []);
@@ -308,6 +312,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
       else if (r !== undefined) entry.rating = r;
       const matches = byNameYear.get(`${title}\u0000${rawYear}`) ?? [];
       if (matches.length > 1) {
+        for (const m of matches) unsure.add(m.uri);
         warnings.push(`${where}: ${matches.length} films are called "${title}"${rawYear ? ` (${rawYear})` : ''}, so this diary entry was not attached to either`);
         return;
       }
@@ -366,6 +371,11 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
       if (watchedAt) {
         rec.watchedAt = watchedAt;
         rec.watchedEra = eraOf(watchedAt);
+      } else if (inp.diary && !entries.length && !unsure.has(f.uri)) {
+        // The diary was read and has no entry for this film (the user deleted
+        // it), so a date an earlier Letterboxd import set is cleared. A date
+        // the user or another source set is kept (see clearWatchedAtIfOwn).
+        rec.clearWatchedAtIfOwn = true;
       }
     } else rec.statusIfNew = 'queue';
 
@@ -479,10 +489,49 @@ export function parseLetterboxdFiles(files: { name: string; text: string }[], op
   return { records, warnings, notices, skipped: { deleted: 0, orphaned: 0 } };
 }
 
-/** An export ZIP held in memory, read without extracting anything to disk. */
-export function zipSource(bytes: Uint8Array, limits?: ZipLimits): LetterboxdSource {
-  const zip = openZip(bytes, limits);
-  return { paths: zip.paths, read: (p) => zip.read(p) };
+/** Size caps for reading an export ZIP: one entry, and all the entries read together. */
+export interface ZipLimits {
+  maxEntryBytes: number;
+  maxTotalBytes: number;
+}
+
+export const DEFAULT_ZIP_LIMITS: ZipLimits = { maxEntryBytes: 64 * 1024 * 1024, maxTotalBytes: 256 * 1024 * 1024 };
+
+/** Whether the bytes start like a ZIP archive. */
+export function looksLikeZip(bytes: Uint8Array): boolean {
+  return bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+}
+
+/**
+ * An export ZIP held in memory, read with the shared ZIP reader
+ * (core/zip.ts) without extracting anything to disk. Entries whose names
+ * point outside the archive are skipped; an archive that names one file
+ * twice is refused, since either copy could be the one read.
+ */
+export function zipSource(bytes: Uint8Array, limits: ZipLimits = DEFAULT_ZIP_LIMITS): LetterboxdSource {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const entries = new Map<string, ReturnType<typeof listZip>[number]>();
+  const seen = new Set<string>();
+  for (const e of listZip(buf)) {
+    if (e.unsafe) continue;
+    const path = e.name.replace(/\\/g, '/');
+    const key = path.toLowerCase();
+    if (seen.has(key)) throw new ImportError(`The ZIP lists ${path} more than once, so it is not clear which copy to read.`);
+    seen.add(key);
+    entries.set(path, e);
+  }
+  let total = 0;
+  return {
+    paths: [...entries.keys()],
+    read: (p) => {
+      const e = entries.get(p);
+      if (!e) throw new ImportError(`${p} is not in the archive`);
+      if (total + e.size > limits.maxTotalBytes) throw new ImportError(`The archive is too large to read (over ${limits.maxTotalBytes} bytes)`);
+      const data = e.read(limits.maxEntryBytes);
+      total += data.length;
+      return data;
+    },
+  };
 }
 
 /**

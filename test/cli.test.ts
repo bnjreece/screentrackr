@@ -324,8 +324,23 @@ describe('import imdb', () => {
     expect(run(['import', 'imdb', join(EXPORTS, 'ratings-empty.csv'), '--json'], { home }).code).toBe(0);
   }, 60_000);
 
+  it('--dry-run reports what an import would do and changes nothing', () => {
+    importPaste();
+    const before = run(['export'], { home }).stdout;
+    const r = run(['import', 'imdb', RATINGS, '--dry-run', '--json'], { home });
+    expect(r.code, r.stderr).toBe(0);
+    expect(json<{ dryRun: boolean; added: number }>(r)).toMatchObject({ dryRun: true });
+    const text = run(['import', 'imdb', RATINGS, '--replace', '--dry-run'], { home });
+    expect(text.code, text.stderr).toBe(0);
+    expect(text.stdout).toMatch(/Dry run: nothing was changed/);
+    expect(text.stdout).toMatch(/Would add \d+/);
+    expect(text.stdout).not.toMatch(/Backup of the previous library/);
+    expect(JSON.parse(run(['export'], { home }).stdout).items).toEqual(JSON.parse(before).items);
+  }, 60_000);
+
   it('rejects flags that do not apply', () => {
     for (const args of [
+      ['import', PASTE, '--notes-from-description'],
       ['import', 'imdb'],
       ['import', 'imdb', RATINGS, '--format', 'csv'],
       ['import', 'imdb', WATCHLIST, '--as', 'favorites'],

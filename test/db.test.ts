@@ -54,11 +54,11 @@ describe('openDb', () => {
 
   it('creates the db file, dirs and the current schema version', () => {
     db = openDb(home);
-    expect(SCHEMA_VERSION).toBe(2);
+    expect(SCHEMA_VERSION).toBe(3);
     expect(existsSync(join(home, 'screentrackr.db'))).toBe(true);
     expect(existsSync(join(home, 'cache'))).toBe(true);
     expect(existsSync(join(home, 'backups'))).toBe(true);
-    expect(version(db)).toBe('2');
+    expect(version(db)).toBe('3');
     expect(db.home).toBe(home);
   });
 
@@ -83,7 +83,7 @@ describe('openDb', () => {
       .run();
     db.close();
     db = openDb(home);
-    expect(version(db)).toBe('2');
+    expect(version(db)).toBe('3');
     const n = db.sql.prepare('SELECT COUNT(*) AS n FROM library_items').get() as { n: number };
     expect(n.n).toBe(1);
   });
@@ -183,7 +183,7 @@ describe('migrating a version 1 database', () => {
 
       const db = openDb(home);
       try {
-        expect(db.sql.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({ value: '2' });
+        expect(db.sql.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({ value: '3' });
         expect(db.sql.prepare('SELECT id, source_title, status, watched_era, my_rating, source, owned, apple_persistent_id, added_at, updated_at FROM library_items ORDER BY id').all()).toEqual([
           { id: 7, source_title: 'The Glass Harbor', status: 'watched', watched_era: '2010s', my_rating: 8, source: 'paste', owned: 0, apple_persistent_id: 'A1', added_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-02T00:00:00.000Z' },
           { id: 12, source_title: 'Night Ferry', status: 'queue', watched_era: null, my_rating: null, source: 'csv', owned: 1, apple_persistent_id: null, added_at: '2026-01-03T00:00:00.000Z', updated_at: '2026-01-03T00:00:00.000Z' },
@@ -201,6 +201,39 @@ describe('migrating a version 1 database', () => {
         expect(db.sql.prepare('SELECT COUNT(*) AS n FROM match_candidates').get()).toEqual({ n: 0 });
         expect(db.sql.prepare('SELECT COUNT(*) AS n FROM item_external_ids').get()).toEqual({ n: 0 });
         expect(db.sql.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('migrating a version 2 database', () => {
+  it('adds the watched date source column, NULL for every existing item, keeping their dates', () => {
+    const home = mkdtempSync(join(tmpdir(), 'screentrackr-mig-'));
+    try {
+      mkdirSync(home, { recursive: true });
+      const raw = new sqlite.DatabaseSync(join(home, 'screentrackr.db'));
+      raw.exec('PRAGMA foreign_keys = ON');
+      raw.exec(MIGRATIONS[0] as string);
+      raw.exec(MIGRATIONS[1] as string);
+      raw.exec("INSERT INTO meta (key, value) VALUES ('schema_version', '2')");
+      raw.exec(`INSERT INTO library_items (id, source_title, status, watched_at, source) VALUES
+        (3, 'Night Ferry', 'watched', '2024-02-03', 'trakt'),
+        (4, 'The Glass Harbor', 'queue', NULL, 'imdb')`);
+      raw.exec("INSERT INTO item_external_ids (item_id, kind, value) VALUES (3, 'trakt', '901')");
+      raw.close();
+
+      const db = openDb(home);
+      try {
+        expect(db.sql.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({ value: '3' });
+        expect(db.sql.prepare('SELECT id, watched_at, watched_at_source FROM library_items ORDER BY id').all()).toEqual([
+          { id: 3, watched_at: '2024-02-03', watched_at_source: null },
+          { id: 4, watched_at: null, watched_at_source: null },
+        ]);
+        expect(db.sql.prepare('SELECT item_id, kind, value FROM item_external_ids').all()).toEqual([{ item_id: 3, kind: 'trakt', value: '901' }]);
       } finally {
         db.close();
       }

@@ -22,7 +22,8 @@ import {
 } from '../src/core/importers/letterboxd.js';
 import { LIBRARY_COLUMNS, rowToItem, type LibraryRow } from '../src/core/library.js';
 import type { LibraryItem } from '../src/core/types.js';
-import { folderEntries, makeZip } from './zip-writer.js';
+import { folderFiles } from './fixtures/folder-files.js';
+import { makeZip } from './fixtures/make-zip.js';
 
 const IMDB = join(import.meta.dirname, 'fixtures', 'imdb');
 const EXPORT = join(import.meta.dirname, 'fixtures', 'letterboxd', 'export');
@@ -219,8 +220,7 @@ describe('reading an export', () => {
 
   it('reads an empty or header-only watchlist', () => {
     for (const watchlist of ['', 'Date,Name,Year,Letterboxd URI\n']) {
-      const entries = folderEntries(EXPORT).filter((e) => e.path !== 'watchlist.csv');
-      const res = parseLetterboxdExport(zipSource(makeZip([...entries, { path: 'watchlist.csv', data: watchlist }])));
+      const res = parseLetterboxdExport(zipSource(makeZip({ ...folderFiles(EXPORT), 'watchlist.csv': Buffer.from(watchlist) })));
       expect(res.records).toHaveLength(10);
     }
   });
@@ -232,10 +232,10 @@ describe('ZIP exports', () => {
   it('reads a flat ZIP, a nested one and CRLF files exactly like the folder', () => {
     const folder = byUri(parseFolder({ withReviews: true, ownedLists: ['my-blu-rays'] }).records);
     const variants = [
-      makeZip(folderEntries(EXPORT)),
-      makeZip(folderEntries(EXPORT, 'letterboxd-example-2026-01-01-00-00-utc/')),
-      makeZip(folderEntries(EXPORT, '', crlf)),
-      makeZip(folderEntries(EXPORT).map((e) => ({ ...e, method: 0 as const }))),
+      makeZip(folderFiles(EXPORT)),
+      makeZip(folderFiles(EXPORT, 'letterboxd-example-2026-01-01-00-00-utc/')),
+      makeZip(folderFiles(EXPORT, '', crlf)),
+      makeZip(folderFiles(EXPORT), { store: true }),
     ];
     for (const zip of variants) {
       expect(byUri(parseLetterboxdExport(zipSource(zip), { withReviews: true, ownedLists: ['my-blu-rays'] }).records)).toEqual(folder);
@@ -249,28 +249,24 @@ describe('ZIP exports', () => {
     expect(() => exportRoot(['a/watched.csv', 'b/watched.csv'])).toThrow(/More than one/);
   });
 
-  it('refuses encrypted, ZIP64, damaged and oversized archives', () => {
-    const w = text('watched.csv');
-    expect(() => zipSource(makeZip([{ path: 'watched.csv', data: w, flags: 1 }]))).toThrow(/Encrypted/);
-    expect(() => zipSource(makeZip([{ path: 'watched.csv', data: w }], { entryCount: 0xffff }))).toThrow(/ZIP64/);
-    expect(() => zipSource(makeZip([{ path: 'watched.csv', data: w, declaredSize: 0xffffffff }]))).toThrow(/ZIP64/);
-    expect(() => zipSource(Buffer.from('PK\u0003\u0004 not really a zip'))).toThrow(/Not a readable ZIP/);
-    const crc = zipSource(makeZip([{ path: 'watched.csv', data: w, declaredCrc: 1 }]));
-    expect(() => crc.read('watched.csv')).toThrow(/damaged entry/);
-    // An entry that inflates past its declared size (a zip bomb) stops at the declared size.
-    const bomb = zipSource(makeZip([{ path: 'watched.csv', data: 'x'.repeat(1_000_000), declaredSize: 10 }]));
-    expect(() => bomb.read('watched.csv')).toThrow(/damaged entry/);
-    const limits = { maxEntryBytes: 100, maxTotalBytes: 150, maxEntries: 10 };
-    expect(() => zipSource(makeZip([{ path: 'watched.csv', data: 'x'.repeat(101) }]), limits).read('watched.csv')).toThrow(/too large/);
-    const two = zipSource(makeZip([{ path: 'a.csv', data: 'x'.repeat(100) }, { path: 'b.csv', data: 'x'.repeat(100) }]), limits);
+  // The reader itself (ZIP64, encryption, CRC, bombs) is tested in zip.test.ts; these cover how the importer uses it.
+  it('refuses a damaged archive and caps each entry and the total read', () => {
+    expect(() => zipSource(Buffer.from('PK\u0003\u0004 not really a zip'))).toThrow(ImportError);
+    const damaged = makeZip({ 'watched.csv': Buffer.from(text('watched.csv')) }, { store: true });
+    const at = 30 + 'watched.csv'.length;
+    damaged.writeUInt8((damaged.readUInt8(at) ^ 0xff) & 0xff, at);
+    expect(() => zipSource(damaged).read('watched.csv')).toThrow(/checksum|damaged/);
+    const limits = { maxEntryBytes: 100, maxTotalBytes: 150 };
+    expect(() => zipSource(makeZip({ 'watched.csv': Buffer.alloc(101, 0x78) }), limits).read('watched.csv')).toThrow(/too large/);
+    const two = zipSource(makeZip({ 'a.csv': Buffer.alloc(100, 0x78), 'b.csv': Buffer.alloc(100, 0x78) }), limits);
     two.read('a.csv');
     expect(() => two.read('b.csv')).toThrow(/too large/);
-    expect(() => zipSource(makeZip(Array.from({ length: 11 }, (_, i) => ({ path: `${i}.csv`, data: '' }))), limits)).toThrow(/more than 10 entries/);
   });
 
-  it('ignores entries whose names point outside the archive', () => {
-    const z = zipSource(makeZip([{ path: '../watched.csv', data: 'x' }, { path: '/etc/x.csv', data: 'x' }, { path: 'ok/watched.csv', data: 'x' }]));
+  it('ignores entries whose names point outside the archive, and refuses a name listed twice', () => {
+    const z = zipSource(makeZip({ '../watched.csv': Buffer.from('x'), '/etc/x.csv': Buffer.from('x'), 'ok/watched.csv': Buffer.from('x') }));
     expect(z.paths).toEqual(['ok/watched.csv']);
+    expect(() => zipSource(makeZip({ 'watched.csv': Buffer.from('x'), 'WATCHED.csv': Buffer.from('y') }))).toThrow(/more than once/);
   });
 });
 
@@ -395,5 +391,34 @@ describe('importing into a library', () => {
     const s = applyImport(db, renamed.records, { mode: 'merge' });
     expect(s.added).toBe(0);
     expect(item('Quiet Ledger')).toHaveLength(1);
+  });
+
+  it('asks to clear a watched date only when the diary was read and has no entry for the film', () => {
+    const { records } = parseFolder();
+    expect(rec(records, 'zZ5e')?.clearWatchedAtIfOwn).toBe(true); // Quiet Ledger: watched, no diary entry
+    expect(rec(records, 'zZ1a')?.clearWatchedAtIfOwn).toBeUndefined(); // has a diary date
+    expect(rec(records, 'zZ7a')?.clearWatchedAtIfOwn).toBeUndefined(); // Twin Rivers: its entry fits two films
+    expect(rec(records, 'zZ7b')?.clearWatchedAtIfOwn).toBeUndefined();
+    const loose = parseLetterboxdFiles([{ name: 'watched.csv', text: text('watched.csv') }]);
+    expect(loose.records.some((r) => r.clearWatchedAtIfOwn)).toBe(false);
+  });
+
+  it('clears a date an earlier Letterboxd import set once its diary entry is gone, and keeps any other date', () => {
+    const diary = (date: string) => ({
+      name: 'diary.csv',
+      text: `Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date\n${date},Quiet Ledger,1999,https://boxd.it/aB5555,,,,${date}\n`,
+    });
+    const watched = { name: 'watched.csv', text: 'Date,Name,Year,Letterboxd URI\n2024-04-02,Quiet Ledger,1999,https://boxd.it/zZ5e\n' };
+    applyImport(db, parseLetterboxdFiles([watched, diary('2024-04-02')]).records, { mode: 'merge' });
+    expect(item('Quiet Ledger')[0]?.watchedAt).toBe('2024-04-02');
+    const s = applyImport(db, parseFolder().records, { mode: 'merge' });
+    expect(s.added).toBe(11);
+    expect(item('Quiet Ledger')[0]?.watchedAt).toBeNull();
+    expect(item('Quiet Ledger')[0]?.status).toBe('watched');
+
+    db.sql.exec('DELETE FROM match_candidates; DELETE FROM item_external_ids; DELETE FROM library_items;');
+    applyImport(db, [{ sourceTitle: 'Quiet Ledger', sourceYear: 1999, status: 'watched', watchedAt: '2023-05-05', source: 'paste' }], { mode: 'merge' });
+    applyImport(db, parseFolder().records, { mode: 'merge' });
+    expect(item('Quiet Ledger')[0]?.watchedAt).toBe('2023-05-05');
   });
 });

@@ -186,7 +186,24 @@ CREATE TABLE item_external_ids (
 CREATE INDEX item_external_ids_value ON item_external_ids(kind, value);
 `;
 
-export const MIGRATIONS: readonly string[] = [V1, V2];
+/**
+ * V3: which import source set an item's watched date (watched_at_source).
+ *
+ * Imports never clear a field, with one exception: an import may clear a
+ * watched date that the same source set earlier (a partial export's dates
+ * that a later full export shows were fake). This column records that
+ * source. NULL means the user set the date (`set`, `update_movie`), a JSON v1
+ * file gave it without saying where it came from, or it was set before this
+ * column existed: such a date is never cleared by an import. Values are
+ * ITEM_SOURCES, checked in code like external id kinds, so a new source never
+ * needs a rebuild. Existing rows start NULL, so nothing already in a library
+ * becomes clearable.
+ */
+const V3 = `
+ALTER TABLE library_items ADD COLUMN watched_at_source TEXT;
+`;
+
+export const MIGRATIONS: readonly string[] = [V1, V2, V3];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
 

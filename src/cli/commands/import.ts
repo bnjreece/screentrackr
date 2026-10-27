@@ -13,16 +13,18 @@ import {
 } from '../../core/importers/imdb.js';
 import {
   folderSource,
+  looksLikeZip,
   parseLetterboxdExport,
   parseLetterboxdFiles,
   zipSource,
   type LetterboxdOptions,
   type LetterboxdParse,
 } from '../../core/importers/letterboxd.js';
-import { looksLikeZip } from '../../core/importers/zip.js';
 import { applyImport, detectFormat, FORMATS, parseImportDetailed, type ImportFormat, type ParsedImport } from '../../core/importers/index.js';
 import { bool, str, strs, type Command } from '../command.js';
 import { UserError } from '../context.js';
+
+const IMDB_FLAGS_ONLY = '--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files';
 
 function readBytes(file: string): Buffer {
   try {
@@ -100,16 +102,17 @@ function parseLetterboxdPaths(paths: string[], opts: LetterboxdOptions): Parsed 
 export const importCmd: Command = {
   name: 'import',
   summary: 'Bring in a library file (merge by default)',
-  usage: 'import <file|apple-tv|imdb <file.csv>...|letterboxd <export.zip|folder|file.csv>...> [--format <format>] [--merge | --replace]',
+  usage: 'import <file|apple-tv|imdb <file.csv>...|letterboxd <export.zip|folder|file.csv>...> [--format <format>] [--merge | --replace] [--dry-run]',
   details: [
     `Formats: ${FORMATS.join(', ')}. The format is detected when --format is omitted.`,
     "`import apple-tv` (experimental, macOS only) reads the TV app's library directly. Movies with a recorded play date are marked watched; the rest keep their current status.",
     "`import imdb <file.csv>...` reads IMDb CSV exports you downloaded from imdb.com (Your Ratings, your watchlist, check-ins or a list). Rated movies are marked watched with your rating; watchlist movies go in the queue only when they are new; nothing is marked owned. Several files are read together. --as says what a list export is (watchlist by default), --collection names a list's collection, --include-type brings in more than movies (repeatable or comma-separated: " +
       IMDB_INCLUDE_TYPES.join(', ') +
-      '), --checkin-dates uses check-in dates as watched dates.',
+      '), --checkin-dates uses check-in dates as watched dates, --notes-from-description keeps a list row\'s Description as notes.',
     "`import letterboxd <export.zip|folder|file.csv>...` reads the export you downloaded from letterboxd.com (Settings, Data). Watched and rated films are marked watched, with half stars stored times two (1 to 10); the watched date comes from your diary; watchlist films go in the queue only when they are new; nothing is marked owned unless you name a list with --owned-list <slug> (repeatable). --with-reviews takes your latest review as notes for movies with none; --no-watchlist leaves the watchlist out.",
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
     '--replace backs up your library to backups/ first, then replaces it.',
+    '--dry-run reports what the import would add, update and leave for review, and changes nothing (no backup either).',
   ].join('\n'),
   options: {
     format: { type: 'string', value: '<format>', description: `One of ${FORMATS.join(', ')}` },
@@ -133,6 +136,8 @@ export const importCmd: Command = {
     },
     'with-reviews': { type: 'boolean', description: 'letterboxd only: use your latest review as notes for movies with no notes' },
     'no-watchlist': { type: 'boolean', description: 'letterboxd only: leave the watchlist out' },
+    'notes-from-description': { type: 'boolean', description: "imdb only: use a list row's Description as the movie's notes (fills blank notes)" },
+    'dry-run': { type: 'boolean', description: 'Show what the import would do without changing anything' },
   },
   async run(ctx, pos, values) {
     const file = pos[0];
@@ -157,7 +162,8 @@ export const importCmd: Command = {
     const collection = str(values, 'collection');
     const includeRaw = (strs(values, 'include-type') ?? []).flatMap((v) => v.split(',')).map((v) => v.trim()).filter(Boolean);
     const checkinDates = bool(values, 'checkin-dates');
-    const imdbFlags = as !== undefined || collection !== undefined || includeRaw.length > 0 || checkinDates;
+    const notesFromDescription = bool(values, 'notes-from-description');
+    const imdbFlags = as !== undefined || collection !== undefined || includeRaw.length > 0 || checkinDates || notesFromDescription;
     if (as !== undefined && !(IMDB_LIST_KINDS as readonly string[]).includes(as)) {
       throw new UserError(`--as expects ${IMDB_LIST_KINDS.join(', ')} (got "${as}")`);
     }
@@ -174,6 +180,7 @@ export const importCmd: Command = {
       ...(collection ? { collection } : {}),
       includeTypes,
       checkinDates,
+      notesFromDescription,
     };
 
     const ownedLists = strs(values, 'owned-list') ?? [];
@@ -182,7 +189,7 @@ export const importCmd: Command = {
     const noLbFlags = () => {
       if (lbFlags) throw new UserError('--owned-list, --with-reviews and --no-watchlist only apply to Letterboxd exports');
     };
-    if (letterboxd && imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+    if (letterboxd && imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
 
     let timeoutMs: number | undefined;
     if (timeout !== undefined) {
@@ -193,7 +200,7 @@ export const importCmd: Command = {
 
     let parsed: Parsed;
     if (appleTv) {
-      if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+      if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
       noLbFlags();
       ctx.log('Reading the TV app library (experimental). macOS may ask to allow access to the TV app.');
       parsed = { format: 'apple-tv', records: await readAppleTvLibrary({ timeoutMs }), warnings: [], notices: [] };
@@ -205,7 +212,7 @@ export const importCmd: Command = {
     } else if (isDir(file) || looksLikeZip(readBytes(file))) {
       // A folder or ZIP is read only as a Letterboxd export.
       if (format !== undefined && format !== 'letterboxd') throw new UserError(`${basename(file)} is a folder or ZIP archive, not a ${format} file`);
-      if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+      if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
       parsed = parseLetterboxdPaths([file], lbOpts);
     } else {
       const bytes = readBytes(file);
@@ -215,10 +222,10 @@ export const importCmd: Command = {
         noLbFlags();
         parsed = parseImdbFiles(ctx.db(), [file], imdbOpts);
       } else if (fmt === 'letterboxd') {
-        if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+        if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
         parsed = parseLetterboxdPaths([file], lbOpts);
       } else {
-        if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+        if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
         noLbFlags();
         parsed = { ...parseImportDetailed(text, fmt, basename(file)), notices: [] };
       }
@@ -237,13 +244,16 @@ export const importCmd: Command = {
     for (const n of parsed.notices) ctx.log(n);
     for (const w of parsed.warnings) ctx.log(`Warning: ${w}`);
     if (!catalogReady(db)) ctx.log('The catalog is not built yet, so movies are left unmatched. Run `screentrackr setup` to match them.');
-    const summary = applyImport(db, parsed.records, { mode: replace ? 'replace' : 'merge' });
+    const dryRun = bool(values, 'dry-run');
+    const summary = applyImport(db, parsed.records, { mode: replace ? 'replace' : 'merge', dryRun });
 
     const extra = parsed.skippedByType ? { skippedByType: parsed.skippedByType } : {};
     ctx.emit({ format: parsed.format, records: parsed.records.length, warnings: parsed.warnings, ...extra, ...summary }, () =>
       [
-        `Imported ${parsed.records.length} records (${parsed.format}).`,
-        `Added ${summary.added}, updated ${summary.updated}, unchanged ${summary.unchanged}, needs review ${summary.needsReview}.`,
+        dryRun ? `Dry run: nothing was changed. ${parsed.records.length} records (${parsed.format}).` : `Imported ${parsed.records.length} records (${parsed.format}).`,
+        dryRun
+          ? `Would add ${summary.added}, update ${summary.updated}, leave unchanged ${summary.unchanged}, needs review ${summary.needsReview}.`
+          : `Added ${summary.added}, updated ${summary.updated}, unchanged ${summary.unchanged}, needs review ${summary.needsReview}.`,
         summary.backupPath ? `Backup of the previous library: ${summary.backupPath}` : '',
         summary.reviews.length
           ? [

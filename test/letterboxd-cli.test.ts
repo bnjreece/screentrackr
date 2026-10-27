@@ -9,7 +9,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openDb } from '../src/core/db.js';
-import { folderEntries, makeZip } from './zip-writer.js';
+import { folderFiles } from './fixtures/folder-files.js';
+import { makeZip } from './fixtures/make-zip.js';
 
 const ROOT = join(import.meta.dirname, '..');
 const CLI = join(ROOT, 'dist', 'cli', 'index.js');
@@ -44,7 +45,7 @@ beforeAll(() => {
   home = template;
   expect(run(['setup']).code).toBe(0);
   zip = join(tmp, 'letterboxd-example-2026-01-01-00-00-utc.zip');
-  writeFileSync(zip, makeZip(folderEntries(EXPORT, 'letterboxd-example-2026-01-01-00-00-utc/')));
+  writeFileSync(zip, makeZip(folderFiles(EXPORT, 'letterboxd-example-2026-01-01-00-00-utc/')));
 }, 120_000);
 afterAll(() => {
   rmSync(tmp, { recursive: true, force: true });
