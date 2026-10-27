@@ -1,0 +1,34 @@
+{
+  "Items": [
+    {
+      "Id": "0b6e00000000000000000000000000a1",
+      "Name": "The Glass Harbor",
+      "ProductionYear": 1978,
+      "RunTimeTicks": 67200000000,
+      "Type": "Movie",
+      "LocationType": "FileSystem",
+      "Genres": ["Drama", "Mystery"],
+      "People": [{ "Name": "Orrin Vale", "Type": "Director" }],
+      "ProviderIds": { "Imdb": "tt9000001", "Tmdb": "900001" },
+      "UserData": {
+        "Played": true,
+        "PlayCount": 2,
+        "LastPlayedDate": "2025-03-14T12:07:33.0000000Z",
+        "IsFavorite": true,
+        "Rating": 10,
+        "PlaybackPositionTicks": 0,
+        "Key": "900001"
+      }
+    },
+    {
+      "Id": "7c1d00000000000000000000000000a2",
+      "Name": "Example Heist",
+      "ProductionYear": 2011,
+      "Type": "Movie",
+      "LocationType": "FileSystem",
+      "UserData": { "Played": false, "PlayCount": 1, "PlaybackPositionTicks": 12000000000, "IsFavorite": false }
+    }
+  ],
+  "TotalRecordCount": 2,
+  "StartIndex": 0
+}

@@ -33,9 +33,14 @@ export const PLEX_OPTIONS: Record<string, OptionSpec> = {
   'from-file': { type: 'string', value: '<file.json>', description: 'plex only: read saved listing JSON instead of a server' },
 };
 
-/** Throws when a Plex-only flag is used with another import. (--dry-run is shared by every import and defined in import.ts.) */
-export function rejectPlexFlags(values: Values): void {
-  const used = Object.keys(PLEX_OPTIONS).filter((k) => values[k] !== undefined && values[k] !== false);
+/**
+ * Throws when a Plex-only flag is used with another import. (--dry-run is
+ * shared by every import and defined in import.ts; `shared` names flags
+ * another import also takes, such as --url and --token-stdin for Jellyfin,
+ * which import.ts checks itself.)
+ */
+export function rejectPlexFlags(values: Values, shared: readonly string[] = []): void {
+  const used = Object.keys(PLEX_OPTIONS).filter((k) => !shared.includes(k) && values[k] !== undefined && values[k] !== false);
   if (used.length) throw new UserError(`${used.map((k) => `--${k}`).join(', ')} only appl${used.length === 1 ? 'ies' : 'y'} to \`import plex\``);
 }
 

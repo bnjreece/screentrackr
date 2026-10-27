@@ -140,6 +140,21 @@ screentrackr import plex --url http://127.0.0.1:32400
 - `--dry-run` reads the server and prints what it read (movies, watched, rated) without opening your library or writing anything, so unlike other imports it does not say what would be added or updated. `--from-file <file.json>` reads saved listing JSON (`/library/sections/<key>/all` responses) instead of a server.
 - The watchlist lives in your Plex account, not on the server, so it is not imported.
 
+### Jellyfin (your own server)
+
+screentrackr can read the movies on your own Jellyfin server (10.11 or newer) over its API. It only reads: it never changes anything on the server, and it talks to the address you pass and nowhere else.
+
+```sh
+screentrackr import jellyfin --url http://localhost:8096 --user <name>
+```
+
+- **Signing in.** Without a token, screentrackr asks for your password (or reads it from stdin with `--password-stdin`), signs in as you and signs that session out when it's done. With a token in `JELLYFIN_TOKEN` (or on stdin with `--token-stdin`) it reads that token's user; an admin API key has no user of its own, so pass `--user <name>` or `--user-id <id>` to say whose library to read. The password and token are never stored or printed. A server behind a reverse proxy works with its base path in `--url`, such as `https://example.test/jellyfin`. `--timeout <seconds>` changes how long each request may take (30 by default). It always merges: `--replace` is refused, since the server's state is not a whole library.
+- **Watched.** A movie Jellyfin shows as played is marked watched, with the date it was last played as its watched date. That date is the last time anyone played it, not the first watch, and it is left out for movies marked played together in bulk (5 or more within a minute). A date left out never clears a date the movie already has, including one an earlier Jellyfin import set. Play counts and half-watched movies say nothing. Any other movie keeps its status, and a movie you didn't have yet goes in the queue. Jellyfin marks a movie with no known runtime played on any stop; the import warns about those, and `--strict-played` brings them in without a status.
+- **Ratings** are left out unless you pass `--ratings`. Then a rating from 1 to 10 comes in, rounded to a whole number. A rating of exactly 10 or 1 is usually a thumbs up or down from the Jellyfin app, and the import says how many it saw.
+- **Owned.** A movie the import adds is owned. A movie you already have keeps its owned flag, and title, year, directors, runtime and genres only fill fields it left blank.
+- **Matching.** Jellyfin's IMDb id is a hint the matcher checks against the catalog, never a hand link. Only movies come in: collections, episodes, home videos, extras, placeholders and missing files are skipped and counted. Two copies of one movie (the same IMDb id) come in once, as the played copy (or the one played last). If the library changes while it is read (during a library scan, say), the import is retried and, if it never reads whole, stops without changing anything.
+- Descriptions, images and file paths are never read. Emby servers use an older form of the API and are not supported.
+
 ### ScreenTrackr JSON
 
 `screentrackr export` writes your whole library as ScreenTrackr JSON v1, and `screentrackr import` reads it back with nothing lost. Use it for backups and for moving between machines. The format is documented in [docs/library-json-v1.md](docs/library-json-v1.md).
@@ -149,6 +164,7 @@ screentrackr import plex --url http://127.0.0.1:32400
 Imports merge by default: new movies are added, and fields the file has are updated. A merge never clears a status or rating that the file doesn't mention (the one thing an import may clear is a watched date that the same kind of source set earlier and now says is wrong; a date you set yourself is never cleared), an IMDb import never changes whether a movie is owned and never moves a movie out of watched, and importing the same file twice changes nothing. A record updates an existing movie only when exactly one item fits it: a different Apple id, a year more than one off (a year in the title counts, also before an edition tag like "(1978) (4K)"), a different runtime, a different director (except in `import apple-tv`, when the TV app's director is confirmed by the IMDb title both already share) or a different IMDb id rules an item out. For `import apple-tv`, the TV app's year is the year of the edition on sale, so it only rules out films made after it and is never stored, and a shared unconfirmed IMDb id is not enough on its own. A movie matched to IMDb that has no year, runtime or director of its own is judged by IMDb's, and how a title is written (an edition tag, the exact spelling) only tells editions of the same movie apart, never a film from its remake. A record that still fits several items (a title with no year, when you have the 1980 film and its 2020 remake) changes nothing and is listed with the candidate item ids; a row that changes nothing on one item but also fits a different one does not settle which one it is, so a later row in the same file still has to fit one on its own. Within one import each item is claimed by at most one record, so a file with two identical rows (two editions in an Apple TV paste) adds two items, a later change to that pair updates both, and importing an export restores every row. The full rules are in [docs/library-json-v1.md](docs/library-json-v1.md#which-item-a-record-updates). `--replace` starts over from the file, after saving a backup of your current library to `backups/` (an IMDb export with no rows is refused instead, so it can never empty your library). Every import prints how many items were added, updated, unchanged, and need review.
 
 The format is detected from the file. Pass `--format` (`json-v1`, `apple-paste`, `csv`, `imdb`, `letterboxd`, `trakt`, `legacy`, `neon-rows`) to choose it yourself. `legacy` and `neon-rows` read exports from the old ScreenTrackr web app.
+`import jellyfin` reads your Jellyfin server instead of a file (see [Jellyfin](#jellyfin-your-own-server)).
 
 ## Searching
 
@@ -290,11 +306,17 @@ The code is MIT licensed. See [LICENSE](LICENSE).
 
 ## Privacy
 
-screentrackr makes two kinds of network calls: downloads from datasets.imdbws.com during `setup` (or the `setup_catalog` MCP tool, which runs the same thing), and, only when you run `screentrackr import plex`, read-only requests to the Plex server address you give it. Nothing about you or your library is sent anywhere. Your Plex token is used for those requests only and is never stored. There's no telemetry, no account and no server. Your library stays in a SQLite file on your machine.
+screentrackr makes network calls in only three cases:
+
+- `setup` (or the `setup_catalog` MCP tool, which runs the same thing) downloads IMDb's datasets from datasets.imdbws.com.
+- `screentrackr import plex` sends read-only requests to the Plex Media Server address you give it, and nowhere else.
+- `screentrackr import jellyfin` sends read-only requests to the Jellyfin server address you give it, and nowhere else (plus a sign-in and sign-out there when you use a password).
+
+The Letterboxd, IMDb, Trakt, CSV and JSON imports only read export files on your machine; they never sign in to those services or fetch anything from them. Nothing about you or your library is sent anywhere. A Plex or Jellyfin token or password is used for those requests only and is never stored or printed. There's no telemetry, no account and no server. Your library stays in a SQLite file on your machine.
 
 ## Not affiliated
 
-screentrackr is an independent project. It's not affiliated with IMDb or Apple, or endorsed by either. It's not affiliated with or endorsed by Plex either.
+screentrackr is an independent project. It's not affiliated with IMDb or Apple, or endorsed by either. It's not affiliated with or endorsed by Plex, Jellyfin, Letterboxd or Trakt either.
 
 ## Development
 

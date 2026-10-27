@@ -22,10 +22,12 @@ import {
   type LetterboxdParse,
 } from '../../core/importers/letterboxd.js';
 import { isExcludedTraktName, parseTrakt, readTraktExport, traktFileOf } from '../../core/importers/trakt.js';
+import { jellyfinDeviceId, mapJellyfinItems, readJellyfinItems, type JellyfinAuth } from '../../core/importers/jellyfin.js';
 import { applyImport, detectFormat, FORMATS, parseImportDetailed, type ImportFormat, type ParsedImport } from '../../core/importers/index.js';
 import { listZip } from '../../core/zip.js';
 import { bool, str, strs, type Command } from '../command.js';
-import { UserError } from '../context.js';
+import { UserError, type Ctx } from '../context.js';
+import { promptHidden, readStdinSecret } from '../secret.js';
 import { emitPlexDryRun, PLEX_OPTIONS, readPlexImport, rejectPlexFlags, type PlexParsed } from './import-plex.js';
 
 const IMDB_FLAGS_ONLY = '--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files';
@@ -45,12 +47,14 @@ function catalogHasTvMovies(db: Db): boolean {
 }
 
 interface Parsed extends ParsedImport {
-  format: ImportFormat | 'apple-tv' | 'plex';
+  format: ImportFormat | 'apple-tv' | 'plex' | 'jellyfin';
   notices: string[];
   skippedByType?: Record<string, number>;
   /** Extra fields for `--json` output. */
   extra?: Record<string, unknown>;
   plex?: PlexParsed['plex'];
+  /** Warnings already printed (still reported in --json output). */
+  logged?: string[];
 }
 
 /** `import trakt`: Trakt's data export ZIP, its folder, or single files from it. Only allow-listed files are read. */
@@ -161,6 +165,74 @@ function parseLetterboxdPaths(paths: string[], opts: LetterboxdOptions, detected
   return { ...res, warnings: [...warnings, ...res.warnings], notices: [...chosen.notices, ...res.notices] };
 }
 
+function packageVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')) as { version?: unknown };
+    return typeof pkg.version === 'string' ? pkg.version : '0';
+  } catch {
+    return '0';
+  }
+}
+
+interface JellyfinFlags {
+  url: string | undefined;
+  user: string | undefined;
+  userId: string | undefined;
+  tokenStdin: boolean;
+  passwordStdin: boolean;
+  ratings: boolean;
+  strictPlayed: boolean;
+  timeoutMs: number | undefined;
+}
+
+/**
+ * `import jellyfin`: the token comes from JELLYFIN_TOKEN or stdin, else the
+ * user logs in with a password from stdin or a hidden prompt. Neither is ever
+ * stored, printed or passed anywhere but the server's Authorization header.
+ */
+async function readJellyfin(ctx: Ctx, f: JellyfinFlags): Promise<Parsed> {
+  if (!f.url) throw new UserError('Usage: screentrackr import jellyfin --url <server> --user <name>');
+  if (f.tokenStdin && f.passwordStdin) throw new UserError('Use either --token-stdin or --password-stdin, not both');
+  const envToken = process.env.JELLYFIN_TOKEN;
+  if (f.passwordStdin && envToken) throw new UserError('JELLYFIN_TOKEN is set, so --password-stdin is not used. Unset JELLYFIN_TOKEN to sign in with a password.');
+  let auth: JellyfinAuth;
+  if (f.tokenStdin || envToken) {
+    const token = f.tokenStdin ? readStdinSecret('token', '--token-stdin') : (envToken as string);
+    if (!token.trim()) throw new UserError(f.tokenStdin ? 'No token on stdin.' : 'JELLYFIN_TOKEN is empty.');
+    auth = { token, ...(f.userId ? { userId: f.userId } : {}), ...(f.user ? { userName: f.user } : {}) };
+  } else {
+    if (f.userId) throw new UserError('--user-id only applies with a token (JELLYFIN_TOKEN or --token-stdin)');
+    if (!f.user) throw new UserError('Pass --user <name> to sign in, or set JELLYFIN_TOKEN.');
+    let password: string;
+    if (f.passwordStdin) password = readStdinSecret('password', '--password-stdin');
+    else if (process.stdin.isTTY) password = await promptHidden(`Jellyfin password for ${f.user}: `);
+    else throw new UserError('No password: pipe it in with --password-stdin, or set JELLYFIN_TOKEN.');
+    auth = { userName: f.user, password };
+  }
+  // Open the library first, so a library problem stops the import before any request.
+  ctx.db();
+  ctx.log('Reading your movies from the Jellyfin server (read only).');
+  const read = await readJellyfinItems({
+    url: f.url,
+    auth,
+    version: packageVersion(),
+    deviceId: jellyfinDeviceId(ctx.home),
+    ...(f.timeoutMs !== undefined ? { timeoutMs: f.timeoutMs } : {}),
+  });
+  // The read's warnings (a session that could not be signed out) are printed
+  // now, so a later failure (mapping, the import itself) never hides them.
+  for (const w of read.warnings) ctx.log(`Warning: ${w}`);
+  const res = mapJellyfinItems(read.items, { ratings: f.ratings, strictPlayed: f.strictPlayed });
+  return {
+    format: 'jellyfin',
+    records: res.records,
+    warnings: [...read.warnings, ...res.warnings, ...res.skippedSummary],
+    notices: [`Read ${read.items.length} items for ${read.userName}.`, ...res.notices],
+    skippedByType: res.skippedByType,
+    logged: read.warnings,
+  };
+}
+
 export const importCmd: Command = {
   name: 'import',
   summary: 'Bring in a library file (merge by default)',
@@ -174,6 +246,7 @@ export const importCmd: Command = {
     "`import letterboxd <export.zip|folder|file.csv>...` reads the export you downloaded from letterboxd.com (Settings, Data). Watched and rated films are marked watched, with half stars stored times two (1 to 10); the watched date comes from your diary; watchlist films go in the queue only when they are new; nothing is marked owned unless you name a list with --owned-list <slug> (repeatable). --with-reviews takes your latest review as notes for movies with none; --no-watchlist leaves the watchlist out.",
     "`import trakt <export.zip|folder>` reads the data export you download from Trakt (Settings > Data > Raw export), or files from it. Only movie history, ratings, watchlist, collection and the export's error list are read. Watched movies are marked watched with the latest play's date, watchlist movies go in the queue only when they are new, and only the collection marks a movie owned. Plays logged in bulk (10 or more at the same second) lose their dates unless --keep-bulk-dates. It only merges (--replace is refused). A plain `import` of the export ZIP or one of those files does the same, and refuses the export's other files without opening them. Nothing is fetched from Trakt.",
     "`import plex [--url <server>] [--section <name|key>]...` reads the movie libraries of your own Plex Media Server, read-only, with the token from PLEX_TOKEN (never stored). Every movie is marked owned; movies Plex counts as played are marked watched, with your Plex rating unless --no-ratings; new unwatched movies get --unwatched-status (someday by default; skip leaves them out) and existing ones keep their status. With --dry-run, plex shows the counts it read and never opens your library.",
+    '`import jellyfin --url <server> --user <name>` reads your movies from your own Jellyfin server, read only. The token comes from JELLYFIN_TOKEN (or --token-stdin); without one you sign in with your password (prompted, or --password-stdin) and the session is signed out afterwards. Nothing is stored. Played movies are marked watched; the rest keep their status (a new one goes in the queue). --ratings brings in your Jellyfin ratings.',
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
     '--replace backs up your library to backups/ first, then replaces it.',
     '--dry-run reports what the import would add, update and leave for review, and changes nothing (no backup either).',
@@ -182,7 +255,11 @@ export const importCmd: Command = {
     format: { type: 'string', value: '<format>', description: `One of ${FORMATS.join(', ')}` },
     merge: { type: 'boolean', description: 'Merge into the library (the default)' },
     replace: { type: 'boolean', description: 'Replace the library, after a backup' },
-    timeout: { type: 'string', value: '<seconds>', description: 'apple-tv only: how long to wait for the TV app (default 120)' },
+    timeout: {
+      type: 'string',
+      value: '<seconds>',
+      description: 'apple-tv: how long to wait for the TV app (default 120); jellyfin: per request (default 30)',
+    },
     as: { type: 'string', value: `<${IMDB_LIST_KINDS.join('|')}>`, description: 'imdb only: what an IMDb list export is (default watchlist)' },
     collection: { type: 'string', value: '<name>', description: 'imdb --as list only: collection name for the list (fills a blank collection)' },
     'include-type': {
@@ -202,6 +279,13 @@ export const importCmd: Command = {
     'no-watchlist': { type: 'boolean', description: 'letterboxd only: leave the watchlist out' },
     'keep-bulk-dates': { type: 'boolean', description: 'trakt only: keep the dates of plays logged in bulk' },
     ...PLEX_OPTIONS,
+    url: { type: 'string', value: '<server>', description: 'plex and jellyfin only: your server address (plex default http://127.0.0.1:32400; jellyfin: required, such as http://localhost:8096)' },
+    'token-stdin': { type: 'boolean', description: 'plex and jellyfin only: read the token from stdin instead of PLEX_TOKEN or JELLYFIN_TOKEN' },
+    user: { type: 'string', value: '<name>', description: 'jellyfin only: whose library to read (and who signs in without a token)' },
+    'user-id': { type: 'string', value: '<id>', description: 'jellyfin only, with an admin API key: the user id whose library to read' },
+    'password-stdin': { type: 'boolean', description: 'jellyfin only: read the password from stdin instead of prompting' },
+    ratings: { type: 'boolean', description: 'jellyfin only: also import your ratings (left out by default)' },
+    'strict-played': { type: 'boolean', description: 'jellyfin only: played movies with no known runtime get no status' },
     'notes-from-description': { type: 'boolean', description: "imdb only: use a list row's Description as the movie's notes (fills blank notes)" },
     'dry-run': { type: 'boolean', description: 'Show what the import would do without changing anything' },
   },
@@ -216,14 +300,35 @@ export const importCmd: Command = {
     if (letterboxd && !files.length) throw new UserError('Usage: screentrackr import letterboxd <export.zip|folder|file.csv>...');
     if (trakt && !files.length) throw new UserError('Usage: screentrackr import trakt <trakt-export.zip | folder | file.json>...');
     if (!imdb && !letterboxd && !trakt && pos.length > 1) throw new UserError(`Unexpected argument "${pos[1]}"`);
+    const jellyfin = file === 'jellyfin';
+    const plex = file === 'plex';
+    const jf: Omit<JellyfinFlags, 'timeoutMs'> = {
+      url: str(values, 'url'),
+      user: str(values, 'user'),
+      userId: str(values, 'user-id'),
+      tokenStdin: bool(values, 'token-stdin'),
+      passwordStdin: bool(values, 'password-stdin'),
+      ratings: bool(values, 'ratings'),
+      strictPlayed: bool(values, 'strict-played'),
+    };
+    // --url and --token-stdin are shared by `import plex` and `import jellyfin`.
+    if (!jellyfin && !plex && (jf.url !== undefined || jf.tokenStdin)) {
+      throw new UserError('--url and --token-stdin only apply to `import plex` and `import jellyfin`');
+    }
+    const jellyfinOnlyFlags = jf.user !== undefined || jf.userId !== undefined || jf.passwordStdin || jf.ratings || jf.strictPlayed;
+    if (!jellyfin && jellyfinOnlyFlags) {
+      throw new UserError('--user, --user-id, --password-stdin, --ratings and --strict-played only apply to `import jellyfin`');
+    }
     if (bool(values, 'merge') && bool(values, 'replace')) throw new UserError('Use either --merge or --replace, not both');
     const format = str(values, 'format');
     const timeout = str(values, 'timeout');
     const appleTv = file === 'apple-tv';
-    const plex = file === 'plex';
-    if (!plex) rejectPlexFlags(values);
-    if ((appleTv || imdb || letterboxd || trakt || plex) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
-    if (!appleTv && timeout !== undefined) throw new UserError('--timeout only applies to `import apple-tv`');
+    if (!plex) rejectPlexFlags(values, ['url', 'token-stdin']);
+    // A server's state is not a whole library: unplayed movies would replace
+    // watched ones and ratings left out would be cleared.
+    if (jellyfin && bool(values, 'replace')) throw new UserError('--replace does not apply to `import jellyfin`; it always merges. Nothing was changed.');
+    if ((appleTv || imdb || letterboxd || trakt || plex || jellyfin) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
+    if (!appleTv && !jellyfin && timeout !== undefined) throw new UserError('--timeout only applies to `import apple-tv` and `import jellyfin`');
     if (format !== undefined && !(FORMATS as readonly string[]).includes(format)) {
       throw new UserError(`Unknown format "${format}" (expected ${FORMATS.join(', ')})`);
     }
@@ -268,7 +373,7 @@ export const importCmd: Command = {
       timeoutMs = Math.round(secs * 1000);
     }
 
-    const plain = !trakt && !imdb && !letterboxd && !appleTv && !plex;
+    const plain = !trakt && !imdb && !letterboxd && !appleTv && !plex && !jellyfin;
     // The other files of a Trakt export (account settings, other people,
     // comments, lists) are refused by name, before they are opened.
     if (plain && isExcludedTraktName(file)) {
@@ -301,6 +406,10 @@ export const importCmd: Command = {
       noLbFlags();
       ctx.log('Reading the TV app library (experimental). macOS may ask to allow access to the TV app.');
       parsed = { format: 'apple-tv', records: await readAppleTvLibrary({ timeoutMs }), warnings: [], notices: [] };
+    } else if (jellyfin) {
+      if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
+      noLbFlags();
+      parsed = await readJellyfin(ctx, { ...jf, timeoutMs });
     } else if (imdb) {
       noLbFlags();
       parsed = parseImdbFiles(ctx.db(), files, imdbOpts);
@@ -351,7 +460,8 @@ export const importCmd: Command = {
 
     const db = ctx.db();
     for (const n of parsed.notices) ctx.log(n);
-    for (const w of parsed.warnings) ctx.log(`Warning: ${w}`);
+    const logged = new Set(parsed.logged);
+    for (const w of parsed.warnings) if (!logged.has(w)) ctx.log(`Warning: ${w}`);
     if (!catalogReady(db)) ctx.log('The catalog is not built yet, so movies are left unmatched. Run `screentrackr setup` to match them.');
     const dryRun = bool(values, 'dry-run');
     const summary = applyImport(db, parsed.records, { mode: replace ? 'replace' : 'merge', dryRun });
