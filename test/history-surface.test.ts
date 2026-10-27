@@ -121,8 +121,8 @@ describe('screentrackr history', () => {
     expect(r.code, r.stderr).toBe(0);
     const lines = r.stdout.trim().split('\n');
     expect(lines[0]).toMatch(new RegExp(`^2024-10-31  R  Pale Rooftops \\(1994\\)  letterboxd\\+trakt  rated 8  #${ids.tr} #${ids.lb}$`));
-    expect(lines[1]).toMatch(/^2024-06-06     Quiet Ledger \(2001\)  plex  #\d+$/);
-    expect(lines[2]).toMatch(/^2019-01-01     Pale Rooftops/);
+    expect(lines[1]).toMatch(/^2024-06-06 {5}Quiet Ledger \(2001\) {2}plex {2}#\d+$/);
+    expect(lines[2]).toMatch(/^2019-01-01 {5}Pale Rooftops/);
     expect(lines[3]).toMatch(/^no date {8}Quiet Ledger/);
     expect(lines[4]).toBe('4 plays.');
 
