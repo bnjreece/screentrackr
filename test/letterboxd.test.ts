@@ -613,3 +613,16 @@ describe('when the diary cannot say it is whole (0.4.0, Astra r1)', () => {
     expect(res.records[0]?.viewings).toHaveLength(2);
   });
 });
+
+describe('a diary row without a name (0.4.0, Astra r2)', () => {
+  it('counts as an entry no film fits, so no play is removed', () => {
+    const head = 'Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date';
+    const watched = { name: 'watched.csv', text: 'Date,Name,Year,Letterboxd URI\n2024-04-02,Quiet Ledger,1999,https://boxd.it/zZ5e\n' };
+    applyImport(db, parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,,,,2019-01-01\n` }]).records, { mode: 'merge' });
+    const res = parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,,1999,https://boxd.it/e1,,,,2019-01-01\n\n` }]);
+    expect(res.warnings.join('\n')).toMatch(/row 1: no film name/);
+    expect(res.records.some((r) => r.viewingsComplete)).toBe(false);
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(viewingsOf(db, (item('Quiet Ledger')[0] as LibraryItem).id)).toHaveLength(1);
+  });
+});

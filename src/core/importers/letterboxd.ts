@@ -358,7 +358,14 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
     const at = reader(inp.diary.rows[0] ?? []);
     inp.diary.rows.slice(1).forEach((cells, i) => {
       const title = cleanText(at(cells, 'Name'));
-      if (!title) return;
+      if (!title) {
+        // A row with something in it but no name is an entry no film can be found for.
+        if (cells.some((c) => c.trim() !== '')) {
+          unplaced++;
+          warnings.push(`${inp.diary?.name ?? 'diary.csv'} row ${i + 1}: no film name, skipped`);
+        }
+        return;
+      }
       const rawYear = (at(cells, 'Year') ?? '').trim();
       const where = `${inp.diary?.name ?? 'diary.csv'} row ${i + 1} ("${title}")`;
       const entry: DiaryEntry = {

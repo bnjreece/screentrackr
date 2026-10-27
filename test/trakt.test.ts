@@ -837,3 +837,38 @@ describe('readTraktExport says whether it read a whole export', () => {
     expect(readTraktExport([zip]).whole).toBe(true);
   });
 });
+
+describe('more doubtful input (0.4.0, Astra r2)', () => {
+  const play = (id: number, at: string, m: unknown = GLASS) => ({ id, watched_at: at, action: 'watch', type: 'movie', movie: m });
+  const refs = () => viewingsOf(db, (byTitle('The Glass Harbor')[0] as LibraryItem).id).map((v) => v.sourceRef);
+  beforeEach(() => applyImport(db, parse({ 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z'), play(2, '2022-02-02T12:00:00.000Z')] }).records, { mode: 'merge' }));
+
+  it('an _errors.json entry that names no endpoint, or a history row with no movie, removes nothing', () => {
+    const one = [play(1, '2018-04-04T12:00:00.000Z')];
+    for (const files of [
+      { 'watched-history.json': one, '_errors.json': [null] },
+      { 'watched-history.json': one, '_errors.json': [{ error: 'HTTP 500' }] },
+      { 'watched-history.json': [...one, { id: 7, watched_at: '2023-01-01T00:00:00.000Z', action: 'watch', type: 'movie' }] },
+    ]) {
+      const res = parse(files);
+      expect(res.records.some((r) => r.viewingsComplete), JSON.stringify(files)).toBe(false);
+      applyImport(db, res.records, { mode: 'merge' });
+      expect(refs()).toEqual(['2', '1']);
+    }
+    // An explicit null movie is a title deleted from Trakt: the rest stays a whole history.
+    expect(parse({ 'watched-history.json': [...one, { id: 8, watched_at: '2023-01-01T00:00:00.000Z', action: 'watch', type: 'movie', movie: null }] }).records[0]?.viewingsComplete).toBe(true);
+  });
+
+  it('a bulk-logged last_watched_at is left out of the fallback too', () => {
+    db.sql.exec('DELETE FROM library_items');
+    applyImport(db, [{ sourceTitle: 'Bulk Reel 1', sourceYear: 2001, status: 'watched', source: 'trakt', externalIds: { trakt: '600' } }], { mode: 'merge' });
+    const id = (byTitle('Bulk Reel 1')[0] as LibraryItem).id;
+    addViewing(db, id, { watchedAt: '2019-01-01', source: 'trakt' });
+    const at = '2019-01-01T00:00:00.000Z';
+    const wm = (bulkPlays(10, at) as { movie: unknown }[]).map((p) => ({ plays: 1, last_watched_at: at, movie: p.movie }));
+    const res = parse({ 'watched-movies.json': wm });
+    expect(res.records.every((r) => r.viewings?.length === 0 && !r.viewingsComplete)).toBe(true);
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([['2019-01-01', null]]);
+  });
+});

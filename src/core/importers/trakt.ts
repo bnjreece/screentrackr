@@ -356,6 +356,8 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       }
       for (const e of list) {
         exportErrors++;
+        // An entry that doesn't name its endpoint could be the history's.
+        if (!isObj(e) || typeof e.endpoint !== 'string' || !e.endpoint.trim()) historyDoubt = true;
         const endpoint = isObj(e) && typeof e.endpoint === 'string' ? e.endpoint : '';
         const path = endpoint.split('?')[0]!.toLowerCase();
         const category = CATEGORIES.find(([re]) => re.test(path))?.[1];
@@ -408,7 +410,12 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
     const m = row.movie;
     if (m === null || m === undefined) {
       if (row.show || row.episode || row.season) skippedTv++;
-      else deleted.n++;
+      // An explicit null is a title deleted from Trakt; a missing movie is a row that could not be read.
+      else if (m === null) deleted.n++;
+      else {
+        warnings.push(`${where}: no movie, skipped`);
+        unread++;
+      }
       return null;
     }
     const title = isObj(m) && typeof m.title === 'string' ? m.title.trim() : '';
@@ -567,8 +574,11 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       if (!historyComplete || !a.plays.length) {
         // No whole history to go by: watched-movies' last play stands in (once
         // per day; the history's play of that day, when it has one, is it).
+        // A bulk-logged last play is left out, as history plays are without a whole history.
         const last = day(a.wmLast);
-        if (a.wmPlays > 0 && !(a.plays.length && last === null) && !viewings.some((v) => v.watchedAt === last)) viewings.push({ watchedAt: last });
+        const bulkLast = a.wmLast !== null && bulk.has(Math.floor(a.wmLast / 1000));
+        if (bulkLast && a.wmPlays > 0 && !a.plays.length) bulkLeftOut++;
+        else if (a.wmPlays > 0 && !(a.plays.length && last === null) && !viewings.some((v) => v.watchedAt === last)) viewings.push({ watchedAt: last });
       }
       rec.viewings = viewings;
       if (historyComplete && a.plays.length) rec.viewingsComplete = true;
