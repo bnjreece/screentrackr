@@ -217,6 +217,7 @@ describe('sync add, list, remove', () => {
 
   it('refuses an unknown subcommand and run flags on other subcommands', async () => {
     await expect(run(['start'])).rejects.toThrow(/Unknown sync command "start"/);
+    for (const name of ['constructor', 'toString', '__proto__', 'run']) await expect(run([name])).rejects.toThrow(/Unknown sync command/);
     await expect(run(['list'], { only: 'plex' })).rejects.toThrow(/--only does not apply to `sync list`/);
     await expect(run(['status'], { 'dry-run': true })).rejects.toThrow(/--dry-run does not apply to `sync status`/);
     await expect(run([], { url: PLEX_URL })).rejects.toThrow(/--url does not apply to `sync`/);

@@ -484,7 +484,7 @@ export const sync: Command = {
     const sub = pos[0];
     if (sub === undefined) return runAll(ctx, values);
     if (sub === 'add') return add(ctx, pos, values);
-    if (!(sub in SUB_FLAGS) || sub === 'run') throw new UserError(`Unknown sync command "${sub}" (expected add, list, remove, status or launchd)`);
+    if (!Object.hasOwn(SUB_FLAGS, sub) || sub === 'run') throw new UserError(`Unknown sync command "${sub}" (expected add, list, remove, status or launchd)`);
     onlyFlags(values, SUB_FLAGS[sub] as readonly string[], `\`sync ${sub}\``);
     if (sub !== 'remove' && pos.length > 1) throw new UserError(`Unexpected argument "${pos[1]}"`);
     if (sub === 'list') return list(ctx);
