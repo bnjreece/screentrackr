@@ -34,6 +34,7 @@ const SEARCH_DESCRIPTION = [
   'scope: "all" searches every movie in the catalog, annotated with your library status; add notInLibrary: true to find movies you do not own, for example "what should I buy or rent" (unwatched may be added and changes nothing, since a movie you do not have is unwatched).',
   'Genres: IMDb tags at most three genres per movie, so a strict genre filter can miss movies people think of as that genre (Se7en is Crime, Drama, Mystery). In library scope, the store genre (Apple TV) of an owned movie also counts; scope "all" uses IMDb genres only. If a combined query returns nothing, say which filter excluded the near misses and offer to relax it.',
   `Ratings (minRating, sort "rating") are IMDb ratings from 0 to 10. minVotes defaults to ${ALL_SCOPE_MIN_VOTES} for scope "all" (so obscure titles do not flood results) and 0 for your library; myRatingMin filters on your own 1 to 10 rating.`,
+  'excludeWatched drops movies you have watched or played (any edition) but, unlike notInLibrary, keeps ones you own and have not seen; decades (["1970s", "1980s"]) are ORed together; maxVotes with minVotes finds well-rated, under-seen titles; owned, lists (your own lists by name) and neverSeen narrow to library movies.',
   'Runtimes are in minutes. limit defaults to 20 (max 200); page with offset. Library movies that could not be matched to IMDb still appear, using their own title, director, genre and runtime, with matchStatus "unmatched".',
 ].join(' ');
 
