@@ -523,8 +523,8 @@ async function listMovies(
     if (mc.Metadata !== undefined && !Array.isArray(mc.Metadata)) {
       throw new ImportError(`"${section.title}" answered with an unreadable movie list; stopped without importing`);
     }
-    // Plex leaves the list out of an empty page and says `size: 0`. A page
-    // that says nothing about its size can't prove the list ended.
+    // Plex leaves the list out of an empty page and says `size: 0`. An empty
+    // page that says nothing about its size can't prove the list ended.
     const size = num(mc.size);
     const meta = (mc.Metadata ?? []) as PlexMetadata[];
     // `size` is the number of items on this page: one that disagrees with the
@@ -532,7 +532,7 @@ async function listMovies(
     if (size !== null && size !== meta.length) {
       throw new ImportError(`"${section.title}" said it sent ${size} movies but sent ${meta.length === 0 ? 'none' : meta.length}; stopped without importing`);
     }
-    if (mc.Metadata === undefined && size === null) irregular = true;
+    if (meta.length === 0 && size === null) irregular = true;
     // The largest total any page reported, in the body or the header: a later
     // or smaller one can't lower it.
     for (const t of [num(mc.totalSize), num(headers.get('X-Plex-Container-Total-Size'))]) {

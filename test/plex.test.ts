@@ -10,6 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildCatalog } from '../src/core/catalog/build.js';
 import { openDb, type Db } from '../src/core/db.js';
 import { applyImport, ImportError, type ImportRecord } from '../src/core/importers/index.js';
+import { titleEditionTag } from '../src/core/normalize.js';
 import {
   mapPlexItems,
   parsePlexDump,
@@ -325,6 +326,9 @@ describe('reading the server', () => {
     await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: short.fetch, pageSize: 200 })).rejects.toThrow(
       /said it sent 200 movies but sent 1/,
     );
+    const sizeless = scripted([first, { body: { MediaContainer: { Metadata: [] } } }]);
+    const r = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: sizeless.fetch, pageSize: 1 });
+    expect(r.complete).toBe(false);
     const silent = scripted([first, { body: { MediaContainer: {} } }]);
     const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: silent.fetch, pageSize: 1 });
     expect(res.complete).toBe(false);
@@ -794,6 +798,20 @@ describe('importing into the library', () => {
       ['The Glass Harbor', 'someday', null],
       ["The Glass Harbor (Director's Cut 4K)", 'watched', 9],
     ]);
+  });
+
+  it('keeps a nested edition title from another source apart from a bare Plex movie', () => {
+    expect(titleEditionTag("The Glass Harbor (Director's Cut (4K))")).toBe('director s cut 4k');
+    expect(titleEditionTag('The Glass Harbor (2009) (4K)')).toBe('4k');
+    expect(titleEditionTag('The Glass Harbor')).toBe('');
+    applyImport(
+      db,
+      [{ sourceTitle: "The Glass Harbor (Director's Cut (4K))", sourceYear: 2009, sourceRuntimeMin: 128, source: 'csv', status: 'someday', imdbIdHint: 'tt9000002' }],
+      { mode: 'merge' },
+    );
+    plexImport([{ ...glassHarbor2009, userRating: 9 }]);
+    const nested = items().find((i) => i.sourceTitle === "The Glass Harbor (Director's Cut (4K))");
+    expect(nested).toMatchObject({ status: 'someday', myRating: null });
   });
 
   it('never downgrades a watched movie, never clears a rating, and marks an existing movie owned', () => {
