@@ -26,6 +26,7 @@
  * - Plex's own ids (ratingKey, plex:// guid) are not stored: a ratingKey is
  *   per server and per file, and a guid changes when the owner fixes a match.
  */
+import { directorsConflict } from '../match.js';
 import { normalizeTitle, titleEditionTag, titleSuffixYear } from '../normalize.js';
 import { cleanTconst, cleanText, cleanYear, foldRecords, ImportError, type ImportRecord, type ParsedImport } from './common.js';
 
@@ -236,25 +237,33 @@ export function mapPlexItems(items: PlexMetadata[], opts: PlexMapOptions = {}): 
   // agree on everything that tells films and editions apart: the IMDb hint
   // (unchecked, so never enough alone), the edition (Plex's name and the
   // title's edition tag), the normalized title, the year (a "(YYYY)" in the
-  // title first, then the year field; within one of every year in the group)
-  // and the runtime (within 3 minutes of every runtime in the group). A
-  // missing year or runtime only folds with another missing one.
+  // title first, then the year field; within one of every year in the group),
+  // the runtime (within 3 minutes of every runtime in the group) and the
+  // directors (no clear conflict with any in the group). A missing year or
+  // runtime only folds with another missing one.
   const groupOf = new Map<ImportRecord, string>();
-  const groups = new Map<string, { years: (number | null)[]; runtimes: (number | null)[] }[]>();
+  const groups = new Map<string, { years: (number | null)[]; runtimes: (number | null)[]; directors: (string | null)[] }[]>();
   const close = (a: number | null, b: number | null, tol: number) => (a === null || b === null ? a === b : Math.abs(a - b) <= tol);
   for (const o of out) {
     if (!o.rec.imdbIdHint) continue;
     const t = o.rec.sourceTitle;
     const base = `imdb:${o.rec.imdbIdHint}|${o.edition}|${titleEditionTag(t)}|${normalizeTitle(t)}`;
     const year = titleSuffixYear(t) ?? o.rec.sourceYear ?? null;
+    const director = o.rec.sourceDirector ?? null;
     const list = groups.get(base) ?? [];
-    let idx = list.findIndex((g) => g.years.every((y) => close(y, year, 1)) && g.runtimes.every((rt) => close(rt, o.runtime, 3)));
+    let idx = list.findIndex(
+      (g) =>
+        g.years.every((y) => close(y, year, 1)) &&
+        g.runtimes.every((rt) => close(rt, o.runtime, 3)) &&
+        g.directors.every((d) => !directorsConflict(d, director)),
+    );
     if (idx < 0) {
-      list.push({ years: [], runtimes: [] });
+      list.push({ years: [], runtimes: [], directors: [] });
       idx = list.length - 1;
     }
     list[idx]?.years.push(year);
     list[idx]?.runtimes.push(o.runtime);
+    list[idx]?.directors.push(director);
     groups.set(base, list);
     groupOf.set(o.rec, `${base}#${idx}`);
   }
@@ -323,7 +332,20 @@ export function parsePlexDump(text: string): PlexDump {
       seen.set(key, keys);
     });
     for (const [key, total] of totals) if ((seen.get(key)?.size ?? 0) < total) complete = false;
-    return { movies: containers.flatMap((mc) => mc.Metadata as PlexMetadata[]), complete };
+    // Overlapping saved pages list some movies twice: keep each once per library.
+    const kept = new Set<string>();
+    const movies = containers.flatMap((mc, i) => {
+      const lib = cleanText(mc.librarySectionID) ?? cleanText(mc.librarySectionUUID) ?? `#${i}`;
+      return (mc.Metadata as PlexMetadata[]).filter((m) => {
+        const rk = cleanText(m?.ratingKey);
+        if (rk === null) return true;
+        const k = `${lib}\u0000${rk}`;
+        if (kept.has(k)) return false;
+        kept.add(k);
+        return true;
+      });
+    });
+    return { movies, complete };
   }
   if (Array.isArray(data) && data.every((x) => x !== null && typeof x === 'object' && !Array.isArray(x) && 'type' in x)) {
     return { movies: data as PlexMetadata[], complete: false };
@@ -457,6 +479,7 @@ async function listMovies(
   const out: PlexMetadata[] = [];
   const seen = new Set<string>();
   let start = 0;
+  let total: number | null = null;
   for (let page = 0; ; page++) {
     if (page >= MAX_PAGES) throw new ImportError(`"${section.title}" kept returning new pages after ${MAX_PAGES} requests; stopped without importing`);
     const { body, headers } = await client.get(
@@ -466,7 +489,9 @@ async function listMovies(
     );
     const mc = container(body);
     const meta = Array.isArray(mc.Metadata) ? (mc.Metadata as PlexMetadata[]) : [];
-    const total = num(mc.totalSize) ?? num(headers.get('X-Plex-Container-Total-Size'));
+    const pageTotal = num(mc.totalSize) ?? num(headers.get('X-Plex-Container-Total-Size'));
+    // The largest total any page reported: a later page can't lower it.
+    if (pageTotal !== null) total = Math.max(total ?? 0, pageTotal);
     let fresh = 0;
     for (const m of meta) {
       const key = cleanText(m?.ratingKey);
@@ -478,20 +503,24 @@ async function listMovies(
       fresh++;
     }
     // The server may ignore the requested size or not page at all: advance by
-    // what came back, and stop at the reported total, or (with no total) on
-    // an empty page or one with nothing new, never on a merely short page.
-    // Either way, the distinct movies read must reach the reported total
-    // (overlapping pages can reach it by position while missing movies).
-    const done = (): { movies: PlexMetadata[]; complete: boolean } => {
-      if (total !== null && out.length < total) {
-        warnings.push(`"${section.title}" returned fewer movies than it reported (${out.length} of ${total})`);
-        return { movies: out, complete: false };
-      }
-      return { movies: out, complete: true };
+    // what came back, and stop at the reported total, on an empty page, or on
+    // a page with nothing new, never on a merely short page. The read is
+    // complete only when the distinct movies reach the largest reported total
+    // (overlapping pages can reach it by position while missing movies), or,
+    // with no total at all, when it ended on an empty page.
+    const done = (endedEmpty: boolean): { movies: PlexMetadata[]; complete: boolean } => {
+      if (total !== null ? out.length >= total : endedEmpty) return { movies: out, complete: true };
+      warnings.push(
+        total !== null
+          ? `"${section.title}" returned fewer movies than it reported (${out.length} of ${total})`
+          : `"${section.title}" repeated a page without saying how many movies it has, so the list may be incomplete`,
+      );
+      return { movies: out, complete: false };
     };
-    if (meta.length === 0 || fresh === 0) return done();
+    if (meta.length === 0) return done(true);
+    if (fresh === 0) return done(false);
     start += meta.length;
-    if (total !== null && start >= total) return done();
+    if (total !== null && start >= total) return done(false);
   }
 }
 

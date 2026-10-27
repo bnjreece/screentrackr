@@ -238,6 +238,8 @@ describe('reading the server', () => {
     const many = Array.from({ length: 4 }, (_, i) => ({ ...lanternSeason, ratingKey: `k${i}`, title: `Invented Film ${i}` }));
     const ignoring = await read({ sections: SECTIONS.slice(0, 1), movies: { '3': many }, ignorePaging: true, noTotal: true }, { pageSize: 2 });
     expect(ignoring.records).toHaveLength(4);
+    // A repeated page with no total can't show nothing is missing.
+    expect(ignoring.complete).toBe(false);
     const noTotal = await read({ sections: SECTIONS.slice(0, 1), movies: { '3': many }, noTotal: true }, { pageSize: 3 });
     expect(noTotal.records).toHaveLength(4);
     expect(noTotal.complete).toBe(true);
@@ -260,6 +262,25 @@ describe('reading the server', () => {
     expect(res.records).toHaveLength(3);
     expect(res.complete).toBe(false);
     expect(res.warnings.join('\n')).toMatch(/3 of 4/);
+  });
+
+  it('keeps the largest reported total when a later page drops or lowers it', async () => {
+    const [a, b] = ['a', 'b'].map((k) => ({ ...lanternSeason, ratingKey: k, title: `Invented Film ${k}` }));
+    for (const last of [{}, { totalSize: 0 }]) {
+      const pages = [{ size: 2, totalSize: 5, Metadata: [a, b] }, { size: 0, Metadata: [], ...last }];
+      const { fetch } = fakeFetch({ sections: SECTIONS.slice(0, 1), movies: {} });
+      let n = 0;
+      const shrinking = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.pathname !== '/library/sections/3/all') return fetch(input, init);
+        return new Response(JSON.stringify({ MediaContainer: pages[n++] ?? { size: 0, Metadata: [] } }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as typeof fetch;
+      const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: shrinking, pageSize: 2 });
+      expect(res.records).toHaveLength(2);
+      expect(res.complete).toBe(false);
+    }
   });
 
   it('keeps paging past a short page when the server caps the page size and gives no total', async () => {
@@ -522,6 +543,18 @@ describe('mapping Plex movies', () => {
     expect(years.records).toHaveLength(2);
   });
 
+  it('never folds records whose directors are clearly different people', () => {
+    const res = map([
+      glassHarbor2009,
+      { ...glassHarbor2009, ratingKey: 'd2', Director: [{ tag: 'Selma Ruiz' }], viewCount: 0, userRating: undefined },
+      { ...glassHarbor2009, ratingKey: 'd3', Director: undefined },
+    ]);
+    expect(res.records.map((r) => [r.sourceDirector, r.status ?? null])).toEqual([
+      ['Teodor Brask', 'watched'],
+      ['Selma Ruiz', null],
+    ]);
+  });
+
   it('folds by every year in a group, not only the first', () => {
     const res = map([
       { ...glassHarbor2009, year: 2000 },
@@ -569,6 +602,18 @@ describe('a saved listing (--from-file)', () => {
     expect(parsePlexDump(JSON.stringify([page(0, [a, b], 3), page(2, [c], 3)])).complete).toBe(true);
     expect(parsePlexDump(JSON.stringify([page(0, [a, b], 3), page(1, [b], 3)])).complete).toBe(false);
     expect(parsePlexDump(JSON.stringify([page(0, [a], 1, 3), page(0, [b], 2, '7')])).complete).toBe(false);
+  });
+
+  it('keeps a movie on overlapping saved pages once', () => {
+    const [a, b, c] = ['a', 'b', 'c'].map((k) => ({ ...lanternSeason, ratingKey: k, title: `Invented Film ${k}` }));
+    const dump = parsePlexDump(
+      JSON.stringify([
+        { MediaContainer: { totalSize: 3, librarySectionID: 3, Metadata: [a, b] } },
+        { MediaContainer: { totalSize: 3, librarySectionID: 3, Metadata: [b, c] } },
+      ]),
+    );
+    expect(dump.movies.map((m) => m.ratingKey)).toEqual(['a', 'b', 'c']);
+    expect(dump.complete).toBe(true);
   });
 });
 
