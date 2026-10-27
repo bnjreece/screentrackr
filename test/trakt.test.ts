@@ -872,3 +872,16 @@ describe('more doubtful input (0.4.0, Astra r2)', () => {
     expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([['2019-01-01', null]]);
   });
 });
+
+describe('the fallback never adds a play it could not match later (0.4.0, Astra r3)', () => {
+  it('watched-movies with no usable last date gives no play, so the history play is not counted twice', () => {
+    const wm = { 'watched-movies.json': [{ plays: 1, last_watched_at: '1970-01-01T00:00:00.000Z', movie: GLASS }] };
+    const first = parse(wm);
+    expect(rec(first.records, 101)).toMatchObject({ status: 'watched', viewings: [] });
+    applyImport(db, first.records, { mode: 'merge' });
+    const loose = parse({ 'watched-history.json': [{ id: 123, watched_at: '1970-01-01T00:00:00.000Z', action: 'watch', type: 'movie', movie: GLASS }] }, { wholeExport: false });
+    applyImport(db, loose.records, { mode: 'merge' });
+    const id = (byTitle('The Glass Harbor')[0] as LibraryItem).id;
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([[null, '123']]);
+  });
+});

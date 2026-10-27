@@ -574,11 +574,14 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       if (!historyComplete || !a.plays.length) {
         // No whole history to go by: watched-movies' last play stands in (once
         // per day; the history's play of that day, when it has one, is it).
-        // A bulk-logged last play is left out, as history plays are without a whole history.
+        // A bulk-logged last play is left out, as history plays are without a
+        // whole history. So is one with no usable date: a dateless play with
+        // no ref could never be matched to the history play it is (that one
+        // has a ref), so it would count twice once the history comes in.
         const last = day(a.wmLast);
         const bulkLast = a.wmLast !== null && bulk.has(Math.floor(a.wmLast / 1000));
         if (bulkLast && a.wmPlays > 0 && !a.plays.length) bulkLeftOut++;
-        else if (a.wmPlays > 0 && !(a.plays.length && last === null) && !viewings.some((v) => v.watchedAt === last)) viewings.push({ watchedAt: last });
+        else if (a.wmPlays > 0 && last !== null && !viewings.some((v) => v.watchedAt === last)) viewings.push({ watchedAt: last });
       }
       rec.viewings = viewings;
       if (historyComplete && a.plays.length) rec.viewingsComplete = true;
