@@ -156,6 +156,27 @@ describe('mapJellyfinItems', () => {
     expect(res.records).toEqual([expect.objectContaining({ sourceRuntimeMin: 120, status: 'watched', myRating: 9 })]);
   });
 
+  it('picks between unplayed versions by the latest LastPlayedDate', () => {
+    const res = mapJellyfinItems([
+      movie({ RunTimeTicks: 90 * 600_000_000, ProviderIds: { Imdb: 'tt9000004' } }, { LastPlayedDate: '2023-01-05T12:00:00Z' }),
+      movie({ RunTimeTicks: 120 * 600_000_000, ProviderIds: { Imdb: 'tt9000004' } }, { LastPlayedDate: '2024-01-05T12:00:00Z' }),
+    ]);
+    expect(res.records).toEqual([expect.objectContaining({ sourceRuntimeMin: 120 })]);
+    expect(res.records[0]).not.toHaveProperty('status');
+  });
+
+  it('with --strict-played, a played version of unknown runtime still wins (its rating with it), with no status', () => {
+    const res = mapJellyfinItems(
+      [
+        movie({ ProviderIds: { Imdb: 'tt9000004' } }, { Rating: 3 }),
+        movie({ RunTimeTicks: null, ProviderIds: { Imdb: 'tt9000004' } }, { Played: true, Rating: 9, LastPlayedDate: '2024-01-05T12:00:00Z' }),
+      ],
+      { strictPlayed: true, ratings: true },
+    );
+    expect(res.records).toEqual([expect.objectContaining({ sourceRuntimeMin: null, myRating: 9 })]);
+    expect(res.records[0]).not.toHaveProperty('status');
+  });
+
   it('handles missing and odd fields, and refuses items without UserData', () => {
     const res = mapJellyfinItems([
       movie({ ProviderIds: null, ProductionYear: null, Genres: null, People: 'x' }),
@@ -176,6 +197,7 @@ interface Call {
   method: string;
   headers: Record<string, string>;
   body: unknown;
+  redirect: RequestInit['redirect'];
 }
 
 type Route = (call: Call) => Response | Promise<Response>;
@@ -188,7 +210,13 @@ function fakeServer(routes: Record<string, Route>) {
   const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>));
-    const call: Call = { url, method: init?.method ?? 'GET', headers, body: init?.body ? JSON.parse(String(init.body)) : undefined };
+    const call: Call = {
+      url,
+      method: init?.method ?? 'GET',
+      headers,
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      redirect: init?.redirect,
+    };
     calls.push(call);
     const path = url.pathname.replace(/^\/media/, '');
     const route = routes[`${call.method} ${path}`];
@@ -242,6 +270,8 @@ describe('readJellyfinItems', () => {
       expect(Object.keys(c.headers).some((h) => /^x-(emby|mediabrowser)/i.test(h))).toBe(false);
       expect(c.url.searchParams.has('api_key')).toBe(false);
       expect(c.url.searchParams.has('ApiKey')).toBe(false);
+      // Redirects are never followed, so the token never goes to another address.
+      expect(c.redirect).toBe('manual');
       expect(c.headers.Authorization).toMatch(/^MediaBrowser Client="screentrackr", Device="screentrackr-cli", DeviceId="[0-9a-f]{32}", Version="0.0.0-test"/);
     }
     const [auth, items] = server.calls as [Call, Call];
@@ -275,6 +305,15 @@ describe('readJellyfinItems', () => {
     }
   });
 
+  it('says so in the error when reading and signing out both fail', async () => {
+    const server = fakeServer({
+      'POST /Users/AuthenticateByName': login,
+      'GET /Items': () => jsonRes({}, 500),
+      'POST /Sessions/Logout': () => jsonRes({}, 500),
+    });
+    await expect(readJellyfinItems(opts(server.fetch))).rejects.toThrow(/HTTP 500\..*Could not sign out/);
+  });
+
   it('says so when signing out fails', async () => {
     const server = fakeServer({
       'POST /Users/AuthenticateByName': login,
@@ -294,7 +333,7 @@ describe('readJellyfinItems', () => {
     expect(server.calls[0]?.body).toEqual({ Username: 'kid', Pw: '' });
   });
 
-  it('pages until the count is reached, drops repeats, and warns when the count changes mid-run', async () => {
+  it('pages until the count is reached, and reads again when the count changes mid-run', async () => {
     const items = Array.from({ length: 5 }, (_, i) => movie({ Id: `m${i}`, Name: `Movie ${i}` }));
     const server = fakeServer({
       'POST /Users/AuthenticateByName': login,
@@ -304,14 +343,34 @@ describe('readJellyfinItems', () => {
     });
     const res = await readJellyfinItems(opts(server.fetch, { pageSize: 2 }));
     expect(res.items).toHaveLength(5);
-    expect(server.calls.filter((c) => c.url.pathname.endsWith('/Items')).map((c) => c.url.searchParams.get('startIndex'))).toEqual(['0', '2', '4']);
-    expect(res.warnings.join('\n')).toMatch(/changed while it was being read/);
+    expect(server.calls.filter((c) => c.url.pathname.endsWith('/Items')).map((c) => c.url.searchParams.get('startIndex'))).toEqual([
+      '0', '2', '4',
+      '0', '2', '4',
+    ]);
   });
 
-  it('stops on an empty page', async () => {
+  it('refuses a read that never comes back whole (shifted pages or an early empty page), and still signs out', async () => {
+    const shifted = [movie({ Id: 'a' }), movie({ Id: 'b' }), movie({ Id: 'b' }), movie({ Id: 'd' })];
+    const cases: Route[] = [
+      (c) => jsonRes({ Items: c.url.searchParams.get('startIndex') === '0' ? shifted.slice(0, 2) : shifted.slice(2), TotalRecordCount: 4 }),
+      (c) => jsonRes({ Items: c.url.searchParams.get('startIndex') === '0' ? [movie({ Id: 'a' })] : [], TotalRecordCount: 50 }),
+    ];
+    for (const items of cases) {
+      const server = fakeServer({
+        'POST /Users/AuthenticateByName': login,
+        'GET /Items': items,
+        'POST /Sessions/Logout': () => new Response(null, { status: 204 }),
+      });
+      await expect(readJellyfinItems(opts(server.fetch, { pageSize: 2 }))).rejects.toThrow(/kept changing while it was read.*Nothing was imported/);
+      expect(server.calls.filter((c) => c.url.pathname.endsWith('/Items')).length).toBeGreaterThanOrEqual(6);
+      expect(server.calls.at(-1)?.url.pathname).toBe('/media/Sessions/Logout');
+    }
+  });
+
+  it('reads until an empty page when the server sends no count', async () => {
     const server = fakeServer({
       'POST /Users/AuthenticateByName': login,
-      'GET /Items': (c) => jsonRes({ Items: c.url.searchParams.get('startIndex') === '0' ? [movie({ Id: 'a' })] : [], TotalRecordCount: 50 }),
+      'GET /Items': (c) => jsonRes({ Items: c.url.searchParams.get('startIndex') === '0' ? [movie({ Id: 'a' })] : [] }),
       'POST /Sessions/Logout': () => new Response(null, { status: 204 }),
     });
     expect((await readJellyfinItems(opts(server.fetch))).items).toHaveLength(1);
@@ -475,6 +534,16 @@ describe('merging a Jellyfin import', () => {
     ]).records;
     expect(applyImport(db, records, { mode: 'merge' })).toMatchObject({ added: 0, updated: 1 });
     expect(items().map((i) => [i.sourceRuntimeMin, i.status])).toEqual([[120, 'watched']]);
+  });
+
+  it('with two unplayed versions, the last played one stands for the film and adds no duplicate', () => {
+    applyImport(db, [{ sourceTitle: 'Seven Lanterns', sourceYear: 1995, sourceRuntimeMin: 120, status: 'priority', source: 'paste' }], { mode: 'merge' });
+    const records = mapJellyfinItems([
+      movie({ RunTimeTicks: 90 * 600_000_000, ProviderIds: { Imdb: 'tt9000004' } }, { LastPlayedDate: '2023-01-05T12:00:00Z' }),
+      movie({ RunTimeTicks: 120 * 600_000_000, ProviderIds: { Imdb: 'tt9000004' } }, { LastPlayedDate: '2024-01-05T12:00:00Z' }),
+    ]).records;
+    applyImport(db, records, { mode: 'merge' });
+    expect(items().map((i) => [i.sourceRuntimeMin, i.status])).toEqual([[120, 'priority']]);
   });
 });
 

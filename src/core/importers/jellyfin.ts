@@ -113,22 +113,25 @@ function runtimeOf(v: unknown): number | null {
 
 interface Pending {
   record: ImportRecord;
+  /** The server's Played flag, whatever status the record got. */
+  played: boolean;
+  /** The server's LastPlayedDate, played or not. Only picks between versions. */
+  lastPlayed: number | null;
+  /** The date that may become watchedAt: set only when the record is watched. */
   playedAt: number | null;
 }
 
 /**
  * Several versions of one film (the same IMDb id, not merged on the server)
- * come in as one record: the played version, else the one played last, else
- * the first. The chosen version is taken whole, so its own runtime and year
+ * come in as one record: a version the server shows as played, else the one
+ * with the latest LastPlayedDate, else the first. The chosen version is taken whole, so its own runtime and year
  * decide which library item it is, never another version's.
  */
 function pickVersions(pending: Pending[]): ImportRecord[] {
   const best = new Map<string, Pending>();
   const better = (a: Pending, b: Pending) => {
-    const pa = a.record.status === 'watched';
-    const pb = b.record.status === 'watched';
-    if (pa !== pb) return pa;
-    return (a.playedAt ?? -Infinity) > (b.playedAt ?? -Infinity);
+    if (a.played !== b.played) return a.played;
+    return (a.lastPlayed ?? -Infinity) > (b.lastPlayed ?? -Infinity);
   };
   for (const p of pending) {
     const key = p.record.imdbIdHint;
@@ -220,7 +223,7 @@ export function mapJellyfinItems(items: readonly unknown[], opts: JellyfinMapOpt
         }
       }
     }
-    pending.push({ record, playedAt });
+    pending.push({ record, played: user.Played === true, lastPlayed: parseDate(user.LastPlayedDate), playedAt });
   });
 
   // A bulk "mark played" gives many items one timestamp: that is the click,
@@ -439,18 +442,24 @@ export async function readJellyfinItems(o: JellyfinReadOptions): Promise<Jellyfi
     userName = typeof user.Name === 'string' ? user.Name : o.auth.userName;
   }
 
+  const LOGOUT_FAILED = 'Could not sign out of the Jellyfin session; sign it out from the Jellyfin dashboard (Devices) or let the server expire it.';
+  const logout = async (): Promise<boolean> =>
+    !loggedIn ||
+    (await client.request('POST', '/Sessions/Logout').then(
+      (res) => res.ok,
+      () => false,
+    ));
+  let items: unknown[];
   try {
-    const items = await readPages(client, base, userId, o.pageSize ?? 200, warnings);
-    return { items, userName, warnings };
-  } finally {
-    if (loggedIn) {
-      const ok = await client.request('POST', '/Sessions/Logout').then(
-        (res) => res.ok,
-        () => false,
-      );
-      if (!ok) warnings.push('Could not sign out of the Jellyfin session; sign it out from the Jellyfin dashboard (Devices) or let the server expire it.');
-    }
+    items = await readAll(client, base, userId, o.pageSize ?? 200);
+  } catch (err) {
+    // The read failed: still sign out, and say so in the error when that failed too.
+    const out = await logout();
+    if (!out && err instanceof ImportError) throw new ImportError(`${err.message} ${LOGOUT_FAILED}`);
+    throw err;
   }
+  if (!(await logout())) warnings.push(LOGOUT_FAILED);
+  return { items, userName, warnings };
 }
 
 /** Which user a token reads for: its own user, or (an admin API key) the one named. */
@@ -481,13 +490,32 @@ async function tokenUser(client: Client, auth: { userId?: string; userName?: str
   return { userId: found[0].Id, userName: found[0].Name as string };
 }
 
-async function readPages(client: Client, base: URL, userId: string, pageSize: number, warnings: string[]): Promise<unknown[]> {
-  const byId = new Map<string, unknown>();
-  const noId: unknown[] = [];
+/** How many times a read is retried when the library changes under it. */
+const READ_ATTEMPTS = 3;
+
+/**
+ * Every movie, read page by page. A library scan can shift the pages while
+ * they are read (an item seen twice, the count changing, fewer items than
+ * the count), which would silently leave movies out; such a read is retried,
+ * and refused when it never comes back whole.
+ */
+async function readAll(client: Client, base: URL, userId: string, pageSize: number): Promise<unknown[]> {
+  for (let attempt = 1; attempt <= READ_ATTEMPTS; attempt++) {
+    const read = await readPages(client, base, userId, pageSize);
+    if (read.whole) return read.items;
+  }
+  throw new ImportError(
+    `The Jellyfin library at ${shown(base)} kept changing while it was read (a library scan, say), so some movies could be missing. Nothing was imported; run the import again when the scan is done.`,
+  );
+}
+
+async function readPages(client: Client, base: URL, userId: string, pageSize: number): Promise<{ items: unknown[]; whole: boolean }> {
+  const items: unknown[] = [];
+  const seen = new Set<string>();
+  let whole = true;
   let start = 0;
-  let firstTotal: number | null = null;
-  let total = Infinity;
-  for (let page = 0; start < total; page++) {
+  let total: number | null = null;
+  for (let page = 0; total === null || start < total; page++) {
     if (page > 100_000) throw new ImportError(`The Jellyfin server at ${shown(base)} kept sending pages. Nothing was imported.`);
     const res = await client.json('GET', '/Items', {
       userId,
@@ -507,21 +535,24 @@ async function readPages(client: Client, base: URL, userId: string, pageSize: nu
     if (!isObject(res) || !Array.isArray(res.Items)) {
       throw new ImportError(`The Jellyfin server at ${shown(base)} sent an item list in a shape screentrackr does not know.`);
     }
-    const items = res.Items as unknown[];
-    if (typeof res.TotalRecordCount === 'number' && Number.isInteger(res.TotalRecordCount) && res.TotalRecordCount >= 0) {
-      total = res.TotalRecordCount;
-      firstTotal ??= total;
+    const pageItems = res.Items as unknown[];
+    const count = res.TotalRecordCount;
+    if (typeof count === 'number' && Number.isInteger(count) && count >= 0) {
+      if (total !== null && count !== total) whole = false;
+      total = count;
     }
-    for (const item of items) {
+    for (const item of pageItems) {
       const id = isObject(item) && typeof item.Id === 'string' ? item.Id : null;
-      if (id === null) noId.push(item);
-      else if (!byId.has(id)) byId.set(id, item);
+      if (id !== null && seen.has(id)) {
+        whole = false;
+        continue;
+      }
+      if (id !== null) seen.add(id);
+      items.push(item);
     }
-    if (!items.length) break;
-    start += items.length;
+    if (!pageItems.length) break;
+    start += pageItems.length;
   }
-  if (firstTotal !== null && total !== firstTotal) {
-    warnings.push('The Jellyfin library changed while it was being read (a library scan, say), so a movie may be missing. Run the import again when the scan is done.');
-  }
-  return [...byId.values(), ...noId];
+  if (total !== null && items.length !== total) whole = false;
+  return { items, whole };
 }
