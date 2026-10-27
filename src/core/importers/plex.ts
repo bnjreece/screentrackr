@@ -457,14 +457,16 @@ const container = (body: unknown): Record<string, unknown> => {
 };
 
 async function listSections(client: PlexClient, opts: PlexReadOptions, notices: string[]): Promise<PlexSection[]> {
-  const { body } = await client.get('/library/sections/all');
+  const { body, headers } = await client.get('/library/sections/all');
   const dirs = container(body).Directory;
   if (dirs !== undefined && !Array.isArray(dirs)) throw new ImportError('The Plex server answered with an unreadable list of libraries; stopped without importing');
-  // A list shorter than its own size left libraries out, and their movies
-  // would look deleted to --replace.
-  const listed = num(container(body).size);
-  if (listed !== null && listed !== (Array.isArray(dirs) ? dirs.length : 0)) {
-    throw new ImportError(`The Plex server said it has ${listed} libraries but listed ${Array.isArray(dirs) ? dirs.length : 0}; stopped without importing`);
+  // A list shorter than its own size or total left libraries out, and their
+  // movies would look deleted to --replace.
+  const got = Array.isArray(dirs) ? dirs.length : 0;
+  for (const said of [num(container(body).size), num(container(body).totalSize), num(headers.get('X-Plex-Container-Total-Size'))]) {
+    if (said !== null && said !== got) {
+      throw new ImportError(`The Plex server said it has ${said} libraries but listed ${got}; stopped without importing`);
+    }
   }
   const all = (Array.isArray(dirs) ? dirs : []).map((d) => {
     const x = d as Record<string, unknown>;

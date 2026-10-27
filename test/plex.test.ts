@@ -299,6 +299,17 @@ describe('reading the server', () => {
       return fetch(input, init);
     }) as typeof fetch;
     await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: short })).rejects.toThrow(/2 libraries but listed 1/);
+    for (const extra of [{ body: { totalSize: 2 }, headers: {} }, { body: {}, headers: { 'X-Plex-Container-Total-Size': '2' } }]) {
+      const partial = (async (input: string | URL | Request, init?: RequestInit) => {
+        if (new URL(String(input)).pathname === '/library/sections/all') {
+          return new Response(JSON.stringify({ MediaContainer: { size: 1, ...extra.body, Directory: SECTIONS.slice(0, 1) } }), {
+            headers: { 'content-type': 'application/json', ...extra.headers },
+          });
+        }
+        return fetch(input, init);
+      }) as typeof fetch;
+      await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: partial })).rejects.toThrow(/2 libraries but listed 1/);
+    }
   });
 
   it('does not trust a read holding movies without a ratingKey', async () => {
@@ -804,6 +815,8 @@ describe('importing into the library', () => {
     expect(titleEditionTag("The Glass Harbor (Director's Cut (4K))")).toBe('director s cut 4k');
     expect(titleEditionTag('The Glass Harbor (2009) (4K)')).toBe('4k');
     expect(titleEditionTag('The Glass Harbor')).toBe('');
+    expect(titleEditionTag('The Glass Harbor (Extended Edition) [1080p]')).toBe('extended edition');
+    expect(titleEditionTag('The Glass Harbor [1080p]')).toBe('');
     applyImport(
       db,
       [{ sourceTitle: "The Glass Harbor (Director's Cut (4K))", sourceYear: 2009, sourceRuntimeMin: 128, source: 'csv', status: 'someday', imdbIdHint: 'tt9000002' }],
@@ -812,6 +825,16 @@ describe('importing into the library', () => {
     plexImport([{ ...glassHarbor2009, userRating: 9 }]);
     const nested = items().find((i) => i.sourceTitle === "The Glass Harbor (Director's Cut (4K))");
     expect(nested).toMatchObject({ status: 'someday', myRating: null });
+  });
+
+  it('keeps an edition tag followed by another bracket group apart from a bare Plex movie', () => {
+    applyImport(
+      db,
+      [{ sourceTitle: 'The Glass Harbor (Extended Edition) [1080p]', sourceYear: 2009, sourceRuntimeMin: 128, source: 'csv', status: 'someday', imdbIdHint: 'tt9000002' }],
+      { mode: 'merge' },
+    );
+    plexImport([{ ...glassHarbor2009, userRating: 9 }]);
+    expect(items().find((i) => i.sourceTitle === 'The Glass Harbor (Extended Edition) [1080p]')).toMatchObject({ status: 'someday', myRating: null });
   });
 
   it('never downgrades a watched movie, never clears a rating, and marks an existing movie owned', () => {
