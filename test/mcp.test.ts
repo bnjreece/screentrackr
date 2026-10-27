@@ -95,7 +95,8 @@ describe('tools/list', () => {
     expect(byName.search_movies!.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: false });
     expect(byName.get_movie!.annotations).toMatchObject({ readOnlyHint: true });
     expect(byName.library_stats!.annotations).toMatchObject({ readOnlyHint: true });
-    expect(byName.update_movie!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: true });
+    // watchedAt null deletes every play of the item, so update_movie can destroy history.
+    expect(byName.update_movie!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: true });
     expect(byName.add_to_library!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
     expect(byName.remove_from_library!.annotations).toMatchObject({ destructiveHint: true });
   });

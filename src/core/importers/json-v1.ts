@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { LIBRARY_FORMAT, LIBRARY_FORMAT_VERSION } from '../export.js';
 import { cleanListName } from '../lists.js';
 import { EXTERNAL_ID_KINDS, ITEM_SOURCES, MATCH_STATUSES, STATUSES, WATCHED_ERAS } from '../types.js';
-import { calendarDate, isValidWatchedAt } from '../viewings.js';
+import { calendarDate, isReadableWatchedAt } from '../viewings.js';
 import { ImportError, type ImportRecord, type ParsedImport } from './common.js';
 
 const nullable = <T extends z.ZodType>(t: T) => t.nullable().optional().default(null);
@@ -26,7 +26,7 @@ const ViewingSchema = z.object({
   watchedAt: z
     .string()
     .trim()
-    .refine(isValidWatchedAt, 'Expected YYYY-MM-DD or an ISO date-time')
+    .refine(isReadableWatchedAt, 'Expected YYYY-MM-DD or an ISO date-time')
     .nullable(),
   rewatch: z.boolean().nullish(),
   rating: z.number().int().min(1).max(10).nullish(),

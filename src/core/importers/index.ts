@@ -26,7 +26,7 @@ import {
   applyViewingPlan,
   calendarDate,
   eraOf,
-  isValidWatchedAt,
+  isReadableWatchedAt,
   planIsEmpty,
   planViewingSync,
   viewingsByItem,
@@ -213,7 +213,7 @@ function validate(records: ImportRecord[]): void {
     if (r.myRating != null && !(Number.isInteger(r.myRating) && r.myRating >= 1 && r.myRating <= 10)) {
       fail(`rating must be a whole number from 1 to 10 (got ${String(r.myRating)})`);
     }
-    if (r.watchedAt != null && (typeof r.watchedAt !== 'string' || !isValidWatchedAt(r.watchedAt.trim()))) {
+    if (r.watchedAt != null && (typeof r.watchedAt !== 'string' || !isReadableWatchedAt(r.watchedAt.trim()))) {
       fail(`invalid watched date "${String(r.watchedAt)}"`);
     }
     if (r.viewings != null) {
@@ -221,7 +221,7 @@ function validate(records: ImportRecord[]): void {
       r.viewings.forEach((v, n) => {
         const at = `viewing ${n + 1}`;
         if (typeof v !== 'object' || v === null) fail(`${at} must be an object`);
-        if (v.watchedAt !== null && (typeof v.watchedAt !== 'string' || !isValidWatchedAt(v.watchedAt.trim()))) fail(`${at}: invalid watched date "${String(v.watchedAt)}"`);
+        if (v.watchedAt !== null && (typeof v.watchedAt !== 'string' || !isReadableWatchedAt(v.watchedAt.trim()))) fail(`${at}: invalid watched date "${String(v.watchedAt)}"`);
         if (v.rewatch != null && typeof v.rewatch !== 'boolean') fail(`${at}: rewatch must be true or false`);
         if (v.rating != null && !(Number.isInteger(v.rating) && v.rating >= 1 && v.rating <= 10)) fail(`${at}: rating must be a whole number from 1 to 10 (got ${String(v.rating)})`);
         if (v.sourceRef != null && (typeof v.sourceRef !== 'string' || !v.sourceRef.trim() || v.sourceRef.length > 1000)) fail(`${at}: invalid source ref`);

@@ -77,7 +77,17 @@ export function calendarDate(watchedAt: string): string {
   return watchedAt.slice(0, 10);
 }
 
-/** A well-formed watched date: WATCHED_AT_RE, a real calendar day, and a time Date can read. */
+/**
+ * A watched date as imports accept it (the 0.3.0 rule): WATCHED_AT_RE and a
+ * time Date can read. Date reads some days no calendar has (2023-02-29), and
+ * 0.3.0 stored them, so a library migrated from it, and its backups, must
+ * still import. New dates the user types are checked with isValidWatchedAt.
+ */
+export function isReadableWatchedAt(v: string): boolean {
+  return WATCHED_AT_RE.test(v) && !Number.isNaN(Date.parse(v));
+}
+
+/** A well-formed watched date: WATCHED_AT_RE, a real calendar day, and a time Date can read. For dates the user enters. */
 export function isValidWatchedAt(v: string): boolean {
   if (!WATCHED_AT_RE.test(v) || Number.isNaN(Date.parse(v))) return false;
   const [y, m, d] = calendarDate(v).split('-').map(Number) as [number, number, number];

@@ -10,6 +10,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDb } from '../src/core/db.js';
 import { dbPath } from '../src/core/home.js';
+import { exportLibrary } from '../src/core/export.js';
+import { applyImport, parseImportDetailed } from '../src/core/importers/index.js';
 import { MIGRATIONS, SCHEMA_VERSION } from '../src/core/schema.js';
 import { sqlite } from '../src/core/sqlite.js';
 import { checkWatchedCache, refreshWatched, viewingsOf } from '../src/core/viewings.js';
@@ -89,6 +91,23 @@ describe('schema V4', () => {
     const refreshed = db.sql.prepare('SELECT id, status, watched_at, watched_at_source, watched_era FROM library_items ORDER BY id').all() as unknown as Row[];
     expect(refreshed).toEqual(expected);
     db.close();
+  });
+
+  it('keeps a date 0.3.0 accepted but no calendar has, through export and restore', () => {
+    const raw = new sqlite.DatabaseSync(dbPath(home));
+    for (let v = 0; v < 3; v++) raw.exec(MIGRATIONS[v] as string);
+    raw.exec("INSERT INTO meta (key, value) VALUES ('schema_version', '3')");
+    raw.exec("INSERT INTO library_items (source_title, status, watched_at, match_status, source) VALUES ('Leap Day', 'watched', '2023-02-29', 'unmatched', 'csv')");
+    raw.close();
+    const db = openDb(home);
+    const file = JSON.stringify(exportLibrary(db));
+    db.close();
+    const other = openDb(join(tmp, 'other'));
+    const parsed = parseImportDetailed(file);
+    applyImport(other, parsed.records, { mode: 'replace', lists: parsed.lists });
+    expect(other.sql.prepare('SELECT watched_at AS at FROM library_items').get()).toEqual({ at: '2023-02-29' });
+    expect(viewingsOf(other, 1).map((v) => v.watchedAt)).toEqual(['2023-02-29']);
+    other.close();
   });
 
   it('cascades viewings and memberships when an item is removed', () => {

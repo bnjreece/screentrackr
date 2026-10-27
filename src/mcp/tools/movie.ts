@@ -87,7 +87,8 @@ export const register: RegisterTools = (server, { db }) => {
         watchedAt: z.string().trim().nullable().optional().describe('Watched date, YYYY-MM-DD: adds a play on that date. null removes every play.'),
         myRating: z.number().int().min(1).max(10).nullable().optional().describe('Your rating, 1 to 10; null clears.'),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      // watchedAt null deletes every play of the item (dates, ratings, refs): destructive.
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
     handler((args) => {
       exactlyOne(args);
