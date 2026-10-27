@@ -502,12 +502,13 @@ async function listMovies(
       throw new ImportError(`"${section.title}" answered with an unreadable movie list; stopped without importing`);
     }
     // Plex leaves the list out of an empty page and says `size: 0`. A page
-    // that claims movies but sends none is an error; one that says nothing
-    // about its size can't prove the list ended.
+    // that says nothing about its size can't prove the list ended.
     const size = num(mc.size);
     const meta = (mc.Metadata ?? []) as PlexMetadata[];
-    if (meta.length === 0 && size !== null && size > 0) {
-      throw new ImportError(`"${section.title}" said it sent ${size} movies but sent none; stopped without importing`);
+    // `size` is the number of items on this page: one that disagrees with the
+    // list means a page lost movies (or the answer is not what it says).
+    if (size !== null && size !== meta.length) {
+      throw new ImportError(`"${section.title}" said it sent ${size} movies but sent ${meta.length === 0 ? 'none' : meta.length}; stopped without importing`);
     }
     if (mc.Metadata === undefined && size === null) irregular = true;
     // The largest total any page reported, in the body or the header: a later

@@ -114,6 +114,23 @@ describe('import plex', () => {
     expect(both.stderr).toMatch(/not both/);
   });
 
+  // A real terminal on stdin (a pseudo-terminal from Python's pty module, when
+  // python3 is available): the command must refuse before reading, or it would
+  // wait for a token typed on screen and this would time out.
+  const python = spawnSync('python3', ['-c', 'import pty'], { encoding: 'utf8' }).status === 0;
+  it.skipIf(!python)('refuses --token-stdin from a terminal before reading', () => {
+    const home = freshHome();
+    const res = spawnSync(
+      'python3',
+      ['-c', 'import pty, sys; sys.exit(pty.spawn(sys.argv[1:]) >> 8)', process.execPath, CLI, '--home', home, 'import', 'plex', '--token-stdin'],
+      { env: { ...process.env, PLEX_TOKEN: undefined } as NodeJS.ProcessEnv, encoding: 'utf8', input: '', timeout: 30_000 },
+    );
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/does not read from a terminal/);
+    expect(existsSync(home)).toBe(false);
+  });
+
   it('refuses a token in the URL without printing it', () => {
     const home = freshHome();
     const r = run(['--home', home, 'import', 'plex', '--url', `http://127.0.0.1:9/?X-Plex-Token=${TOKEN}`], { PLEX_TOKEN: 'another-fake-1' });
