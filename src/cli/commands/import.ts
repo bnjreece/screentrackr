@@ -11,7 +11,7 @@ import {
   type ImdbListKind,
   type ImdbOptions,
 } from '../../core/importers/imdb.js';
-import { parseTrakt, readTraktExport } from '../../core/importers/trakt.js';
+import { isExcludedTraktName, parseTrakt, readTraktExport, traktFileOf } from '../../core/importers/trakt.js';
 import { applyImport, detectFormat, FORMATS, parseImportDetailed, type ImportFormat, type ParsedImport } from '../../core/importers/index.js';
 import { bool, str, strs, type Command } from '../command.js';
 import { UserError } from '../context.js';
@@ -82,7 +82,7 @@ export const importCmd: Command = {
     "`import imdb <file.csv>...` reads IMDb CSV exports you downloaded from imdb.com (Your Ratings, your watchlist, check-ins or a list). Rated movies are marked watched with your rating; watchlist movies go in the queue only when they are new; nothing is marked owned. Several files are read together. --as says what a list export is (watchlist by default), --collection names a list's collection, --include-type brings in more than movies (repeatable or comma-separated: " +
       IMDB_INCLUDE_TYPES.join(', ') +
       '), --checkin-dates uses check-in dates as watched dates, --notes-from-description keeps a list row\'s Description as notes.',
-    "`import trakt <export.zip|folder>` reads the data export you download from Trakt (Settings > Data > Raw export), or files from it. Only movie history, ratings, watchlist, collection and the export's error list are read. Watched movies are marked watched with the latest play's date, watchlist movies go in the queue only when they are new, and only the collection marks a movie owned. Plays logged in bulk (10 or more at the same second) lose their dates unless --keep-bulk-dates. It only merges (--replace is refused). Nothing is fetched from Trakt.",
+    "`import trakt <export.zip|folder>` reads the data export you download from Trakt (Settings > Data > Raw export), or files from it. Only movie history, ratings, watchlist, collection and the export's error list are read. Watched movies are marked watched with the latest play's date, watchlist movies go in the queue only when they are new, and only the collection marks a movie owned. Plays logged in bulk (10 or more at the same second) lose their dates unless --keep-bulk-dates. It only merges (--replace is refused). A plain `import` of the export ZIP or one of those files does the same, and refuses the export's other files without opening them. Nothing is fetched from Trakt.",
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
     '--replace backs up your library to backups/ first, then replaces it.',
     '--dry-run reports what the import would add, update and leave for review, and changes nothing (no backup either).',
@@ -156,17 +156,29 @@ export const importCmd: Command = {
       timeoutMs = Math.round(secs * 1000);
     }
 
+    const plain = !trakt && !imdb && !appleTv;
+    // The other files of a Trakt export (account settings, other people,
+    // comments, lists) are refused by name, before they are opened.
+    if (plain && isExcludedTraktName(file)) {
+      throw new UserError(
+        `${basename(file)}: a Trakt export file ScreenTrackr does not read (only movie history, ratings, watchlist and collection are). It was not opened. Use \`screentrackr import trakt <the export ZIP>\`.`,
+      );
+    }
+    // A Trakt export's ZIP, or one of the files it reads, goes to the bounded
+    // Trakt reader, as with `import trakt`.
+    const traktRoute =
+      trakt || format === 'trakt' || (plain && format === undefined && (traktFileOf(file) !== null || /\.zip$/i.test(file)));
     const keepBulkDates = bool(values, 'keep-bulk-dates');
-    if (keepBulkDates && !trakt) throw new UserError('--keep-bulk-dates only applies to `import trakt`');
+    if (keepBulkDates && !traktRoute) throw new UserError('--keep-bulk-dates only applies to `import trakt`');
     const replace = bool(values, 'replace');
     // A Trakt export can't show that it is complete (a missing file may mean
     // "none" or "failed"), so it never replaces a library: it only merges.
     const traktReplace =
       'A Trakt import only merges: an export cannot show that it is complete, so --replace could drop movies. Nothing was changed. Run it without --replace.';
-    if (replace && (trakt || format === 'trakt')) throw new UserError(traktReplace);
+    if (replace && traktRoute) throw new UserError(traktReplace);
 
     let parsed: Parsed;
-    if (trakt || format === 'trakt') {
+    if (traktRoute) {
       if (imdbFlags) throw new UserError('--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files');
       // The bounded reader checks each name against the allow-list before opening it.
       parsed = parseTraktExport(files, keepBulkDates);

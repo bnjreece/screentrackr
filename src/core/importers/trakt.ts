@@ -77,6 +77,19 @@ export function traktFileOf(name: string): { kind: TraktKind | 'errors'; page: n
   return { kind: (m[1] as string).toLowerCase() as TraktKind, page: m[2] ? Number(m[2]) : 1 };
 }
 
+/**
+ * The other files of a Trakt export, by name: account and personal data
+ * (user-settings), other people (network-*), comments, likes, lists, notes,
+ * TV and playback. A plain import refuses these before opening them.
+ */
+const EXCLUDED_RE = /^(user|network|comments|likes|hidden|notes|lists|ratings|watched|collection)-[^/]*\.json$/i;
+
+/** Whether a name is a Trakt export file this never reads (not on the allow-list, but named like the export's other files). */
+export function isExcludedTraktName(name: string): boolean {
+  const base = basename(name.replace(/\\/g, '/'));
+  return EXCLUDED_RE.test(base) && traktFileOf(base) === null;
+}
+
 type Row = Record<string, unknown>;
 const isObj = (v: unknown): v is Row => typeof v === 'object' && v !== null && !Array.isArray(v);
 

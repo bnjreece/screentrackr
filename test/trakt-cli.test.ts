@@ -4,7 +4,7 @@
  * Every title and username in the fixtures is invented.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -103,7 +103,7 @@ describe('import trakt', () => {
     writeFileSync(other, toBytes(exportFiles())['lists-watchlist.json'] as Buffer);
     const r = run(['import', other, '--format', 'trakt']);
     expect(r.code).toBe(1);
-    expect(r.stderr).toMatch(/not a Trakt export file/);
+    expect(r.stderr).toMatch(/does not read/);
   });
 
   it('refuses a ZIP with nothing it reads, flags for other importers, and --keep-bulk-dates elsewhere', () => {
@@ -114,6 +114,33 @@ describe('import trakt', () => {
     expect(run(['import', 'trakt', zip(exportFiles()), '--as', 'watchlist']).stderr).toMatch(/only apply to IMDb/);
     expect(run(['import', 'trakt', zip(exportFiles()), '--format', 'csv']).stderr).toMatch(/--format does not apply/);
     expect(run(['import', 'imdb', 'x.csv', '--keep-bulk-dates']).stderr).toMatch(/only applies to `import trakt`/);
+  });
+
+  it("a plain import refuses the export's other files by name, without opening them", () => {
+    const dir = join(tmp, `other-${++n}`);
+    mkdirSync(dir);
+    for (const name of ['network-followers.json', 'user-settings.json', 'comments-movies.json', 'lists-favorites-2.json', 'watched-playback.json', 'Ratings-Shows.json']) {
+      const path = join(dir, name);
+      writeFileSync(path, '["private-person",]');
+      // Unreadable: a read would fail with a different error.
+      chmodSync(path, 0o000);
+      const cases = name === 'network-followers.json' ? [['import', path], ['import', path, '--format', 'json-v1'], ['import', path, '--json']] : [['import', path]];
+      for (const args of cases) {
+        const r = run(args);
+        expect(r.code, args.join(' ')).toBe(1);
+        expect(r.stderr).toMatch(/does not read.*It was not opened/);
+        expect(r.stderr + r.stdout).not.toContain('private-person');
+      }
+      chmodSync(path, 0o600);
+    }
+  }, 60_000);
+
+  it('a plain import of the export ZIP goes through the Trakt reader, merge-only', () => {
+    const path = zip(exportFiles());
+    expect(run(['import', path, '--replace']).stderr).toMatch(/only merges/);
+    const r = run(['import', path, '--json', '--keep-bulk-dates']);
+    expect(r.code, r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ format: 'trakt', added: 6 });
   });
 
   it('a plain import detects a single Trakt page', () => {
