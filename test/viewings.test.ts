@@ -305,6 +305,39 @@ describe('planViewingSync', () => {
     ]);
   });
 
+  it('lets a play with a ref become dateless', () => {
+    const p = planViewingSync([v(10, '2020-01-01', 'trakt', { sourceRef: 'R' })], [{ watchedAt: null, source: 'trakt', sourceRef: 'R' }], new Set(['trakt']));
+    expect(p).toEqual({ inserts: [], updates: [{ id: 10, watchedAt: null }], deletes: [] });
+  });
+
+  it('counts the day a play moves to, not the day it left', () => {
+    const p = planViewingSync(
+      [v(10, '2020-01-01', 'trakt', { sourceRef: 'R' })],
+      [
+        { watchedAt: '2021-01-01', source: 'trakt', sourceRef: 'R' },
+        { watchedAt: '2020-01-01', source: 'trakt' },
+      ],
+      new Set(['trakt']),
+    );
+    expect(p.updates).toEqual([{ id: 10, watchedAt: '2021-01-01' }]);
+    expect(p.inserts.map((i) => [i.watchedAt, i.sourceRef])).toEqual([['2020-01-01', null]]);
+    expect(p.deletes).toEqual([]);
+  });
+
+  it('in exact mode keeps a play with a ref and one without on the same day apart', () => {
+    const incoming = [
+      { watchedAt: '2020-01-01', source: 'manual' as const, sourceRef: 'manual:00aa', rating: 5 },
+      { watchedAt: '2020-01-01', source: 'manual' as const, rating: 7 },
+    ];
+    expect(planViewingSync([], incoming, new Set(), { exact: true }).inserts).toHaveLength(2);
+    // Not exact: one play per source and day without a ref.
+    expect(planViewingSync([], incoming, new Set()).inserts).toHaveLength(1);
+    // Exact mode never upgrades a stored ref-less play with an incoming ref.
+    const p = planViewingSync([v(3, '2020-01-01', 'manual')], [incoming[0] as (typeof incoming)[number]], new Set(), { exact: true });
+    expect(p.updates).toEqual([]);
+    expect(p.inserts).toHaveLength(1);
+  });
+
   it('never deletes manual plays even when manual is named complete', () => {
     const p = planViewingSync(stored, [], new Set(['manual']));
     expect(p.deletes).toEqual([]);

@@ -6,7 +6,7 @@ import { listsOfItem } from '../../core/lists.js';
 import { findCatalogByTitle, getCatalogMovie, type CatalogMovie } from '../../core/movie.js';
 import { CatalogMissingError } from '../../core/search.js';
 import { STATUSES, WATCHED_ERAS, type LibraryItem, type Status, type WatchedEra } from '../../core/types.js';
-import { countPlays, deriveRewatch, viewingsOf, type Viewing } from '../../core/viewings.js';
+import { countPlays, deriveRewatch, viewingsByItem, viewingsOf, type Viewing } from '../../core/viewings.js';
 import { toId, toInt } from '../args.js';
 import { bool, str, type Command } from '../command.js';
 import { UserError, type Ctx } from '../context.js';
@@ -78,8 +78,19 @@ export interface ShowHistory {
   lists: string[];
 }
 
-function historyLines(h: ShowHistory): [string, string | number | null][] {
-  const rewatch = deriveRewatch(h.viewings);
+/**
+ * Each of an item's plays flagged as a rewatch or not, judged against the
+ * film's plays in every linked edition (a play of another edition earlier
+ * makes this one a rewatch).
+ */
+function rewatchFlags(db: Db, item: LibraryItem, viewings: Viewing[]): Map<number, boolean> {
+  const linked = item.tconst !== null && (item.matchStatus === 'matched' || item.matchStatus === 'manual');
+  const editions = linked ? resolveRef(db, item.tconst as string) : null;
+  const ids = editions?.kind === 'many' ? editions.items.map((i) => i.id) : [item.id];
+  return deriveRewatch(ids.length > 1 ? [...viewingsByItem(db, ids).values()].flat() : viewings);
+}
+
+function historyLines(h: ShowHistory, rewatch: Map<number, boolean>): [string, string | number | null][] {
   const shown = h.viewings.slice(0, SHOW_PLAYS);
   const lines: [string, string | number | null][] = [['Plays', h.plays]];
   shown.forEach((v, i) => lines.push([i === 0 ? 'History' : '', playLine(v, rewatch.get(v.id) === true)]));
@@ -88,10 +99,10 @@ function historyLines(h: ShowHistory): [string, string | number | null][] {
   return lines;
 }
 
-function showText(item: LibraryItem | null, movie: CatalogMovie | null, history: ShowHistory | null): string {
+function showText(item: LibraryItem | null, movie: CatalogMovie | null, history: ShowHistory | null, rewatch: Map<number, boolean>): string {
   const blocks: string[] = [];
   if (movie) blocks.push(keyValues(movieLines(movie)));
-  if (item) blocks.push(keyValues([...itemLines(item), ...(history ? historyLines(history) : [])]));
+  if (item) blocks.push(keyValues([...itemLines(item), ...(history ? historyLines(history, rewatch) : [])]));
   else blocks.push('Not in your library. Add it with `screentrackr add ' + (movie?.tconst ?? '') + '`.');
   return blocks.join('\n\n');
 }
@@ -116,11 +127,13 @@ export const show: Command = {
       throw new UserError(TCONST.test(ref) && !catalogReady(db) ? new CatalogMissingError().message : `No library item or catalog movie matches "${ref}"`);
     }
     let history: ShowHistory | null = null;
+    let rewatch = new Map<number, boolean>();
     if (item) {
       const viewings = viewingsOf(db, item.id);
       history = { viewings, plays: countPlays(viewings), lists: listsOfItem(db, item.id) };
+      rewatch = rewatchFlags(db, item, viewings);
     }
-    ctx.emit({ item, movie, ...(history ?? {}) }, () => showText(item, movie, history));
+    ctx.emit({ item, movie, ...(history ?? {}) }, () => showText(item, movie, history, rewatch));
   },
 };
 

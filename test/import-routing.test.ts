@@ -122,3 +122,13 @@ describe('plain import of a ZIP or folder', () => {
     await expect(importCmd.run(ctx, ['plex'], { 'password-stdin': true })).rejects.toThrow(/only apply to `import jellyfin`/);
   });
 });
+
+describe('import runner', () => {
+  it('reads the package version from the package root', async () => {
+    const { packageVersion } = await import('../src/cli/import-runner.js');
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version: string };
+    expect(packageVersion()).toBe(pkg.version);
+  });
+});

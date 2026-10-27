@@ -82,6 +82,21 @@ describe('import', () => {
     expect(checkWatchedCache(b)).toEqual([]);
   });
 
+  it('restores a play with a ref and one without on the same day, an explicitly empty era, and long descriptions', () => {
+    const id = Number(
+      a.sql.prepare("INSERT INTO library_items (source_title, status, match_status, source) VALUES ('Pale Rooftops', 'watched', 'unmatched', 'csv')").run().lastInsertRowid,
+    );
+    addViewing(a, id, { watchedAt: '2021-03-03', source: 'manual', sourceRef: 'manual:00112233aabbccdd', rating: 5 });
+    addViewing(a, id, { watchedAt: '2021-03-03', source: 'manual', rating: 7 });
+    a.sql.prepare('UPDATE library_items SET watched_era = NULL WHERE id = ?').run(id);
+    createList(a, 'Emoji', { description: '\u{1F383}'.repeat(600) });
+    const first = exportLibrary(a);
+    expect(first.items[0]?.watchedEra).toBeNull();
+    const parsed = parseImportDetailed(JSON.stringify(first));
+    applyImport(b, parsed.records, { mode: 'replace', lists: parsed.lists });
+    expect(strip(exportLibrary(b))).toEqual(strip(first));
+  });
+
   it('merges add-only: plays the library has and the file lacks stay, and a re-import is unchanged', () => {
     const id = seed(a);
     const parsed = parseImportDetailed(JSON.stringify(exportLibrary(a)));

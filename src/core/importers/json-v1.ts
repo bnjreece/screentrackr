@@ -107,6 +107,7 @@ export function parseJsonV1(data: unknown): ParsedImport {
       applePersistentId: it.applePersistentId,
       source: it.source,
     };
+    rec.exact = true;
     if (it.owned != null) rec.owned = it.owned;
     if (it.status != null) rec.status = it.status;
     if (hintOnly) rec.imdbIdHint = it.tconst;

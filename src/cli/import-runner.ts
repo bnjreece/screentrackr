@@ -194,9 +194,10 @@ function parseLetterboxdPaths(paths: string[], opts: LetterboxdOptions, detected
   return { ...res, warnings: [...warnings, ...res.warnings], notices: [...chosen.notices, ...res.notices] };
 }
 
-function packageVersion(): string {
+/** This package's version (sent to Jellyfin as the client version). */
+export function packageVersion(): string {
   try {
-    const pkg = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')) as { version?: unknown };
+    const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version?: unknown };
     return typeof pkg.version === 'string' ? pkg.version : '0';
   } catch {
     return '0';

@@ -46,6 +46,9 @@ describe('lists', () => {
   it('normalizes names: NFC, trimmed, case-insensitive', () => {
     expect(normListName('  Halloween ')).toBe('halloween');
     expect(normListName('Café')).toBe(normListName('Café'));
+    // Case-insensitive beyond lowercasing: a final sigma, a sharp s.
+    expect(normListName('ΟΣ')).toBe(normListName('οσ'));
+    expect(normListName('Straße')).toBe(normListName('STRASSE'));
   });
 
   it('creates, finds case-insensitively, and refuses a duplicate', () => {
@@ -57,6 +60,12 @@ describe('lists', () => {
     expect(() => createList(db, 'x'.repeat(101))).toThrow(LibraryError);
     expect(createList(db, '1917').name).toBe('1917');
     expect(listLists(db).map((x) => x.name)).toEqual(['1917', 'Halloween']);
+  });
+
+  it('finds a Greek name in any case and refuses its twin', () => {
+    createList(db, 'ΟΣ');
+    expect(getList(db, 'οσ')?.name).toBe('ΟΣ');
+    expect(() => createList(db, 'οσ')).toThrow(/already exists/);
   });
 
   it('ensureList creates once', () => {

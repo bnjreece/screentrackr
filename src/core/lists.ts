@@ -4,7 +4,7 @@
  * read-only from imports.
  *
  * Names are any Unicode up to 100 characters, unique case-insensitively:
- * `norm_name` is the name in NFC, trimmed and lowercased, so "halloween" is
+ * `norm_name` is the name in NFC, trimmed and case-folded, so "halloween" is
  * "Halloween". Every function takes a list by name; membership writes take
  * item ids (titles are resolved by the caller, through resolveRef). Deleting a
  * list never deletes a movie, and removing a movie drops its memberships.
@@ -30,9 +30,13 @@ const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
 
-/** The key a name is unique by: NFC, trimmed, lowercased. */
+/**
+ * The key a name is unique by: NFC, trimmed and case-folded. Folding goes
+ * through upper case and back (so "ß" meets "SS") and treats a final sigma
+ * as a sigma, which lowercasing alone does not.
+ */
 export function normListName(name: string): string {
-  return name.normalize('NFC').trim().toLowerCase().normalize('NFC');
+  return name.normalize('NFC').trim().toUpperCase().toLowerCase().replace(/\u03c2/g, '\u03c3').normalize('NFC');
 }
 
 /** A list name as stored: NFC and trimmed. Throws LibraryError when empty, too long or holding control characters. */

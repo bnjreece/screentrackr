@@ -47,6 +47,8 @@ function seedV3(): Row[] {
   ins.run('Queue Only', 'queue', null, null, null, 'csv');
   ins.run('Watched Undated', 'watched', '2020s', null, null, 'imdb');
   ins.run('Dated But Queued', 'someday', null, '2021-06-07 20:00', 'jellyfin', 'jellyfin');
+  // A 0.3.0 JSON v1 import could store the literal source "manual"; V4 reads it as NULL (both: a date the user set).
+  ins.run('Literal Manual', 'watched', null, '2022-02-02', 'manual', 'json');
   const rows = raw.prepare('SELECT id, status, watched_at, watched_at_source, watched_era FROM library_items ORDER BY id').all() as unknown as Row[];
   raw.close();
   return rows;
@@ -67,7 +69,9 @@ describe('schema V4', () => {
     const before = seedV3();
     const db = openDb(home);
     const after = db.sql.prepare('SELECT id, status, watched_at, watched_at_source, watched_era FROM library_items ORDER BY id').all() as unknown as Row[];
-    expect(after).toEqual(before);
+    // The one change: a literal "manual" source becomes NULL, which means the same.
+    const expected = before.map((r) => (r.watched_at_source === 'manual' ? { ...r, watched_at_source: null } : r));
+    expect(after).toEqual(expected);
 
     // One viewing per dated item: the date string unchanged, the source or manual.
     for (const r of before) {
@@ -83,7 +87,7 @@ describe('schema V4', () => {
     // refreshWatched reproduces every cached date and source exactly.
     for (const r of before) refreshWatched(db, r.id);
     const refreshed = db.sql.prepare('SELECT id, status, watched_at, watched_at_source, watched_era FROM library_items ORDER BY id').all() as unknown as Row[];
-    expect(refreshed).toEqual(before);
+    expect(refreshed).toEqual(expected);
     db.close();
   });
 
@@ -99,7 +103,7 @@ describe('schema V4', () => {
     db.sql.exec('INSERT INTO list_items (list_id, item_id) VALUES (1, 2)');
     db.sql.exec('DELETE FROM lists');
     expect(db.sql.prepare('SELECT COUNT(*) AS n FROM list_items').get()).toEqual({ n: 0 });
-    expect(db.sql.prepare('SELECT COUNT(*) AS n FROM library_items').get()).toEqual({ n: 5 });
+    expect(db.sql.prepare('SELECT COUNT(*) AS n FROM library_items').get()).toEqual({ n: 6 });
     db.close();
   });
 

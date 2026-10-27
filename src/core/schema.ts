@@ -223,11 +223,14 @@ ALTER TABLE library_items ADD COLUMN watched_at_source TEXT;
  * string unchanged and its watched-date source, or `manual` when there was
  * none (the user set it, a JSON v1 file gave it without a source, or it
  * predates V3): those dates were never clearable, and no import removes a
- * manual viewing. The cached columns are left exactly as they were.
+ * manual viewing. The cached columns are left exactly as they were, with one
+ * exception: a literal `manual` source (a 0.3.x JSON v1 file could name it)
+ * becomes NULL, which the cache uses for a manual play and which meant the
+ * same in 0.3.x (a date no import clears).
  *
  * lists and list_items are the user's own lists (not `collection`, which is
  * the source's folder name). Names are unique case-insensitively through
- * norm_name (NFC, trimmed, lowercased; see core/lists.ts).
+ * norm_name (NFC, trimmed, case-folded; see core/lists.ts).
  */
 const V4 = `
 CREATE TABLE viewings (
@@ -248,6 +251,7 @@ CREATE UNIQUE INDEX viewings_dated ON viewings(item_id, source, substr(watched_a
 INSERT INTO viewings (item_id, watched_at, rewatch, rating, source, source_ref)
   SELECT id, watched_at, NULL, NULL, COALESCE(watched_at_source, 'manual'), NULL
   FROM library_items WHERE watched_at IS NOT NULL ORDER BY id;
+UPDATE library_items SET watched_at_source = NULL WHERE watched_at_source = 'manual';
 
 CREATE TABLE lists (
   id          INTEGER PRIMARY KEY,

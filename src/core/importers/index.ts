@@ -188,7 +188,7 @@ function validate(records: ImportRecord[]): void {
     if (r.statusIfNew !== undefined && !(STATUSES as readonly string[]).includes(r.statusIfNew)) {
       fail(`invalid new-item status "${String(r.statusIfNew)}"`);
     }
-    for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'imdbIdExact', 'clearWatchedAtIfOwn', 'viewingsComplete'] as const) {
+    for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'imdbIdExact', 'clearWatchedAtIfOwn', 'viewingsComplete', 'exact'] as const) {
       if (r[flag] !== undefined && typeof r[flag] !== 'boolean') fail(`${flag} must be true or false`);
     }
     if (r.watchedAtSource != null && !(ITEM_SOURCES as readonly string[]).includes(r.watchedAtSource)) {
@@ -374,7 +374,10 @@ function cleanRecord(r: ImportRecord): CleanRecord {
 type CleanRecord = ImportRecord & { plays: NewViewing[]; complete: ReadonlySet<string>; listNames: string[] };
 
 /** How the record's plays meet the item's stored ones. */
-const planFor = (cur: PoolItem, r: CleanRecord): ViewingPlan => planViewingSync(cur.viewings, r.plays, r.complete);
+const planFor = (cur: PoolItem, r: CleanRecord): ViewingPlan => planViewingSync(cur.viewings, r.plays, r.complete, { exact: r.exact === true });
+
+/** An era the record gives (or, for JSON v1, its null) is its word; otherwise the era follows the plays (refreshWatched). */
+const eraLocked = (r: CleanRecord): boolean => r.watchedEra != null || r.exact === true;
 
 /** The record's lists the item is not in yet (normalized names). */
 const listsToAdd = (cur: PoolItem, r: CleanRecord): string[] => r.listNames.filter((n) => !cur.lists.includes(normListName(n)));
@@ -627,16 +630,21 @@ function resolveMergeTarget(pool: Existing[], r: CleanRecord, t: Target, rec: Id
   return { kind: 'update', id: first.item.id };
 }
 
-/** Whether two items hold the same data (external ids included), local ids, dates and the watched date's source aside. */
+/**
+ * Whether two items hold the same data (external ids, plays and lists
+ * included), local ids, dates and the watched date's source aside. Plays
+ * compare as a set, without their ids or when they were added.
+ */
 function sameContent(a: PoolItem, b: PoolItem): boolean {
   const content = (x: PoolItem) => {
-    const rest: Partial<PoolItem> = { ...x };
+    const rest: Partial<PoolItem> & { plays?: string[] } = { ...x };
     delete rest.id;
     delete rest.watchedAtSource;
-    delete rest.viewings;
-    delete rest.lists;
     delete rest.addedAt;
     delete rest.updatedAt;
+    rest.plays = x.viewings.map(playKey).sort();
+    delete rest.viewings;
+    rest.lists = [...x.lists].sort();
     return JSON.stringify(rest);
   };
   return content(a) === content(b);
@@ -652,7 +660,7 @@ function isTwin(cur: PoolItem, r: CleanRecord, t: Target): boolean {
   const status = newStatus(r);
   // The era a new item would get: the record's, else the one its latest play implies (refreshWatched).
   const latest = latestPlay(r.plays);
-  const era = status === 'watched' ? (r.watchedEra ?? (latest === null ? null : eraOf(latest))) : null;
+  const era = status === 'watched' ? (r.watchedEra ?? (latest === null || eraLocked(r) ? null : eraOf(latest))) : null;
   const same =
     cur.sourceTitle === r.sourceTitle.trim() &&
     cur.tconst === t.tconst &&
@@ -880,8 +888,6 @@ function writeImport(
     const claimed = new Set<number>();
     const unclaimed = () => pool.filter((e) => !claimed.has(e.item.id));
     const summary: ImportSummary = { added: 0, updated: 0, unchanged: 0, needsReview: 0, reviews: [], backupPath };
-    // An era the record gives is its word; otherwise the era follows the plays (refreshWatched).
-    const eraLocked = (r: CleanRecord) => r.watchedEra != null;
     const targets = records.map((r) => targetFor(db, r));
 
     // Exact twins first, so a later, sparser record can't take an earlier row's own item.
@@ -942,7 +948,7 @@ function writeImport(
         );
         const id = Number(res.lastInsertRowid);
         for (const [kind, value] of Object.entries(r.externalIds ?? {})) addExternalId.run(id, kind, value);
-        if (r.plays.length) applyViewingPlan(db, id, planViewingSync([], r.plays, new Set()), { eraLocked: eraLocked(r) });
+        if (r.plays.length) applyViewingPlan(db, id, planViewingSync([], r.plays, new Set(), { exact: r.exact === true }), { eraLocked: eraLocked(r) });
         writeLists(id, r.listNames);
         storeCandidates(id, t);
         summary.added++;

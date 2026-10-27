@@ -184,6 +184,31 @@ describe('viewings on import', () => {
   });
 });
 
+describe('items that differ only in plays or lists', () => {
+  const twins = () => {
+    applyImport(db, [{ sourceTitle: 'Pale Rooftops', source: 'paste' }, { sourceTitle: 'Pale Rooftops', source: 'paste' }], { mode: 'merge' });
+    return (db.sql.prepare('SELECT id FROM library_items ORDER BY id').all() as { id: number }[]).map((r) => r.id) as [number, number];
+  };
+
+  it('are not interchangeable when their lists differ', () => {
+    const [a, b] = twins();
+    createList(db, 'Halloween');
+    createList(db, 'Winter');
+    db.sql.prepare('INSERT INTO list_items (list_id, item_id) SELECT id, ? FROM lists WHERE name = ?').run(a, 'Halloween');
+    db.sql.prepare('INSERT INTO list_items (list_id, item_id) SELECT id, ? FROM lists WHERE name = ?').run(b, 'Winter');
+    const res = applyImport(db, [{ sourceTitle: 'Pale Rooftops', source: 'csv', notes: 'changed' }], { mode: 'merge' });
+    expect(res).toMatchObject({ updated: 0, reviews: [{ candidateIds: [a, b] }] });
+  });
+
+  it('are not interchangeable when their plays differ', () => {
+    const [a, b] = twins();
+    addViewing(db, a, { watchedAt: null, source: 'trakt' });
+    addViewing(db, b, { watchedAt: null, source: 'plex' });
+    const res = applyImport(db, [{ sourceTitle: 'Pale Rooftops', source: 'csv', notes: 'changed' }], { mode: 'merge' });
+    expect(res).toMatchObject({ updated: 0, reviews: [{ candidateIds: [a, b] }] });
+  });
+});
+
 describe('lists on import', () => {
   it('creates lists on demand and only ever adds memberships', () => {
     const r = (lists: string[]): ImportRecord => ({ sourceTitle: 'Pale Rooftops', source: 'letterboxd', lists });

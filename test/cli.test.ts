@@ -820,3 +820,21 @@ describe('0.4.0 foundation surface', () => {
     expect(run(['doctor'], { home }).stdout).toMatch(/Watched dates\s+1 item/);
   });
 });
+
+describe('0.4.0 foundation surface, across editions', () => {
+  it('show marks a rewatch from a play of another edition of the film', () => {
+    importPaste();
+    const [first] = itemIds('Quiet Ledger');
+    const added = json<{ id: number }>(run(['add', 'tt9000003', '--new-edition', '--json'], { home }));
+    const db = openDb(home);
+    try {
+      addViewing(db, first as number, { watchedAt: '2020-01-01', source: 'manual' });
+      addViewing(db, added.id, { watchedAt: '2021-01-01', source: 'manual' });
+    } finally {
+      db.close();
+    }
+    const t = run(['show', String(added.id)], { home });
+    expect(t.code, t.stderr).toBe(0);
+    expect(t.stdout).toMatch(/2021-01-01\s+R\s+manual/);
+  });
+});

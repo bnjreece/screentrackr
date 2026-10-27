@@ -53,7 +53,7 @@ export interface NewViewing {
 /** The fields an import or a sync may change on a stored viewing. */
 export interface ViewingUpdate {
   id: number;
-  watchedAt?: string;
+  watchedAt?: string | null;
   sourceRef?: string;
   rewatch?: boolean | null;
   rating?: number | null;
@@ -408,46 +408,69 @@ export const planIsEmpty = (p: ViewingPlan): boolean => p.inserts.length === 0 &
  * Decide how an import's plays for one item meet the stored ones. Pure.
  *
  * Per source: an incoming play with a ref matches the stored play with that
- * ref, else a stored play of the same source and calendar date that has no
+ * ref (taking its date, which may be null: a play found to have no real
+ * date), else a stored play of the same source and calendar date that has no
  * ref (which it upgrades with its ref, flag and rating). A dated play with no
  * ref is one per source and calendar date: it matches a stored play of that
- * day or is added once. Dateless plays with no ref match stored dateless ones
- * one for one, so a source's dateless count only grows to what it sends.
- * Matched plays take the incoming rewatch flag and rating when given
- * (undefined leaves them), and a play matched by ref takes its date too.
+ * day or is added once (the days counted are those the plan leaves, so a
+ * play moved off a day frees it). Dateless plays with no ref match stored
+ * dateless ones one for one, so a source's dateless count only grows to what
+ * it sends. Matched plays take the incoming rewatch flag and rating when
+ * given (undefined leaves them).
+ *
+ * With `exact` (a ScreenTrackr JSON v1 file, ScreenTrackr's own record of
+ * these plays) a play only matches the very same stored play: the same ref,
+ * or no ref and the same day (the unique index). A ref never upgrades a
+ * ref-less play and a ref-less play never folds into one with a ref, so a
+ * restore keeps every play the file lists.
  *
  * For each source in `complete`, the stored plays of that source that nothing
  * matched are deleted: the incoming set is that source's whole history of the
  * film. `manual` plays are never deleted, and no other source's plays are
  * ever touched.
  */
-export function planViewingSync(stored: readonly Viewing[], incoming: readonly NewViewing[], complete: ReadonlySet<string>): ViewingPlan {
+export function planViewingSync(
+  stored: readonly Viewing[],
+  incoming: readonly NewViewing[],
+  complete: ReadonlySet<string>,
+  opts: { exact?: boolean } = {},
+): ViewingPlan {
+  const exact = opts.exact === true;
   const plan: ViewingPlan = { inserts: [], updates: [], deletes: [] };
   // Inserts keep the incoming order across sources, so a restore adds plays in
   // the order the file lists them and same-day ties resolve as they did.
   const order = new Map(incoming.map((v, i) => [v, i]));
   const insertedFrom = new Map<NewViewing, number>();
   const sources = [...new Set([...incoming.map((v) => v.source), ...complete])] as ItemSource[];
+  const dayOf = (d: string | null) => (d === null ? null : calendarDate(d));
   for (const source of sources) {
     const mine = stored.filter((v) => v.source === source);
     const inc = incoming.filter((v) => v.source === source);
     const used = new Set<number>();
-    const days = new Set(mine.filter((v) => v.watchedAt !== null).map((v) => calendarDate(v.watchedAt as string)));
+    /** Where each matched stored play ends up (its date after this plan). */
+    const resultDay = new Map<number, string | null>();
+    /** Days this plan inserts a play on (in exact mode, ref-less plays only). */
+    const insertedDays = new Set<string>();
     const refs = new Set<string>();
     const free = (pred: (v: Viewing) => boolean) => mine.find((v) => !used.has(v.id) && pred(v));
+    /** Whether a ref-less play on `day` would duplicate one the plan leaves for this source. */
+    const dayTaken = (day: string) =>
+      insertedDays.has(day) ||
+      mine.some((v) => (used.has(v.id) ? resultDay.get(v.id) === day && (!exact || v.sourceRef === null) : !exact && dayOf(v.watchedAt) === day));
     const insert = (v: NewViewing) => {
       const row: NewViewing = { watchedAt: v.watchedAt, source, rewatch: v.rewatch ?? null, rating: v.rating ?? null, sourceRef: v.sourceRef ?? null };
       insertedFrom.set(row, order.get(v) ?? 0);
       plan.inserts.push(row);
-      if (v.watchedAt !== null) days.add(calendarDate(v.watchedAt));
+      if (row.watchedAt !== null && (!exact || row.sourceRef === null)) insertedDays.add(calendarDate(row.watchedAt));
     };
     const update = (cur: Viewing, v: NewViewing, how: 'ref' | 'upgrade' | 'day') => {
       used.add(cur.id);
       const u: ViewingUpdate = { id: cur.id };
-      if (how === 'ref' && v.watchedAt !== null && v.watchedAt !== cur.watchedAt) u.watchedAt = v.watchedAt;
+      if (how === 'ref' && v.watchedAt !== cur.watchedAt) u.watchedAt = v.watchedAt;
       if (how === 'upgrade' && v.sourceRef != null) u.sourceRef = v.sourceRef;
       if (v.rewatch !== undefined && v.rewatch !== cur.rewatch) u.rewatch = v.rewatch;
       if (v.rating !== undefined && v.rating !== cur.rating) u.rating = v.rating;
+      resultDay.set(cur.id, dayOf(u.watchedAt !== undefined ? u.watchedAt : cur.watchedAt));
       if (Object.keys(u).length > 1) plan.updates.push(u);
     };
 
@@ -460,20 +483,19 @@ export function planViewingSync(stored: readonly Viewing[], incoming: readonly N
         update(byRef, v, 'ref');
         continue;
       }
-      const day = v.watchedAt === null ? null : calendarDate(v.watchedAt);
-      const sameDay = day === null ? undefined : free((s) => s.sourceRef === null && s.watchedAt !== null && calendarDate(s.watchedAt) === day);
+      const day = dayOf(v.watchedAt);
+      const sameDay = exact || day === null ? undefined : free((s) => s.sourceRef === null && dayOf(s.watchedAt) === day);
       if (sameDay) update(sameDay, v, 'upgrade');
       else insert(v);
     }
     for (const v of inc.filter((x) => x.sourceRef == null && x.watchedAt !== null)) {
       const day = calendarDate(v.watchedAt as string);
-      const onDay = (s: Viewing) => s.watchedAt !== null && calendarDate(s.watchedAt) === day;
-      const hit = free((s) => s.sourceRef === null && onDay(s)) ?? free(onDay);
+      const hit = free((s) => s.sourceRef === null && dayOf(s.watchedAt) === day) ?? (exact ? undefined : free((s) => dayOf(s.watchedAt) === day));
       if (hit) update(hit, v, 'day');
-      else if (!days.has(day)) insert(v);
+      else if (!dayTaken(day)) insert(v);
     }
     for (const v of inc.filter((x) => x.sourceRef == null && x.watchedAt === null)) {
-      const hit = free((s) => s.watchedAt === null && s.sourceRef === null) ?? free((s) => s.watchedAt === null);
+      const hit = free((s) => s.watchedAt === null && s.sourceRef === null) ?? (exact ? undefined : free((s) => s.watchedAt === null));
       if (hit) update(hit, v, 'day');
       else insert(v);
     }

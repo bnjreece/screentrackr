@@ -100,6 +100,14 @@ export interface ImportRecord {
    */
   viewingsComplete?: boolean;
   /**
+   * ScreenTrackr JSON v1 only: the record is ScreenTrackr's own record of an
+   * item, so its plays are matched only to the very same stored plays (never
+   * folded into another play of that day; see planViewingSync) and its
+   * `watchedEra`, null included, is the item's: the era is never derived from
+   * its plays. This is what makes a `--replace` restore exact.
+   */
+  exact?: boolean;
+  /**
    * The user's lists this film is in, by name (case-insensitive). Add-only:
    * missing lists are created, and a merge never removes a membership.
    */
@@ -372,7 +380,7 @@ function foldGroup(group: ImportRecord[], warn: (message: string) => void): Impo
   for (const r of group) for (const n of r.lists ?? []) if (typeof n === 'string' && !names.has(n.trim().toLowerCase())) names.set(n.trim().toLowerCase(), n);
   set('lists', names.size ? [...names.values()] : undefined);
 
-  for (const key of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'fromTvApp', 'imdbIdExact', 'clearWatchedAtIfOwn', 'viewingsComplete'] as const) {
+  for (const key of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'fromTvApp', 'imdbIdExact', 'clearWatchedAtIfOwn', 'viewingsComplete', 'exact'] as const) {
     const vs = group.map((r) => r[key]).filter((v): v is boolean => typeof v === 'boolean');
     set(key, vs.length ? vs.includes(true) : undefined);
   }
