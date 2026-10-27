@@ -114,6 +114,10 @@ describe('matching a new Apple TV movie', () => {
     });
     const res = matchOne(db, { title: 'The Glass Harbor', editionYear: 1990 });
     expect(res.candidates.map((c) => c.tconst)).not.toContain('tt9000002');
+    // An IMDb hint for a film made after the edition is no candidate either.
+    const hinted = matchOne(db, { title: 'The Glass Harbor', editionYear: 1990, runtimeMin: 112, imdbIdHint: 'tt9000002' });
+    expect(hinted).toMatchObject({ status: 'matched', tconst: 'tt9000001' });
+    expect(hinted.candidates.map((c) => c.tconst)).not.toContain('tt9000002');
     // A year in the title is still the film's own year.
     expect(matchOne(db, { title: 'Iron Meadow (1956)', editionYear: 2012 })).toMatchObject({ tconst: 'tt9000022' });
   });
@@ -210,6 +214,25 @@ describe('merging Apple TV into a library already linked to IMDb', () => {
   it('a different director still keeps an unlinked item apart', () => {
     seed([{ sourceTitle: 'Basement Tapes', sourceDirector: 'Hana Weir', sourceRuntimeMin: 100 }]);
     expect(importTv([{ name: 'Basement Tapes', year: 2014, director: 'Gus Okafor', minutes: 100, id: 'AAAA000000000051' }])).toMatchObject({ added: 1, updated: 0 });
+  });
+
+  it('other sources keep the director check even when both rows match the same IMDb title', () => {
+    // Title, year and runtime are enough for an automatic match despite a
+    // director credit the catalog disagrees with, so that match can be wrong:
+    // two hand-typed credits naming different people stay two movies.
+    const csv = (director: string, status: string, rating: number) =>
+      parseImport(`title,year,runtime,director,status,rating\nCopper Sky,2018,109,${director},${status},${rating}\n`, 'csv');
+    expect(applyImport(db, csv('Wren Ashby', 'watched', 8), { mode: 'merge' })).toMatchObject({ added: 1 });
+    expect(applyImport(db, csv('Gus Okafor', 'priority', 4), { mode: 'merge' })).toMatchObject({ added: 1, updated: 0 });
+    expect(items().map((i) => [i.tconst, i.sourceDirector, i.status, i.myRating])).toEqual([
+      ['tt9000018', 'Wren Ashby', 'watched', 8],
+      ['tt9000018', 'Gus Okafor', 'priority', 4],
+    ]);
+  });
+
+  it('a TV app track whose credit the catalog does not confirm keeps the director check', () => {
+    seed([{ sourceTitle: 'Red Thread', sourceDirector: 'Teodor Brask', sourceRuntimeMin: 131, tconst: 'tt9000027', matchStatus: 'matched', status: 'watched' }]);
+    expect(importTv([{ name: 'Red Thread', year: 2015, director: 'Gus Okafor', minutes: 131, id: 'AAAA000000000052' }])).toMatchObject({ added: 1, updated: 0 });
   });
 
   it('other sources keep the one-year rule: a year far off is another movie', () => {

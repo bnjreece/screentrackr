@@ -112,6 +112,7 @@ export function parseAppleTvJxaOutput(json: string): ImportRecord[] {
       sourceRuntimeMin: seconds === null ? null : Math.round(seconds / 60),
       applePersistentId: cleanText(t.persistentID),
       source: 'apple-tv',
+      fromTvApp: true,
     };
     const playedAt = typeof t.playedDate === 'string' && !Number.isNaN(Date.parse(t.playedDate)) ? t.playedDate : null;
     if (typeof t.playedCount === 'number' && t.playedCount > 0 && playedAt && WATCHED_AT_RE.test(playedAt)) {

@@ -22,7 +22,7 @@ import { exportLibrary } from '../export.js';
 import { backupsDir } from '../home.js';
 import { LIBRARY_COLUMNS, rowToItem, WATCHED_AT_RE, type LibraryRow } from '../library.js';
 import { factsConflict, identityOf, sameMovie, type Identity } from '../identity.js';
-import { matchOne, meaningfulCredit, type MatchCandidate } from '../match.js';
+import { directorsConflict, directorsOf, matchOne, meaningfulCredit, type MatchCandidate } from '../match.js';
 import { normalizeTitle } from '../normalize.js';
 import { ITEM_SOURCES, MATCH_STATUSES, STATUSES, WATCHED_ERAS, type LibraryItem, type MatchStatus } from '../types.js';
 import { parseApplePaste } from './apple-paste.js';
@@ -172,6 +172,11 @@ interface Target {
    * Such a hint is stale evidence, so it never rules out an item.
    */
   hintRefuted?: boolean;
+  /**
+   * The record's own director credit names a director of the catalog title
+   * it matched (both known and sharing a person). See resolveMergeTarget.
+   */
+  directorConfirmed?: boolean;
 }
 
 function targetFor(db: Db, r: ImportRecord): Target {
@@ -192,6 +197,7 @@ function targetFor(db: Db, r: ImportRecord): Target {
     runtimeMin: r.sourceRuntimeMin ?? null,
     imdbIdHint: hint || null,
   });
+  const catalogDirectors = res.tconst !== null && meaningfulCredit(r.sourceDirector) ? directorsOf(db, res.tconst) : [];
   const inCatalog = hint !== undefined && /^tt\d{7,}$/.test(hint) && db.sql.prepare('SELECT 1 FROM titles WHERE tconst = ?').get(hint) !== undefined;
   return {
     tconst: res.tconst,
@@ -202,6 +208,8 @@ function targetFor(db: Db, r: ImportRecord): Target {
     // Same convention as rematch: an unmatched item with no candidate at all has no score.
     matchScore: res.status === 'unmatched' && res.score === 0 ? null : res.score,
     candidates: res.status === 'ambiguous' ? res.candidates : [],
+    directorConfirmed:
+      res.status === 'matched' && catalogDirectors.length > 0 && !directorsConflict(r.sourceDirector, catalogDirectors.join(', ')),
   };
 }
 
@@ -303,6 +311,16 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
 
   const found = pool.filter((e) => sameApple(e) || (recLink !== null && itemLink(e) === recLink) || e.norm === norm);
 
+  // A TV app track whose store credit names a director of the catalog title it
+  // matched, against an item established as that same title: the item's
+  // differing credit is a typo or an author credited as director, not another
+  // film (editions of one film share directors; runtime still tells cuts
+  // apart). Only then are director credits left out of the comparison. Other
+  // formats keep it: their automatic match can be wrong, and a hand-typed credit
+  // that disagrees may be the only sign.
+  const linkSettlesDirectors = (e: Existing) =>
+    r.fromTvApp === true && t.directorConfirmed === true && recLink !== null && itemLink(e) === recLink;
+
   const conflicts = (e: Existing): boolean => {
     if (sameApple(e)) return false;
     return (
@@ -312,7 +330,7 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
       // reported by different sources) or directors who are clearly different
       // people (a remake): another movie. A linked item or record whose source
       // left a field out is judged by its catalog title's.
-      factsConflict(rec, e.identity) ||
+      factsConflict(rec, e.identity, { directors: !linkSettlesDirectors(e) }) ||
       // Two different IMDb ids that the record itself names (a JSON v1 link or a
       // hint matching did not refute) mean two different movies; a hint yields
       // to a hand link.

@@ -74,20 +74,18 @@ export function identityOf(db: Db, src: IdentitySource): Identity {
  * more than one apart, a film year more than one after the other side's
  * edition year (an edition can't be sold before its film exists), runtimes
  * more than 3 minutes apart, or director credits that share no person.
- * Unknown fields never conflict. Director credits are not compared when both
- * sides are established as the same IMDb title: that title has one set of
- * directors, so a differing credit is a typo or an author credited as director
- * in one source, not another film (editions of one film share directors;
- * runtime still tells cuts apart). IMDb ids and Apple ids are otherwise
- * compared by the caller, which knows which ids are authoritative.
+ * Unknown fields never conflict. IMDb ids and Apple ids are compared by the
+ * caller, which knows which ids are authoritative. With `directors: false`
+ * the caller has already settled that the director credits can't tell these
+ * two apart (see resolveMergeTarget), so only year and runtime count.
  */
-export function factsConflict(a: Identity, b: Identity): boolean {
+export function factsConflict(a: Identity, b: Identity, opts: { directors?: boolean } = {}): boolean {
   return (
     yearsConflict(a.year, b.year) ||
     afterEdition(b.year, a.editionYear) ||
     afterEdition(a.year, b.editionYear) ||
     (a.runtime !== null && b.runtime !== null && Math.abs(a.runtime - b.runtime) > RUNTIME_TOLERANCE_MIN) ||
-    (!(a.tconst !== null && a.tconst === b.tconst) && directorsConflict(a.directors, b.directors))
+    (opts.directors !== false && directorsConflict(a.directors, b.directors))
   );
 }
 

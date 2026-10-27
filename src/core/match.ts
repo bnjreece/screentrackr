@@ -356,7 +356,7 @@ export function matchOne(db: Db, input: MatchInput): MatchResult {
 
   // A film released after the edition on sale (beyond the year's tolerance) cannot be it.
   const rows = lookupCandidates(db, norm).filter((r) => !afterEdition(r.year, editionYear));
-  if (hintRow && !rows.some((r) => r.tconst === hintRow.tconst)) rows.push(hintRow);
+  if (hintRow && !afterEdition(hintRow.year, editionYear) && !rows.some((r) => r.tconst === hintRow.tconst)) rows.push(hintRow);
 
   const scored = rows.map((row) => {
     const exact = row.norm_title === norm || (row.original_title !== null && normalizeTitle(row.original_title) === norm);

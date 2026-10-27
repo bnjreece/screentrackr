@@ -13,6 +13,11 @@ export interface ImportRecord {
    * never stored and never counts as the record's year.
    */
   editionYear?: number | null;
+  /**
+   * Set by `import apple-tv` only: a track read from the TV app just now, so
+   * its director credit is the store's, not a hand-typed one.
+   */
+  fromTvApp?: boolean;
   sourceDirector?: string | null;
   sourceRuntimeMin?: number | null;
   sourceGenre?: string | null;
