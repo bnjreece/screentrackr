@@ -160,6 +160,31 @@ describe('JSON v1', () => {
     expect(rows()).toMatchObject([{ at: '2019-04-02', src: null }]);
   });
 
+  it('a JSON v1 merge of the same date takes the file\'s word on who set it', () => {
+    applyImport(db, [trakt({ watchedAt: '2019-04-02' })], { mode: 'merge' });
+    const file = (extra: object) =>
+      JSON.stringify({
+        format: 'screentrackr-library',
+        version: 1,
+        items: [{ sourceTitle: 'The Copper Orchard', sourceYear: 1994, status: 'watched', watchedAt: '2019-04-02', externalIds: { trakt: '9001' }, ...extra }],
+      });
+    // No watchedAtSource: the date is no longer the source's to clear.
+    expect(applyImport(db, parseImport(file({})), { mode: 'merge' })).toMatchObject({ updated: 1, added: 0 });
+    expect(rows()).toMatchObject([{ at: '2019-04-02', src: null }]);
+    applyImport(db, [trakt({ clearWatchedAtIfOwn: true })], { mode: 'merge' });
+    expect(rows()).toMatchObject([{ at: '2019-04-02', src: null }]);
+    // Another source named: only that source may clear it.
+    applyImport(db, parseImport(file({ watchedAtSource: 'letterboxd' })), { mode: 'merge' });
+    expect(rows()).toMatchObject([{ at: '2019-04-02', src: 'letterboxd' }]);
+    applyImport(db, [trakt({ clearWatchedAtIfOwn: true })], { mode: 'merge' });
+    expect(rows()).toMatchObject([{ at: '2019-04-02', src: 'letterboxd' }]);
+    // The same word again changes nothing.
+    expect(applyImport(db, parseImport(file({ watchedAtSource: 'letterboxd' })), { mode: 'merge' })).toMatchObject({ updated: 0, unchanged: 1 });
+    // An ordinary importer repeating the date keeps the recorded source.
+    applyImport(db, [{ sourceTitle: 'The Copper Orchard', sourceYear: 1994, watchedAt: '2019-04-02', source: 'imdb' }], { mode: 'merge' });
+    expect(rows()).toMatchObject([{ at: '2019-04-02', src: 'letterboxd' }]);
+  });
+
   it('rejects an unknown watchedAtSource and ignores one without a date', () => {
     const file = (extra: object) => JSON.stringify({ format: 'screentrackr-library', version: 1, items: [{ sourceTitle: 'Night Ferry', ...extra }] });
     expect(() => parseImport(file({ watchedAt: '2020-01-01', watchedAtSource: 'myspace' }))).toThrow(/watchedAtSource/);

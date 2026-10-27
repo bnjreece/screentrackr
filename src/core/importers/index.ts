@@ -581,6 +581,11 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   keep('sourceOwnedRaw', 'source_owned_raw');
   if (r.watchedAt != null && r.watchedAt !== cur.watchedAt) {
     out.push(['watched_at', r.watchedAt], ['watched_at_source', dateSource(r)]);
+  } else if (r.watchedAt != null && r.watchedAtSource !== undefined && r.watchedAtSource !== cur.watchedAtSource) {
+    // A JSON v1 record says who set this same date (null: the user, or
+    // unknown); its word replaces the stored one, so a date a file gives
+    // without a source can no longer be cleared by the source that set it.
+    out.push(['watched_at_source', r.watchedAtSource]);
   } else if (r.watchedAt == null && r.clearWatchedAtIfOwn === true && cur.watchedAt !== null && cur.watchedAtSource === r.source) {
     // The one clear an import may make: a date this same source set earlier.
     out.push(['watched_at', null], ['watched_at_source', null]);
