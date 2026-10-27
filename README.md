@@ -84,6 +84,25 @@ screentrackr import imdb imdb-ratings.csv imdb-watchlist.csv
 - Several files are read together, so a movie that is both rated and on your watchlist becomes one movie, watched. A rating overwrites the rating a movie had, so importing a newer export updates your ratings; importing the same files again changes nothing.
 - A ratings or list export passed to plain `screentrackr import` is recognized too (a list is then read as a watchlist). Files saved again in a spreadsheet are read as well: semicolons, Windows-1252 text and day-first or month-first dates. The pre-2018 export format is refused with a message.
 
+### Plex Media Server
+
+screentrackr can read the movie libraries of your own Plex Media Server through its local API. It only reads: it never changes anything on the server, never asks it to refresh, analyze or check files, and pages its requests gently.
+
+```sh
+export PLEX_TOKEN=...   # your token; see below
+screentrackr import plex --url http://127.0.0.1:32400 --dry-run
+screentrackr import plex --url http://127.0.0.1:32400
+```
+
+- **Token.** Find yours with Plex's article [Finding an authentication token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/) (open a movie in Plex Web, choose Get Info, then View XML, and copy `X-Plex-Token` from the address). Pass it in the `PLEX_TOKEN` environment variable, or pipe it in with `--token-stdin`. It is never taken as a command line argument, never put in a URL, never stored and never printed. The MCP server has no Plex tool, so an AI client never sees it.
+- **Server.** `--url` is your server's address (default `http://127.0.0.1:32400`). If the server requires secure connections, use its `https://….plex.direct:32400` address. The URL must not carry a token or a password, and redirects are refused.
+- **Libraries.** Every movie library is read, except "Other Videos" libraries (`--include-other-videos` adds them). `--section <name|key>` (repeatable) reads only the libraries you name. TV libraries are never read.
+- **What comes in.** Every movie on the server is marked owned. A movie Plex counts as played is marked watched, with its last play date (when many movies share one day, as after a bulk "mark as watched", that date is left out). Your Plex star rating comes in on the 1 to 10 scale (3.5 stars is 7; a rating that isn't a whole number on that scale is rounded); `--no-ratings` leaves ratings out. Title, year, directors, genres, runtime and collections are read; summaries, artwork and file paths are not.
+- **Unwatched movies.** A new movie you haven't watched gets `--unwatched-status`: `someday` by default, `queue`, or `skip` to leave unwatched movies out. A movie you already have keeps its status, and a watched movie is never moved out of watched.
+- **Matching.** The IMDb id Plex has for a movie is a hint, checked against the catalog, since Plex's automatic match can be wrong. A movie with no IMDb id (an "Other Videos" item, say) is matched by title, year, runtime and director. Each Plex edition is its own movie: an edition whose name is a known edition word ("Director's Cut", "Extended Edition") keeps it in the title, and editions with runtimes more than 3 minutes apart stay separate items. One movie in two libraries becomes one item. Plex's details only fill fields a movie you already have left blank.
+- `--dry-run` reads the server and prints the counts without writing anything. `--from-file <file.json>` reads saved listing JSON (`/library/sections/<key>/all` responses) instead of a server.
+- The watchlist lives in your Plex account, not on the server, so it is not imported.
+
 ### ScreenTrackr JSON
 
 `screentrackr export` writes your whole library as ScreenTrackr JSON v1, and `screentrackr import` reads it back with nothing lost. Use it for backups and for moving between machines. The format is documented in [docs/library-json-v1.md](docs/library-json-v1.md).
@@ -171,6 +190,7 @@ Every command takes `--home <dir>`, `--json` and `--help`.
 ```text
 screentrackr setup [--refresh] [--no-cast] [--include-tv-movies]
 screentrackr import <file|apple-tv|imdb <file.csv>...> [--format <format>] [--merge | --replace]
+screentrackr import plex [--url <server>] [--section <name|key>]... [--unwatched-status <someday|queue|skip>] [--no-ratings] [--dry-run]
 screentrackr search [filters]
 screentrackr show <id|tconst|title>
 screentrackr add <tconst|title> [--year <yyyy>] [--status <status>] [--new-edition]
@@ -233,11 +253,11 @@ The code is MIT licensed. See [LICENSE](LICENSE).
 
 ## Privacy
 
-The only network calls screentrackr makes are downloads from datasets.imdbws.com during `setup` (or the `setup_catalog` MCP tool, which runs the same thing). There's no telemetry, no account and no server. Your library stays in a SQLite file on your machine.
+screentrackr makes two kinds of network calls: downloads from datasets.imdbws.com during `setup` (or the `setup_catalog` MCP tool, which runs the same thing), and, only when you run `screentrackr import plex`, read-only requests to the Plex server address you give it. Nothing about you or your library is sent anywhere. Your Plex token is used for those requests only and is never stored. There's no telemetry, no account and no server. Your library stays in a SQLite file on your machine.
 
 ## Not affiliated
 
-screentrackr is an independent project. It's not affiliated with IMDb or Apple, or endorsed by either.
+screentrackr is an independent project. It's not affiliated with IMDb or Apple, or endorsed by either. It's not affiliated with or endorsed by Plex either.
 
 ## Development
 

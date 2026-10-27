@@ -14,6 +14,7 @@ import {
 import { applyImport, detectFormat, FORMATS, parseImportDetailed, type ImportFormat, type ParsedImport } from '../../core/importers/index.js';
 import { bool, str, strs, type Command } from '../command.js';
 import { UserError } from '../context.js';
+import { emitPlexDryRun, PLEX_OPTIONS, readPlexImport, rejectPlexFlags, type PlexParsed } from './import-plex.js';
 
 function readBytes(file: string): Buffer {
   try {
@@ -30,9 +31,10 @@ function catalogHasTvMovies(db: Db): boolean {
 }
 
 interface Parsed extends ParsedImport {
-  format: ImportFormat | 'apple-tv';
+  format: ImportFormat | 'apple-tv' | 'plex';
   notices: string[];
   skippedByType?: Record<string, number>;
+  plex?: PlexParsed['plex'];
 }
 
 function parseImdbFiles(db: Db, files: string[], opts: ImdbOptions): Parsed {
@@ -64,6 +66,7 @@ export const importCmd: Command = {
     "`import imdb <file.csv>...` reads IMDb CSV exports you downloaded from imdb.com (Your Ratings, your watchlist, check-ins or a list). Rated movies are marked watched with your rating; watchlist movies go in the queue only when they are new; nothing is marked owned. Several files are read together. --as says what a list export is (watchlist by default), --collection names a list's collection, --include-type brings in more than movies (repeatable or comma-separated: " +
       IMDB_INCLUDE_TYPES.join(', ') +
       '), --checkin-dates uses check-in dates as watched dates.',
+    "`import plex [--url <server>] [--section <name|key>]...` reads the movie libraries of your own Plex Media Server, read-only, with the token from PLEX_TOKEN (never stored). Every movie is marked owned; movies Plex counts as played are marked watched, with your Plex rating unless --no-ratings; new unwatched movies get --unwatched-status (someday by default; skip leaves them out) and existing ones keep their status. --dry-run shows the counts and writes nothing.",
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
     '--replace backs up your library to backups/ first, then replaces it.',
   ].join('\n'),
@@ -81,6 +84,7 @@ export const importCmd: Command = {
       description: `imdb only: also bring in ${IMDB_INCLUDE_TYPES.join(', ')} (repeatable)`,
     },
     'checkin-dates': { type: 'boolean', description: 'imdb --as checkins only: use check-in dates as watched dates' },
+    ...PLEX_OPTIONS,
   },
   async run(ctx, pos, values) {
     const file = pos[0];
@@ -93,7 +97,9 @@ export const importCmd: Command = {
     const format = str(values, 'format');
     const timeout = str(values, 'timeout');
     const appleTv = file === 'apple-tv';
-    if ((appleTv || imdb) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
+    const plex = file === 'plex';
+    if (!plex) rejectPlexFlags(values);
+    if ((appleTv || imdb || plex) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
     if (!appleTv && timeout !== undefined) throw new UserError('--timeout only applies to `import apple-tv`');
     if (format !== undefined && !(FORMATS as readonly string[]).includes(format)) {
       throw new UserError(`Unknown format "${format}" (expected ${FORMATS.join(', ')})`);
@@ -136,6 +142,11 @@ export const importCmd: Command = {
       parsed = { format: 'apple-tv', records: await readAppleTvLibrary({ timeoutMs }), warnings: [], notices: [] };
     } else if (imdb) {
       parsed = parseImdbFiles(ctx.db(), files, imdbOpts);
+    } else if (plex) {
+      if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+      const res = await readPlexImport(ctx, values);
+      if (res.dryRun) return emitPlexDryRun(ctx, res);
+      parsed = res;
     } else {
       const bytes = readBytes(file);
       const text = bytes.toString('utf8');
@@ -150,8 +161,8 @@ export const importCmd: Command = {
 
     const replace = bool(values, 'replace');
     // An empty IMDb export (only a header) is "no rows", never "delete everything".
-    if (parsed.format === 'imdb' && replace && parsed.records.length === 0) {
-      throw new UserError('Nothing to import from the IMDb file, so --replace would empty your library. Nothing was changed.');
+    if ((parsed.format === 'imdb' || parsed.format === 'plex') && replace && parsed.records.length === 0) {
+      throw new UserError(`Nothing to import from ${parsed.format === 'plex' ? 'Plex' : 'the IMDb file'}, so --replace would empty your library. Nothing was changed.`);
     }
 
     const db = ctx.db();
@@ -160,7 +171,7 @@ export const importCmd: Command = {
     if (!catalogReady(db)) ctx.log('The catalog is not built yet, so movies are left unmatched. Run `screentrackr setup` to match them.');
     const summary = applyImport(db, parsed.records, { mode: replace ? 'replace' : 'merge' });
 
-    const extra = parsed.skippedByType ? { skippedByType: parsed.skippedByType } : {};
+    const extra = { ...(parsed.skippedByType ? { skippedByType: parsed.skippedByType } : {}), ...(parsed.plex ? { plex: parsed.plex } : {}) };
     ctx.emit({ format: parsed.format, records: parsed.records.length, warnings: parsed.warnings, ...extra, ...summary }, () =>
       [
         `Imported ${parsed.records.length} records (${parsed.format}).`,

@@ -1,0 +1,527 @@
+/**
+ * The Plex Media Server importer. Every request goes to a mocked fetch: no
+ * test talks to a network. Every title, person, id, server and token here is
+ * invented.
+ */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { buildCatalog } from '../src/core/catalog/build.js';
+import { openDb, type Db } from '../src/core/db.js';
+import { applyImport, ImportError, type ImportRecord } from '../src/core/importers/index.js';
+import {
+  mapPlexItems,
+  parsePlexDump,
+  plexBaseUrl,
+  readPlexLibrary,
+  type PlexMetadata,
+  type PlexReadOptions,
+} from '../src/core/importers/plex.js';
+import { LIBRARY_COLUMNS, rowToItem, type LibraryRow } from '../src/core/library.js';
+import type { LibraryItem } from '../src/core/types.js';
+
+const IMDB = join(import.meta.dirname, 'fixtures', 'imdb');
+const TOKEN = 'fake-token-Zq81xP';
+const SERVER = 'http://127.0.0.1:32400';
+/** Noon UTC on a day, in epoch seconds, so the local calendar day is the same in most time zones. */
+const noon = (day: string) => Math.floor(Date.parse(`${day}T12:00:00Z`) / 1000);
+
+let tmp: string;
+let db: Db;
+
+beforeAll(async () => {
+  tmp = mkdtempSync(join(tmpdir(), 'screentrackr-plex-'));
+  db = openDb(join(tmp, 'home'));
+  await buildCatalog(db, { cacheDir: IMDB });
+});
+afterAll(() => {
+  db.close();
+  rmSync(tmp, { recursive: true, force: true });
+});
+beforeEach(() => {
+  db.sql.exec('DELETE FROM match_candidates; DELETE FROM item_external_ids; DELETE FROM library_items;');
+});
+
+function items(): LibraryItem[] {
+  return (db.sql.prepare(`SELECT ${LIBRARY_COLUMNS} FROM library_items ORDER BY id`).all() as unknown as LibraryRow[]).map(rowToItem);
+}
+
+// ---------- a fake Plex Media Server ----------
+
+interface Call {
+  url: URL;
+  init: RequestInit;
+}
+
+interface FakeServer {
+  sections: unknown[];
+  /** Section key to its movies. */
+  movies: Record<string, PlexMetadata[]>;
+  /** Extra detail for /library/metadata/{ids}, by ratingKey. */
+  details?: Record<string, PlexMetadata>;
+  /** Page size the server really uses, whatever was asked (default: as asked). */
+  serverPageSize?: number;
+  /** Leave totalSize out of the container (the header still carries it unless noTotal). */
+  noContainerTotal?: boolean;
+  noTotal?: boolean;
+  /** Ignore paging entirely: every request gets the whole list. */
+  ignorePaging?: boolean;
+  /** Drop Guid from listings (includeGuids ignored). */
+  ignoreIncludeGuids?: boolean;
+}
+
+function fakeFetch(server: FakeServer): { fetch: typeof fetch; calls: Call[] } {
+  const calls: Call[] = [];
+  const json = (body: unknown, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json', ...headers } });
+  const impl = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+    calls.push({ url, init });
+    const path = url.pathname;
+    if (path === '/library/sections/all') return json({ MediaContainer: { size: server.sections.length, Directory: server.sections } });
+    const list = /^\/library\/sections\/([^/]+)\/all$/.exec(path);
+    if (list) {
+      const all = (server.movies[decodeURIComponent(list[1] as string)] ?? []).map((m) =>
+        server.ignoreIncludeGuids ? { ...m, Guid: undefined } : m,
+      );
+      const headers = new Headers(init.headers);
+      const start = server.ignorePaging ? 0 : Number(headers.get('X-Plex-Container-Start') ?? 0);
+      const asked = Number(headers.get('X-Plex-Container-Size') ?? all.length);
+      const size = server.ignorePaging ? all.length : (server.serverPageSize ?? asked);
+      const page = all.slice(start, start + size);
+      const mc: Record<string, unknown> = { size: page.length, offset: start, librarySectionID: Number(list[1]), Metadata: page };
+      if (!server.noContainerTotal && !server.noTotal) mc.totalSize = all.length;
+      return json({ MediaContainer: mc }, server.noTotal ? {} : { 'X-Plex-Container-Total-Size': String(all.length) });
+    }
+    const meta = /^\/library\/metadata\/(.+)$/.exec(path);
+    if (meta) {
+      const keys = (meta[1] as string).split(',').map(decodeURIComponent);
+      const found = keys.map((k) => server.details?.[k]).filter(Boolean);
+      return json({ MediaContainer: { size: found.length, Metadata: found } });
+    }
+    return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } });
+  }) as typeof fetch;
+  return { fetch: impl, calls };
+}
+
+const SECTIONS = [
+  { key: '3', type: 'movie', title: 'Movies', agent: 'tv.plex.agents.movie', uuid: 'u-3' },
+  { key: '7', type: 'movie', title: 'Home Videos', agent: 'tv.plex.agents.none', uuid: 'u-7' },
+  { key: '4', type: 'show', title: 'TV', agent: 'tv.plex.agents.series', uuid: 'u-4' },
+];
+
+const glassHarbor2009: PlexMetadata = {
+  ratingKey: '5012',
+  type: 'movie',
+  guid: 'plex://movie/5d77aaaa0000000000000001',
+  title: 'The Glass Harbor',
+  year: 2009,
+  duration: 128 * 60000,
+  userRating: 7.0,
+  viewCount: 2,
+  lastViewedAt: noon('2024-06-10'),
+  addedAt: 1600000000,
+  summary: 'An invented summary that must never be stored.',
+  thumb: '/library/metadata/5012/thumb/1',
+  Guid: [{ id: 'imdb://tt9000002' }, { id: 'tmdb://900002' }],
+  Director: [{ tag: 'Teodor Brask' }],
+  Genre: [{ tag: 'Mystery' }, { tag: 'Thriller' }],
+  Collection: [{ tag: 'Harbor Films' }],
+  Media: [
+    { id: 1, duration: 128 * 60000, videoResolution: '1080' },
+    { id: 2, duration: 128 * 60000 + 1000, videoResolution: '4k' },
+  ],
+};
+const lanternSeason: PlexMetadata = {
+  ratingKey: '5013',
+  type: 'movie',
+  guid: 'local://5013',
+  title: 'Lantern Season',
+  year: 1978,
+  duration: 90 * 60000,
+  addedAt: 1600000100,
+};
+
+function opts(server: FakeServer, extra: Partial<PlexReadOptions> = {}): PlexReadOptions & { calls: Call[] } {
+  const { fetch, calls } = fakeFetch(server);
+  return { url: SERVER, token: TOKEN, clientId: 'client-0001', version: '0.0.0-test', fetch, calls, ...extra };
+}
+
+const read = (server: FakeServer, extra: Partial<PlexReadOptions> = {}) => {
+  const o = opts(server, extra);
+  return readPlexLibrary(o).then((res) => ({ ...res, calls: o.calls }));
+};
+
+const FORBIDDEN = ['checkFiles', 'asyncCheckFiles', 'asyncRefreshLocalMediaAgent', 'asyncRefreshAnalysis', 'asyncAugmentMetadata', 'skipRefresh', 'checkFileAvailability', 'augmentCount'];
+
+function expectSafeRequests(calls: Call[]) {
+  expect(calls.length).toBeGreaterThan(0);
+  for (const c of calls) {
+    expect(c.url.href).not.toContain(TOKEN);
+    for (const p of c.url.searchParams.keys()) {
+      expect(FORBIDDEN.map((f) => f.toLowerCase())).not.toContain(p.toLowerCase());
+      expect(p.toLowerCase().startsWith('async')).toBe(false);
+      expect(p.toLowerCase()).not.toBe('x-plex-token');
+    }
+    expect(c.init.method ?? 'GET').toBe('GET');
+    expect(c.init.redirect).toBe('error');
+    const h = new Headers(c.init.headers);
+    expect(h.get('X-Plex-Token')).toBe(TOKEN);
+    expect(h.get('Accept')).toBe('application/json');
+    expect(h.get('X-Plex-Product')).toBe('ScreenTrackr');
+    expect(h.get('X-Plex-Client-Identifier')).toBe('client-0001');
+  }
+}
+
+// ---------- the server URL ----------
+
+describe('the server URL', () => {
+  it('accepts http and https and drops a trailing slash', () => {
+    expect(plexBaseUrl('http://127.0.0.1:32400/').href).toBe('http://127.0.0.1:32400/');
+    expect(plexBaseUrl('https://plex.example.test:32400').origin).toBe('https://plex.example.test:32400');
+  });
+
+  it('refuses other schemes, credentials and a token in the query string', () => {
+    expect(() => plexBaseUrl('ftp://127.0.0.1')).toThrow(ImportError);
+    expect(() => plexBaseUrl('not a url')).toThrow(ImportError);
+    expect(() => plexBaseUrl('http://user:pw@127.0.0.1:32400')).toThrow(/user name or password/);
+    let msg = '';
+    try {
+      plexBaseUrl(`http://127.0.0.1:32400/?X-Plex-Token=${TOKEN}`);
+    } catch (err) {
+      msg = (err as Error).message;
+    }
+    expect(msg).toMatch(/query string/);
+    expect(msg).not.toContain(TOKEN);
+  });
+});
+
+// ---------- reading the server ----------
+
+describe('reading the server', () => {
+  it('lists movie sections, skips other-videos and show sections, and sends only safe, read-only requests', async () => {
+    const res = await read({ sections: SECTIONS, movies: { '3': [glassHarbor2009, lanternSeason], '7': [{ ...lanternSeason, ratingKey: 'h1', title: 'Beach Day' }] } });
+    expect(res.records.map((r) => r.sourceTitle)).toEqual(['The Glass Harbor', 'Lantern Season']);
+    expect(res.sections.map((s) => s.title)).toEqual(['Movies']);
+    expect(res.notices.join('\n')).toMatch(/Home Videos/);
+    expectSafeRequests(res.calls);
+    expect(res.calls.some((c) => c.url.pathname.startsWith('/library/sections/4'))).toBe(false);
+    const listing = res.calls.find((c) => c.url.pathname === '/library/sections/3/all') as Call;
+    expect(listing.url.searchParams.get('type')).toBe('1');
+    expect(listing.url.searchParams.get('includeGuids')).toBe('1');
+    expect(listing.url.searchParams.get('excludeFields')).toMatch(/summary/);
+  });
+
+  it('includes other-videos sections when asked, and picks sections by name or key', async () => {
+    const server = { sections: SECTIONS, movies: { '3': [glassHarbor2009], '7': [{ ...lanternSeason, ratingKey: 'h1', title: 'Beach Day' }] } };
+    expect((await read(server, { includeOtherVideos: true })).records).toHaveLength(2);
+    expect((await read(server, { sections: ['home videos'] })).records.map((r) => r.sourceTitle)).toEqual(['Beach Day']);
+    expect((await read(server, { sections: ['3'] })).records.map((r) => r.sourceTitle)).toEqual(['The Glass Harbor']);
+    await expect(read(server, { sections: ['Nope'] })).rejects.toThrow(/No movie library named "Nope".*Movies.*Home Videos/s);
+    await expect(read(server, { sections: ['TV'] })).rejects.toThrow(/not a movie library/);
+  });
+
+  it('pages until the total, also when the server returns a different page size than asked', async () => {
+    const many = Array.from({ length: 7 }, (_, i) => ({ ...lanternSeason, ratingKey: `k${i}`, title: `Invented Film ${i}` }));
+    for (const server of [
+      { sections: SECTIONS.slice(0, 1), movies: { '3': many }, serverPageSize: 3 },
+      { sections: SECTIONS.slice(0, 1), movies: { '3': many }, serverPageSize: 3, noContainerTotal: true },
+    ]) {
+      const res = await read(server, { pageSize: 5 });
+      expect(res.records.map((r) => r.sourceTitle)).toEqual(many.map((m) => m.title));
+      expect(res.calls.filter((c) => c.url.pathname.endsWith('/all') && c.url.pathname !== '/library/sections/all')).toHaveLength(3);
+    }
+  });
+
+  it('stops on a server that ignores paging or gives no total, without repeating movies', async () => {
+    const many = Array.from({ length: 4 }, (_, i) => ({ ...lanternSeason, ratingKey: `k${i}`, title: `Invented Film ${i}` }));
+    const ignoring = await read({ sections: SECTIONS.slice(0, 1), movies: { '3': many }, ignorePaging: true, noTotal: true }, { pageSize: 2 });
+    expect(ignoring.records).toHaveLength(4);
+    const noTotal = await read({ sections: SECTIONS.slice(0, 1), movies: { '3': many }, noTotal: true }, { pageSize: 3 });
+    expect(noTotal.records).toHaveLength(4);
+  });
+
+  it('guards against an empty page that claims more movies', async () => {
+    const { fetch, calls } = fakeFetch({ sections: SECTIONS.slice(0, 1), movies: {} });
+    const lying = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/library/sections/3/all') {
+        calls.push({ url, init: init ?? {} });
+        return new Response(JSON.stringify({ MediaContainer: { size: 0, totalSize: 50, offset: 0, Metadata: [] } }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return fetch(input, init);
+    }) as typeof fetch;
+    const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'client-0001', version: 't', fetch: lying });
+    expect(res.records).toHaveLength(0);
+    expect(calls.filter((c) => c.url.pathname === '/library/sections/3/all')).toHaveLength(1);
+    expect(res.warnings.join('\n')).toMatch(/fewer movies than it reported/);
+  });
+
+  it('falls back when the server ignores includeGuids: fetches details for matched items, warns once', async () => {
+    const details = { '5012': glassHarbor2009 };
+    const res = await read({
+      sections: SECTIONS.slice(0, 1),
+      movies: { '3': [glassHarbor2009, lanternSeason] },
+      ignoreIncludeGuids: true,
+      details,
+    });
+    expect(res.records[0]?.imdbIdHint).toBe('tt9000002');
+    expect(res.records[1]?.imdbIdHint ?? null).toBeNull();
+    const detailCalls = res.calls.filter((c) => c.url.pathname.startsWith('/library/metadata/'));
+    expect(detailCalls).toHaveLength(1);
+    expect(detailCalls[0]?.url.pathname).toBe('/library/metadata/5012');
+    expect(res.warnings.filter((w) => /external ids/.test(w))).toHaveLength(1);
+    expectSafeRequests(res.calls);
+  });
+
+  it('url-encodes a non-numeric ratingKey in a detail request', async () => {
+    const odd = { ...glassHarbor2009, ratingKey: 'a/b c', Director: undefined };
+    const res = await read({ sections: SECTIONS.slice(0, 1), movies: { '3': [odd] }, details: { 'a/b c': { ...odd, Director: [{ tag: 'Teodor Brask' }] } } });
+    const detail = res.calls.find((c) => c.url.pathname.startsWith('/library/metadata/')) as Call;
+    expect(detail.url.pathname).toBe('/library/metadata/a%2Fb%20c');
+    expect(res.records[0]?.sourceDirector).toBe('Teodor Brask');
+  });
+});
+
+// ---------- errors ----------
+
+describe('server errors', () => {
+  const respond = (res: Response | Error) =>
+    (async () => {
+      if (res instanceof Error) throw res;
+      return res;
+    }) as unknown as typeof fetch;
+
+  it('maps 401 to a token message', async () => {
+    const err = (await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: respond(new Response('', { status: 401 })) }).catch(
+      (e: unknown) => e,
+    )) as Error;
+    expect(err).toBeInstanceOf(ImportError);
+    expect((err as Error).message).toMatch(/token.*expired or wrong/i);
+    expect((err as Error).message).not.toContain(TOKEN);
+  });
+
+  it('refuses an XML or HTML answer with a clear message', async () => {
+    const xml = new Response('<?xml version="1.0"?><MediaContainer/>', { status: 200, headers: { 'content-type': 'text/xml' } });
+    await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: respond(xml) })).rejects.toThrow(/XML/);
+    const html = new Response('<html></html>', { status: 200, headers: { 'content-type': 'text/html' } });
+    await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: respond(html) })).rejects.toThrow(
+      /Plex Media Server/,
+    );
+  });
+
+  it('never repeats the token in an error, even when the cause carries it', async () => {
+    const boom = new TypeError('fetch failed', { cause: Object.assign(new Error(`connect ECONNREFUSED token=${TOKEN}`), { code: 'ECONNREFUSED' }) });
+    const err = (await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: respond(boom) }).catch((e: unknown) => e)) as Error;
+    expect(err).toBeInstanceOf(ImportError);
+    expect(err.message).toMatch(/Could not reach the Plex server at http:\/\/127\.0\.0\.1:32400/);
+    expect(err.message).not.toContain(TOKEN);
+    const leaky = new TypeError('fetch failed', { cause: new Error(`bad header X-Plex-Token: ${TOKEN}`) });
+    const err2 = (await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: respond(leaky) }).catch((e: unknown) => e)) as Error;
+    expect(err2.message).toContain('[redacted]');
+    expect(err2.message).not.toContain(TOKEN);
+    expect(JSON.stringify(err, Object.getOwnPropertyNames(err))).not.toContain(TOKEN);
+  });
+
+  it('reports a redirect as an error instead of following it', async () => {
+    const err = await readPlexLibrary({
+      url: SERVER,
+      token: TOKEN,
+      clientId: 'c',
+      version: 't',
+      fetch: respond(new TypeError('fetch failed', { cause: new Error('unexpected redirect') })),
+    }).catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(ImportError);
+  });
+});
+
+// ---------- mapping ----------
+
+describe('mapping Plex movies', () => {
+  const map = (ms: PlexMetadata[], o: Parameters<typeof mapPlexItems>[1] = {}) => mapPlexItems(ms, o);
+
+  it('maps the fields, owned, watched, rating and IMDb hint, and stores no summary or art', () => {
+    const res = map([glassHarbor2009]);
+    const r = res.records[0] as ImportRecord;
+    expect(r).toMatchObject({
+      sourceTitle: 'The Glass Harbor',
+      sourceYear: 2009,
+      sourceDirector: 'Teodor Brask',
+      sourceGenre: 'Mystery, Thriller',
+      sourceRuntimeMin: 128,
+      collection: 'Harbor Films',
+      imdbIdHint: 'tt9000002',
+      owned: true,
+      sourceOwnedRaw: 'plex',
+      status: 'watched',
+      watchedAt: '2024-06-10',
+      myRating: 7,
+      source: 'plex',
+      fillOnly: true,
+    });
+    expect(r.imdbIdExact).toBeUndefined();
+    expect(r.tconst).toBeUndefined();
+    expect(r.watchedEra).toBeUndefined();
+    expect(r.externalIds).toBeUndefined();
+    expect(JSON.stringify(res.records)).not.toMatch(/summary|thumb|5012/);
+  });
+
+  it('reads a legacy IMDb agent guid, and no hint from TMDB-only or local items', () => {
+    const legacy = { ...lanternSeason, guid: 'com.plexapp.agents.imdb://tt9000027?lang=en', Guid: undefined };
+    const tmdbOnly = { ...lanternSeason, guid: 'com.plexapp.agents.themoviedb://12345?lang=en' };
+    const res = map([legacy, tmdbOnly, lanternSeason]);
+    expect(res.records.map((r) => r.imdbIdHint ?? null)).toEqual(['tt9000027', null, null]);
+  });
+
+  it('adds an edition only when the normalizer knows the word, and warns about free-text editions', () => {
+    const res = map([
+      { ...glassHarbor2009, editionTitle: "Director's Cut", duration: 140 * 60000 },
+      { ...glassHarbor2009, ratingKey: '5014', editionTitle: 'Final' },
+    ]);
+    expect(res.records.map((r) => r.sourceTitle)).toEqual(["The Glass Harbor (Director's Cut)", 'The Glass Harbor']);
+    expect(res.warnings.join('\n')).toMatch(/"Final"/);
+  });
+
+  it('maps ratings: whole numbers kept, fractions rounded with a warning, 0 and missing left out, and none when ratings are off', () => {
+    const rated = (userRating: unknown) => ({ ...lanternSeason, userRating }) as PlexMetadata;
+    const res = map([rated(7.0), rated(7.5), rated(0), rated(undefined), rated(11), rated(0.4)]);
+    expect(res.records.map((r) => r.myRating)).toEqual([7, 8, undefined, undefined, undefined, undefined]);
+    expect(res.warnings.join('\n')).toMatch(/rounded/);
+    expect(res.warnings.join('\n')).toMatch(/out of range/);
+    expect(map([rated(9)], { ratings: false }).records[0]?.myRating).toBeUndefined();
+  });
+
+  it('marks watched from viewCount only; a partial play or no plays gives a new-item status, someday by default', () => {
+    const res = map([
+      { ...lanternSeason, viewCount: 1 },
+      { ...lanternSeason, ratingKey: 'p', viewOffset: 600000 },
+      { ...lanternSeason, ratingKey: 'q' },
+    ]);
+    expect(res.records[0]).toMatchObject({ status: 'watched' });
+    expect(res.records[0]?.watchedAt).toBeUndefined();
+    for (const r of res.records.slice(1)) {
+      expect(r.status).toBeUndefined();
+      expect(r.statusIfNew).toBe('someday');
+    }
+    expect(res.counts).toMatchObject({ watched: 1, unwatched: 2 });
+  });
+
+  it('honours --unwatched-status queue and skip', () => {
+    const ms = [{ ...lanternSeason, viewCount: 1 }, { ...lanternSeason, ratingKey: 'q', title: 'Unseen' }];
+    expect(map(ms, { unwatchedStatus: 'queue' }).records[1]?.statusIfNew).toBe('queue');
+    const skipped = map(ms, { unwatchedStatus: 'skip' });
+    expect(skipped.records.map((r) => r.sourceTitle)).toEqual(['Lantern Season']);
+    expect(skipped.counts.skippedUnwatched).toBe(1);
+  });
+
+  it('drops the dates of a bulk-marked library but keeps it watched', () => {
+    const day = noon('2023-02-01');
+    const ms = Array.from({ length: 10 }, (_, i) => ({
+      ...lanternSeason,
+      ratingKey: `b${i}`,
+      title: `Invented Film ${i}`,
+      viewCount: 1,
+      lastViewedAt: i < 6 ? day : noon(`2022-0${i - 5}-15`),
+    }));
+    const res = map(ms);
+    expect(res.records.every((r) => r.status === 'watched')).toBe(true);
+    expect(res.records.slice(0, 6).every((r) => r.watchedAt === undefined)).toBe(true);
+    expect(res.records.slice(6).every((r) => typeof r.watchedAt === 'string')).toBe(true);
+    expect(res.warnings.join('\n')).toMatch(/6 movies.*same day/);
+  });
+
+  it('skips non-movie items and items without a title', () => {
+    const res = map([{ ...lanternSeason, type: 'episode' }, { ...lanternSeason, title: '  ' }, lanternSeason]);
+    expect(res.records).toHaveLength(1);
+    expect(res.counts.skipped).toBe(2);
+  });
+
+  it('keeps Unicode titles and a non-numeric ratingKey', () => {
+    const res = map([{ ...lanternSeason, ratingKey: 'plex-abc', title: 'Ñandú: Ōkami (Reprise)' }]);
+    expect(res.records[0]?.sourceTitle).toBe('Ñandú: Ōkami (Reprise)');
+  });
+
+  it('folds one film from two libraries into one record, but never two editions', () => {
+    const res = map([
+      glassHarbor2009,
+      { ...glassHarbor2009, ratingKey: '9001', viewCount: 0, userRating: undefined },
+      { ...glassHarbor2009, ratingKey: '9002', editionTitle: 'Extended Edition', duration: 140 * 60000, viewCount: 0 },
+    ]);
+    expect(res.records.map((r) => r.sourceTitle)).toEqual(['The Glass Harbor', 'The Glass Harbor (Extended Edition)']);
+    expect(res.records[0]).toMatchObject({ status: 'watched', myRating: 7 });
+  });
+});
+
+describe('a saved listing (--from-file)', () => {
+  it('reads one container, an array of containers, or a bare list', () => {
+    const one = JSON.stringify({ MediaContainer: { size: 1, Metadata: [glassHarbor2009] } });
+    const many = JSON.stringify([{ MediaContainer: { Metadata: [glassHarbor2009] } }, { MediaContainer: { Metadata: [lanternSeason] } }]);
+    expect(parsePlexDump(one)).toHaveLength(1);
+    expect(parsePlexDump(many)).toHaveLength(2);
+    expect(parsePlexDump(JSON.stringify([lanternSeason]))).toHaveLength(1);
+    expect(() => parsePlexDump('<MediaContainer/>')).toThrow(ImportError);
+    expect(() => parsePlexDump('{"hello":1}')).toThrow(/Plex listing/);
+  });
+});
+
+// ---------- applying to a library ----------
+
+describe('importing into the library', () => {
+  const plexImport = (ms: PlexMetadata[], o: Parameters<typeof mapPlexItems>[1] = {}) =>
+    applyImport(db, mapPlexItems(ms, o).records, { mode: 'merge' });
+
+  it('adds owned movies with source plex, matched by the hint, and a re-import changes nothing', () => {
+    const first = plexImport([glassHarbor2009, lanternSeason]);
+    expect(first.added).toBe(2);
+    const [a, b] = items();
+    expect(a).toMatchObject({ tconst: 'tt9000002', owned: true, source: 'plex', status: 'watched', myRating: 7, sourceOwnedRaw: 'plex' });
+    expect(b).toMatchObject({ owned: true, source: 'plex', status: 'someday' });
+    const again = plexImport([glassHarbor2009, lanternSeason]);
+    expect(again).toMatchObject({ added: 0, updated: 0, unchanged: 2 });
+  });
+
+  it('adds two items for two editions with one IMDb id and runtimes 12 minutes apart', () => {
+    plexImport([
+      { ...glassHarbor2009, editionTitle: "Director's Cut", duration: 140 * 60000 },
+      { ...glassHarbor2009, ratingKey: '5014', editionTitle: 'Final' },
+    ]);
+    expect(items().map((i) => [i.sourceTitle, i.sourceRuntimeMin])).toEqual([
+      ["The Glass Harbor (Director's Cut)", 140],
+      ['The Glass Harbor', 128],
+    ]);
+  });
+
+  it('never downgrades a watched movie, never clears a rating, and marks an existing movie owned', () => {
+    applyImport(
+      db,
+      [{ sourceTitle: 'The Glass Harbor', sourceYear: 2009, source: 'imdb', status: 'watched', myRating: 9, ownedIfNew: false, imdbIdHint: 'tt9000002', imdbIdExact: true }],
+      { mode: 'merge' },
+    );
+    expect(items()[0]).toMatchObject({ owned: false, status: 'watched', myRating: 9 });
+    plexImport([{ ...glassHarbor2009, viewCount: 0, userRating: undefined, lastViewedAt: undefined }]);
+    expect(items()).toHaveLength(1);
+    expect(items()[0]).toMatchObject({ owned: true, status: 'watched', myRating: 9 });
+  });
+
+  it('keeps an existing item\'s own descriptive fields and only fills blanks', () => {
+    applyImport(db, [{ sourceTitle: 'The Glass Harbor', sourceYear: 2009, sourceDirector: 'Teodor Brask', sourceGenre: 'Noir', source: 'apple-tv' }], { mode: 'merge' });
+    plexImport([glassHarbor2009]);
+    expect(items()).toHaveLength(1);
+    expect(items()[0]).toMatchObject({ sourceGenre: 'Noir', collection: 'Harbor Films', sourceRuntimeMin: 128 });
+  });
+
+  it('never moves an existing unwatched movie with --unwatched-status', () => {
+    applyImport(db, [{ sourceTitle: 'Lantern Season', sourceYear: 1978, source: 'csv', status: 'priority' }], { mode: 'merge' });
+    for (const unwatchedStatus of ['queue', 'someday'] as const) plexImport([lanternSeason], { unwatchedStatus });
+    expect(items()).toHaveLength(1);
+    expect(items()[0]).toMatchObject({ status: 'priority', owned: true });
+  });
+
+  it('gives new unwatched movies the chosen status', () => {
+    plexImport([lanternSeason], { unwatchedStatus: 'queue' });
+    expect(items()[0]?.status).toBe('queue');
+  });
+});
