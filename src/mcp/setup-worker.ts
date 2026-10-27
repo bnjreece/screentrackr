@@ -21,6 +21,9 @@ try {
     refresh: input.refresh,
     withCast: input.withCast,
     includeTvMovies: input.includeTvMovies,
+    matchOnly: input.matchOnly,
+    // The parent SetupJob took the setup lock for this run.
+    lockHeld: true,
     onProgress: (message) => port.postMessage({ type: 'progress', message }),
   });
   port.postMessage({ type: 'done', result });

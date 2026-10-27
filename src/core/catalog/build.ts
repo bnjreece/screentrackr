@@ -2,7 +2,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { transaction, type Db } from '../db.js';
 import { normalizeTitle } from '../normalize.js';
-import { CATALOG_INDEXES_SQL, CATALOG_TABLES, catalogTablesSql } from '../schema.js';
+import { CATALOG_INDEXES_SQL, CATALOG_TABLES, catalogTablesSql, MATCHING_PENDING_KEY } from '../schema.js';
 import type { DatabaseSync } from '../sqlite.js';
 import { DATASETS, datasetFile, type Dataset } from './download.js';
 import { readTsvGzRows, tsvValue } from './tsv.js';
@@ -223,6 +223,8 @@ export async function buildCatalog(db: Db, opts: BuildCatalogOptions): Promise<C
         'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
       );
       setMeta.run('catalog_built_at', builtAt);
+      // Library matches now point at the old catalog; a full rematch clears this.
+      setMeta.run(MATCHING_PENDING_KEY, '1');
       setMeta.run('catalog_with_cast', withCast ? '1' : '0');
       setMeta.run('catalog_include_tv_movies', opts.includeTvMovies ? '1' : '0');
       for (const d of needed) setMeta.run(`dataset_date:${d}`, statSync(paths[d]).mtime.toUTCString());

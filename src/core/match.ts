@@ -9,6 +9,7 @@
  */
 import { transaction, type Db } from './db.js';
 import { normalizeTitle, titleSuffixYear } from './normalize.js';
+import { MATCHING_PENDING_KEY } from './schema.js';
 import type { MatchStatus } from './types.js';
 
 export { normalizeTitle };
@@ -420,6 +421,8 @@ export function rematch(db: Db, opts: { onlyUnresolved?: boolean } = {}): { matc
       clear.run(it.id);
       if (res.status === 'ambiguous') for (const c of res.candidates) addCandidate.run(it.id, c.tconst, c.score);
     }
+    // A full rematch is what a catalog build leaves pending (see buildCatalog).
+    if (!opts.onlyUnresolved) db.sql.prepare('DELETE FROM meta WHERE key = ?').run(MATCHING_PENDING_KEY);
   });
   return counts;
 }

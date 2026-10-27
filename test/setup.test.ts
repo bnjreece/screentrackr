@@ -4,19 +4,20 @@
  * from dist/ (built by global-setup) against a cache pre-filled with the
  * synthetic fixtures, so nothing is downloaded.
  */
-import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { spawn, spawnSync } from 'node:child_process';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { buildCatalog } from '../src/core/catalog/build.js';
 import { DATASETS, datasetFile } from '../src/core/catalog/download.js';
 import { catalogReady, openDb, type Db } from '../src/core/db.js';
 import { cacheDir } from '../src/core/home.js';
 import { getItem } from '../src/core/library.js';
-import { acquireSetupLock, IMDB_CREDIT, SETUP_LOCK_FILE, SetupBusyError, setupLockHolder, type SetupResult } from '../src/core/setup.js';
+import { acquireSetupLock, IMDB_CREDIT, matchingPending, SETUP_LOCK_FILE, SetupBusyError, setupLockHolder, type SetupResult } from '../src/core/setup.js';
 import { createMcpServer, SETUP_HINT } from '../src/mcp/server.js';
 import { inProcessRunner, PROGRESS_LINES, SetupJob, workerRunner, type SetupRunner } from '../src/mcp/setup-job.js';
 
@@ -40,6 +41,7 @@ let client: Client | null;
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'screentrackr-setup-'));
   home = join(tmp, 'home');
+  mkdirSync(home);
   db = null;
   client = null;
 });
@@ -72,22 +74,50 @@ async function connect(job?: SetupJob): Promise<(name: string, args?: Record<str
   return async (name, args = {}) => (await c.callTool({ name, arguments: args })) as ToolResult;
 }
 
+/** Poll catalog_status until the setup is no longer running. */
+async function waitForSetup(call: (name: string, args?: Record<string, unknown>) => Promise<ToolResult>): Promise<ToolResult> {
+  for (let i = 0; i < 400; i++) {
+    const status = await call('catalog_status');
+    if ((status.structuredContent as { setup: { state: string } }).setup.state !== 'running') return status;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('setup did not finish');
+}
+
 /** A runner the test controls: resolve or reject it by hand, push progress lines. */
 function manualRunner() {
   let resolve!: (r: SetupResult) => void;
   let reject!: (e: Error) => void;
   let progress!: (m: string) => void;
   const calls: unknown[] = [];
+  let stops = 0;
   const runner: SetupRunner = (input, onProgress) => {
     calls.push(input);
     progress = onProgress;
-    return new Promise<SetupResult>((res, rej) => {
+    const done = new Promise<SetupResult>((res, rej) => {
       resolve = res;
       reject = rej;
     });
+    return {
+      done,
+      stop: async () => {
+        stops++;
+        reject(new Error('stopped'));
+        await done.catch(() => {});
+      },
+    };
   };
-  return { runner, calls, resolve: (r: SetupResult) => resolve(r), reject: (e: Error) => reject(e), progress: (m: string) => progress(m) };
+  return {
+    runner,
+    calls,
+    stops: () => stops,
+    resolve: (r: SetupResult) => resolve(r),
+    reject: (e: Error) => reject(e),
+    progress: (m: string) => progress(m),
+  };
 }
+
+const FULL = { refresh: false, withCast: true, includeTvMovies: false, matchOnly: false };
 
 const FAKE_RESULT: SetupResult = {
   catalog: { movies: 3, rated: 3, people: 2, castRows: 1, seconds: 1 },
@@ -98,7 +128,6 @@ const FAKE_RESULT: SetupResult = {
 
 describe('setup lock', () => {
   it('is exclusive while held and free once released', () => {
-    mkdirSync(home, { recursive: true });
     const release = acquireSetupLock(home);
     expect(setupLockHolder(home)).toBe(process.pid);
     expect(() => acquireSetupLock(home)).toThrow(SetupBusyError);
@@ -108,12 +137,13 @@ describe('setup lock', () => {
     acquireSetupLock(home)();
   });
 
-  it('replaces a lock left by a dead process, a very old lock and a garbled one', () => {
-    mkdirSync(home, { recursive: true });
+  it('replaces a lock left by a dead process, one from before a reboot, an empty one and a garbled one', () => {
     const path = join(home, SETUP_LOCK_FILE);
+    const booted = Date.now() - uptime() * 1000;
     for (const content of [
-      JSON.stringify({ pid: deadPid(), startedAt: Date.now() }),
-      JSON.stringify({ pid: process.pid, startedAt: Date.now() - 13 * 60 * 60 * 1000 }),
+      JSON.stringify({ pid: deadPid(), token: 'x', bootedAt: booted }),
+      JSON.stringify({ pid: process.pid, token: 'x', bootedAt: booted - 24 * 60 * 60 * 1000 }),
+      '',
       '{not json',
     ]) {
       writeFileSync(path, content);
@@ -121,8 +151,54 @@ describe('setup lock', () => {
       const release = acquireSetupLock(home);
       expect(setupLockHolder(home)).toBe(process.pid);
       release();
+      expect(existsSync(path)).toBe(false);
     }
+    // No temporary or moved-aside files are left behind.
+    expect(readdirSync(home)).toEqual([]);
   });
+
+  it('keeps a live lock however old it is', () => {
+    const booted = Date.now() - uptime() * 1000;
+    writeFileSync(join(home, SETUP_LOCK_FILE), JSON.stringify({ pid: process.pid, token: 'x', bootedAt: booted }));
+    expect(setupLockHolder(home)).toBe(process.pid);
+    expect(() => acquireSetupLock(home)).toThrow(SetupBusyError);
+  });
+
+  it('release removes only its own lock', () => {
+    const path = join(home, SETUP_LOCK_FILE);
+    const release = acquireSetupLock(home);
+    // Someone else's lock replaced ours (ours was judged abandoned, say).
+    rmSync(path);
+    const other = JSON.stringify({ pid: process.pid, token: 'other', bootedAt: Date.now() - uptime() * 1000 });
+    writeFileSync(path, other);
+    release();
+    expect(readFileSync(path, 'utf8')).toBe(other);
+  });
+
+  it('only one of many simultaneous contenders gets it, also over an abandoned lock', async () => {
+    const path = join(home, SETUP_LOCK_FILE);
+    writeFileSync(path, JSON.stringify({ pid: deadPid(), token: 'stale', bootedAt: Date.now() - uptime() * 1000 }));
+    const script = [
+      'const { acquireSetupLock } = await import(process.argv[1]);',
+      "try { acquireSetupLock(process.argv[2]); process.stdout.write('won'); setTimeout(() => {}, 1500); }",
+      'catch (e) { process.stdout.write(e.name); }',
+    ].join('\n');
+    const mod = pathToFileURL(join(ROOT, 'dist', 'core', 'setup.js')).href;
+    const results = await Promise.all(
+      Array.from(
+        { length: 8 },
+        () =>
+          new Promise<string>((resolve) => {
+            const c = spawn(process.execPath, ['--input-type=module', '-e', script, mod, home]);
+            let out = '';
+            c.stdout.on('data', (d) => (out += d));
+            c.on('exit', () => resolve(out));
+          }),
+      ),
+    );
+    expect(results.filter((r) => r === 'won')).toHaveLength(1);
+    expect(results.filter((r) => r === 'SetupBusyError')).toHaveLength(7);
+  }, 20_000);
 });
 
 describe('SetupJob', () => {
@@ -132,9 +208,11 @@ describe('SetupJob', () => {
     const job = new SetupJob(home, m.runner, () => clock);
     expect(job.status()).toMatchObject({ state: 'idle', startedAt: null, progress: [] });
 
-    const started = job.start({ refresh: false, withCast: false, includeTvMovies: true });
+    const started = job.start({ refresh: false, withCast: false, includeTvMovies: true, matchOnly: false });
     expect(started.state).toBe('running');
-    expect(m.calls).toEqual([{ home, refresh: false, withCast: false, includeTvMovies: true }]);
+    expect(m.calls).toEqual([{ home, refresh: false, withCast: false, includeTvMovies: true, matchOnly: false }]);
+    // The job holds the setup lock while the work runs.
+    expect(setupLockHolder(home)).toBe(process.pid);
     for (let i = 1; i <= PROGRESS_LINES + 3; i++) m.progress(`step ${i}`);
     clock += 42_000;
     const mid = job.status();
@@ -143,22 +221,24 @@ describe('SetupJob', () => {
     expect(mid.progress.at(-1)).toBe(`step ${PROGRESS_LINES + 3}`);
     expect(mid.progress[0]).toBe('step 4');
 
-    expect(() => job.start({ refresh: false, withCast: true, includeTvMovies: false })).toThrow(SetupBusyError);
+    expect(() => job.start(FULL)).toThrow(/already running/);
 
     m.resolve(FAKE_RESULT);
     await job.settled();
     expect(job.status()).toMatchObject({ state: 'succeeded', result: FAKE_RESULT, error: null, elapsedSeconds: 42 });
+    expect(setupLockHolder(home)).toBeNull();
   });
 
   it('reports a failure and can be started again', async () => {
     const m = manualRunner();
     const job = new SetupJob(home, m.runner);
-    job.start({ refresh: false, withCast: true, includeTvMovies: false });
+    job.start(FULL);
     m.reject(new Error('Download of title.basics.tsv.gz failed: HTTP 503'));
     await job.settled();
     expect(job.status()).toMatchObject({ state: 'failed', error: 'Download of title.basics.tsv.gz failed: HTTP 503' });
+    expect(setupLockHolder(home)).toBeNull();
 
-    job.start({ refresh: true, withCast: true, includeTvMovies: false });
+    job.start({ ...FULL, refresh: true });
     expect(job.status()).toMatchObject({ state: 'running', error: null, options: { refresh: true } });
     m.resolve(FAKE_RESULT);
     await job.settled();
@@ -169,17 +249,28 @@ describe('SetupJob', () => {
     const job = new SetupJob(home, () => {
       throw new Error('no worker');
     });
-    job.start({ refresh: false, withCast: true, includeTvMovies: false });
+    job.start(FULL);
     await job.settled();
     expect(job.status()).toMatchObject({ state: 'failed', error: 'no worker' });
+    expect(setupLockHolder(home)).toBeNull();
+  });
+
+  it('stop() ends a running setup and releases the lock', async () => {
+    const m = manualRunner();
+    const job = new SetupJob(home, m.runner);
+    job.start(FULL);
+    await job.stop();
+    expect(m.stops()).toBe(1);
+    expect(job.status().state).toBe('failed');
+    expect(setupLockHolder(home)).toBeNull();
+    await job.stop(); // Idle: nothing to do.
   });
 
   it('refuses to start while another process holds the setup lock', () => {
-    mkdirSync(home, { recursive: true });
     const release = acquireSetupLock(home);
     try {
       const job = new SetupJob(home, manualRunner().runner);
-      expect(() => job.start({ refresh: false, withCast: true, includeTvMovies: false })).toThrow(/already running/);
+      expect(() => job.start(FULL)).toThrow(/already running/);
       expect(job.status().state).toBe('idle');
     } finally {
       release();
@@ -190,11 +281,36 @@ describe('SetupJob', () => {
     seedCache(home);
     openDb(home).close();
     const lines: string[] = [];
-    const result = await inProcessRunner({ home, refresh: false, withCast: true, includeTvMovies: false }, (m) => lines.push(m));
-    expect(result.catalog.movies).toBeGreaterThan(0);
+    const result = await inProcessRunner({ home, ...FULL }, (m) => lines.push(m)).done;
+    expect(result.catalog!.movies).toBeGreaterThan(0);
     expect(result.downloads.every((d) => !d.downloaded)).toBe(true);
     expect(lines.join('\n')).toMatch(/Using cached title\.basics/);
-    expect(existsSync(join(home, SETUP_LOCK_FILE))).toBe(false);
+  });
+
+  it('a worker that dies mid-setup fails the job and frees the lock for a retry', async () => {
+    const crash = join(tmp, 'crash-worker.mjs');
+    writeFileSync(
+      crash,
+      "import { parentPort } from 'node:worker_threads'; parentPort.postMessage({ type: 'progress', message: 'Downloading' }); process.exit(7);",
+    );
+    const job = new SetupJob(home, workerRunner(pathToFileURL(crash)));
+    job.start(FULL);
+    await job.settled();
+    expect(job.status()).toMatchObject({ state: 'failed', progress: ['Downloading'] });
+    expect(job.status().error).toMatch(/exit code 7/);
+    expect(setupLockHolder(home)).toBeNull();
+    expect(() => acquireSetupLock(home)()).not.toThrow();
+  });
+
+  it('stop() terminates a worker that is still running', async () => {
+    const hang = join(tmp, 'hang-worker.mjs');
+    writeFileSync(hang, 'setInterval(() => {}, 1000);');
+    const job = new SetupJob(home, workerRunner(pathToFileURL(hang)));
+    job.start(FULL);
+    expect(job.isRunning).toBe(true);
+    await job.stop();
+    expect(job.status().state).toBe('failed');
+    expect(setupLockHolder(home)).toBeNull();
   });
 });
 
@@ -248,6 +364,36 @@ describe('setup_catalog and catalog_status tools', () => {
     expect(m.calls).toHaveLength(2);
   });
 
+  it('finishes matching that a build left pending, without downloading or rebuilding', async () => {
+    seedCache(home);
+    const call = await connect(new SetupJob(home, workerRunner(WORKER)));
+    const seed = openDb(home);
+    await buildCatalog(seed, { cacheDir: cacheDir(home) });
+    seed.close();
+    // The build committed but the rematch after it never ran (the app quit, say).
+    expect(matchingPending(db!)).toBe(true);
+    const itemId = Number(
+      db!.sql.prepare("INSERT INTO library_items (source_title, source_year, source, status) VALUES ('Quiet Ledger', 1999, 'csv', 'queue')").run()
+        .lastInsertRowid,
+    );
+    const status = await call('catalog_status');
+    expect(status.structuredContent).toMatchObject({ catalog: { ready: true, matchingPending: true } });
+    expect(text(status)).toMatch(/did not finish/);
+
+    const start = await call('setup_catalog');
+    expect(start.structuredContent).toMatchObject({ started: true, setup: { options: { matchOnly: true } } });
+    const done = await waitForSetup(call);
+    expect(done.structuredContent, text(done)).toMatchObject({
+      catalog: { matchingPending: false },
+      setup: { state: 'succeeded', result: { catalog: null, downloads: [] } },
+    });
+    expect(text(done)).toMatch(/Library matching finished/);
+    expect(getItem(db!, itemId)).toMatchObject({ tconst: 'tt9000003', matchStatus: 'matched' });
+
+    const noop = await call('setup_catalog');
+    expect(noop.structuredContent).toMatchObject({ started: false });
+  }, 30_000);
+
   it('is a tool error when a terminal setup holds the lock', async () => {
     const call = await connect(new SetupJob(home, manualRunner().runner));
     const release = acquireSetupLock(home);
@@ -271,14 +417,9 @@ describe('setup_catalog and catalog_status tools', () => {
     const start = await call('setup_catalog');
     expect(start.structuredContent).toMatchObject({ started: true });
 
-    let status: ToolResult | null = null;
-    for (let i = 0; i < 200; i++) {
-      status = await call('catalog_status');
-      if ((status.structuredContent as { setup: { state: string } }).setup.state !== 'running') break;
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    expect(status!.structuredContent, text(status!)).toMatchObject({ catalog: { ready: true, withCast: true }, setup: { state: 'succeeded' } });
-    expect(text(status!)).toContain(IMDB_CREDIT);
+    const status = await waitForSetup(call);
+    expect(status.structuredContent, text(status)).toMatchObject({ catalog: { ready: true, withCast: true }, setup: { state: 'succeeded' } });
+    expect(text(status)).toContain(IMDB_CREDIT);
     expect(catalogReady(db!)).toBe(true);
     expect(existsSync(join(home, SETUP_LOCK_FILE))).toBe(false);
     // Setup refreshed matching, and left the status alone.

@@ -26,7 +26,8 @@ export const setup: Command = {
       includeTvMovies: bool(values, 'include-tv-movies'),
       onProgress: progress,
     });
-    const { catalog: stats, matching } = result;
+    const { matching } = result;
+    const stats = result.catalog as NonNullable<typeof result.catalog>; // Always built: no matchOnly here.
     ctx.emit(result, () =>
       [
         `Catalog built: ${stats.movies.toLocaleString('en-US')} movies, ${stats.rated.toLocaleString('en-US')} rated, ${stats.people.toLocaleString('en-US')} people, ${stats.castRows.toLocaleString('en-US')} cast credits in ${stats.seconds.toFixed(1)}s.`,

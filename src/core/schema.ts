@@ -16,6 +16,9 @@ const NOW = "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))";
  * `*_new` tables to load into before swapping them in. Indexes are separate so
  * the build can create them with their canonical names after the swap.
  */
+/** meta key set when a catalog build commits and cleared by the full rematch that follows. */
+export const MATCHING_PENDING_KEY = 'matching_pending';
+
 export const CATALOG_TABLES = ['titles', 'title_genres', 'ratings', 'people', 'title_people'] as const;
 
 export function catalogTablesSql(suffix = ''): string {

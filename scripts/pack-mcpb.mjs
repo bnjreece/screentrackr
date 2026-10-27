@@ -21,9 +21,10 @@ import { fileURLToPath, URL } from 'node:url';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const OUT = join(ROOT, 'build', 'mcpb');
 const STAGE = join(OUT, 'stage');
-const WIN = process.platform === 'win32';
-const MCPB = join(ROOT, 'node_modules', '.bin', WIN ? 'mcpb.cmd' : 'mcpb');
-const NPM = WIN ? 'npm.cmd' : 'npm';
+// Both CLIs run as JavaScript under this Node, with no shell, so paths with spaces work everywhere.
+const MCPB = join(ROOT, 'node_modules', '@anthropic-ai', 'mcpb', 'dist', 'cli', 'cli.js');
+// Set by `npm run`; the npm CLI's own JavaScript entry point.
+const NPM_CLI = process.env.npm_execpath;
 
 /** The only top-level entries the bundle may contain. */
 const BUNDLE_ENTRIES = ['LICENSE', 'dist', 'icon.png', 'manifest.json', 'node_modules', 'package.json'];
@@ -37,9 +38,8 @@ function fail(message) {
   process.exit(1);
 }
 
-function run(cmd, args, opts = {}) {
-  // .cmd shims need a shell on Windows.
-  execFileSync(cmd, args, { stdio: 'inherit', shell: WIN, ...opts });
+function node(script, args, opts = {}) {
+  execFileSync(process.execPath, [script, ...args], { stdio: 'inherit', ...opts });
 }
 
 /** Recursively list files under dir, relative to it, with forward slashes. */
@@ -108,6 +108,7 @@ const manifest = JSON.parse(readFileSync(join(ROOT, 'mcpb', 'manifest.json'), 'u
 if (manifest.version !== pkg.version) fail(`mcpb/manifest.json version ${manifest.version} differs from package.json ${pkg.version}`);
 if (!existsSync(join(ROOT, 'dist', 'cli', 'index.js'))) fail('dist/ is missing; run `npm run build` first');
 if (!existsSync(MCPB)) fail('the mcpb CLI is missing; run `npm ci` first');
+if (!NPM_CLI || !/\.[cm]?js$/.test(NPM_CLI)) fail('run this through `npm run pack:mcpb`');
 
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(STAGE, { recursive: true });
@@ -120,7 +121,7 @@ cpSync(join(ROOT, 'LICENSE'), join(STAGE, 'LICENSE'));
 // Production dependencies, exactly as locked, with no install scripts.
 cpSync(join(ROOT, 'package.json'), join(STAGE, 'package.json'));
 cpSync(join(ROOT, 'package-lock.json'), join(STAGE, 'package-lock.json'));
-run(NPM, ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: STAGE });
+node(NPM_CLI, ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: STAGE });
 rmSync(join(STAGE, 'package-lock.json'));
 rmSync(join(STAGE, 'node_modules', '.package-lock.json'), { force: true });
 prune(join(STAGE, 'node_modules'));
@@ -130,13 +131,13 @@ const slim = { name: pkg.name, version: pkg.version, description: pkg.descriptio
 writeFileSync(join(STAGE, 'package.json'), `${JSON.stringify(slim, null, 2)}\n`);
 
 const bundle = join(OUT, `${pkg.name}-${pkg.version}.mcpb`);
-run(MCPB, ['validate', join(STAGE, 'manifest.json')]);
-run(MCPB, ['pack', STAGE, bundle]);
+node(MCPB, ['validate', join(STAGE, 'manifest.json')]);
+node(MCPB, ['pack', STAGE, bundle]);
 
 // Check what actually shipped: unpack the bundle and inspect it.
 const unpacked = mkdtempSync(join(tmpdir(), 'screentrackr-mcpb-unpacked-'));
 try {
-  run(MCPB, ['unpack', bundle, unpacked], { stdio: 'ignore' });
+  node(MCPB, ['unpack', bundle, unpacked], { stdio: 'ignore' });
   const entries = readdirSync(unpacked).sort();
   if (JSON.stringify(entries) !== JSON.stringify(BUNDLE_ENTRIES)) fail(`unexpected bundle entries: ${entries.join(', ')}`);
   const files = listFiles(unpacked);
