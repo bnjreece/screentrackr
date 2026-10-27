@@ -24,20 +24,30 @@ const LETTERBOXD_UPLOAD: Record<LetterboxdWhat, string> = {
   list: 'Upload each file with the import when you create a list at letterboxd.com/list/new/, or on the edit page of a list you have.',
 };
 
-/** Owner-only temp files beside each destination, then renamed over them: a failed write leaves nothing half-written. */
+/**
+ * Owner-only temp files beside each destination, then renamed over them: a
+ * failed write leaves nothing half-written. Each file is replaced whole; if a
+ * later rename fails, the error says which files were already replaced.
+ */
 function writeOwnerOnly(files: { path: string; content: string }[]): void {
   const temps: string[] = [];
+  let renamed = 0;
   try {
     for (const f of files) {
       const tmp = join(dirname(f.path), `.${basename(f.path)}.${process.pid}.${Date.now()}.tmp`);
       temps.push(tmp);
       writeFileSync(tmp, f.content, { mode: 0o600, flag: 'wx' });
     }
-    files.forEach((f, i) => renameSync(temps[i] as string, f.path));
+    for (const [i, f] of files.entries()) {
+      renameSync(temps[i] as string, f.path);
+      renamed++;
+    }
   } catch (err) {
-    for (const t of temps) rmSync(t, { force: true });
-    const at = files.length === 1 ? (files[0] as { path: string }).path : dirname((files[0] as { path: string }).path);
-    throw new UserError(`Could not write ${at}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
+    for (const t of temps.slice(renamed)) rmSync(t, { force: true });
+    const failed = files[Math.min(renamed, files.length - 1)] as { path: string };
+    const done = files.slice(0, renamed).map((f) => basename(f.path));
+    const note = done.length ? ` Already replaced: ${done.join(', ')}; the rest were not written, so don't upload this set.` : '';
+    throw new UserError(`Could not write ${failed.path}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}.${note}`);
   }
 }
 

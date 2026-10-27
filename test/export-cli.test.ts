@@ -140,6 +140,23 @@ describe('export --format letterboxd', () => {
     expect(readFileSync(join(dir, 'letterboxd-watched-1.csv'), 'utf8')).not.toContain('slash');
   });
 
+  it('a failed rename in a split export says which files were already replaced', () => {
+    const db = openDb(home);
+    const ins = db.sql.prepare("INSERT INTO library_items (source_title, match_status, source, status) VALUES (?, 'unmatched', 'paste', 'watched')");
+    db.sql.exec('BEGIN');
+    for (let i = 0; i < 6000; i++) ins.run(`Generated ${i} ${'x'.repeat(200)}`);
+    db.sql.exec('COMMIT');
+    db.close();
+    const dir = join(tmp, `lbf-${n}`);
+    // A directory where the second file goes makes its rename fail.
+    mkdirSync(join(dir, 'letterboxd-watched-2.csv'), { recursive: true });
+    const r = run(['export', '--format', 'letterboxd', '--out-dir', dir]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/Could not write .*letterboxd-watched-2\.csv/);
+    expect(r.stderr).toMatch(/Already replaced: letterboxd-watched-1\.csv/);
+    expect(readdirSync(dir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+  });
+
   it('refuses options that do not fit the format', () => {
     expect(run(['export', '--format', 'letterboxd']).stderr).toMatch(/--out-dir/);
     expect(run(['export', '--format', 'letterboxd', '--out', 'x.csv']).stderr).toMatch(/--out-dir/);
