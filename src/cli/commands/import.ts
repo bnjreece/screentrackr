@@ -262,7 +262,7 @@ async function readJellyfin(ctx: Ctx, f: JellyfinFlags): Promise<Parsed> {
 export const importCmd: Command = {
   name: 'import',
   summary: 'Bring in a library file (merge by default)',
-  usage: 'import <file|apple-tv|imdb <file.csv>...|letterboxd <export.zip|folder|file.csv>...|trakt <export.zip|folder>...> [--format <format>] [--merge | --replace] [--dry-run]',
+  usage: 'import <file|apple-tv|imdb <file.csv>...|letterboxd <export.zip|folder|file.csv>...|trakt <export.zip|folder>...|plex|jellyfin> [--format <format>] [--merge | --replace] [--dry-run]',
   details: [
     `Formats: ${FORMATS.join(', ')}. The format is detected when --format is omitted.`,
     "`import apple-tv` (experimental, macOS only) reads the TV app's library directly. Movies with a recorded play date are marked watched; the rest keep their current status.",
