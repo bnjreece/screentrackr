@@ -683,7 +683,7 @@ describe('import jellyfin (command)', () => {
     await expect(importCmd.run(ctx, ['some.csv'], { url: SERVER })).rejects.toThrow(/only apply to `import plex` and `import jellyfin`/);
     await expect(importCmd.run(ctx, ['some.csv'], { 'token-stdin': true })).rejects.toThrow(/only apply to `import plex` and `import jellyfin`/);
     // Plex-only flags are still refused on jellyfin, and jellyfin-only flags on plex.
-    await expect(run({ url: SERVER, section: ['Movies'] })).rejects.toThrow(/--section only applies to `import plex`/);
+    await expect(importCmd.run(ctx, ['jellyfin'], { url: SERVER, section: ['Movies'] })).rejects.toThrow(/--section only applies to `import plex`/);
     await expect(importCmd.run(ctx, ['plex'], { ratings: true })).rejects.toThrow(/only apply to `import jellyfin`/);
     vi.stubEnv('JELLYFIN_TOKEN', TOKEN);
     await expect(run({ url: SERVER, user: 'orrin', 'password-stdin': true })).rejects.toThrow(/Unset JELLYFIN_TOKEN/);

@@ -1,6 +1,6 @@
 {
   "name": "screentrackr",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Query your movie library and the IMDb catalog from the terminal or an MCP client.",
   "type": "module",
   "license": "MIT",
@@ -41,6 +41,10 @@
     "cli",
     "sqlite",
     "apple-tv",
+    "letterboxd",
+    "trakt",
+    "plex",
+    "jellyfin",
     "watchlist",
     "claude"
   ],
