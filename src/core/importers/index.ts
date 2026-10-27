@@ -142,6 +142,9 @@ function validate(records: ImportRecord[]): void {
       fail(`invalid watched date "${r.watchedAt}"`);
     }
     if (r.tconst != null && !/^tt\d{7,}$/.test(r.tconst)) fail(`invalid IMDb id "${r.tconst}"`);
+    if (r.editionYear != null && !(Number.isInteger(r.editionYear) && r.editionYear >= 1000 && r.editionYear <= 9999)) {
+      fail(`invalid edition year "${String(r.editionYear)}"`);
+    }
     if (r.matchStatus !== undefined && !(MATCH_STATUSES as readonly string[]).includes(r.matchStatus)) {
       fail(`invalid match status "${String(r.matchStatus)}"`);
     }
@@ -184,6 +187,7 @@ function targetFor(db: Db, r: ImportRecord): Target {
   const res = matchOne(db, {
     title: r.sourceTitle,
     year: r.sourceYear ?? null,
+    editionYear: r.editionYear ?? null,
     director: r.sourceDirector ?? null,
     runtimeMin: r.sourceRuntimeMin ?? null,
     imdbIdHint: hint || null,
@@ -238,6 +242,7 @@ const recordIdentity = (db: Db, r: ImportRecord, t: Target): Identity =>
     sourceYear: r.sourceYear ?? null,
     sourceRuntimeMin: r.sourceRuntimeMin ?? null,
     sourceDirector: r.sourceDirector ?? null,
+    editionYear: r.editionYear ?? null,
     tconst: t.tconst,
     matchStatus: t.matchStatus,
   });
@@ -302,10 +307,11 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
     if (sameApple(e)) return false;
     return (
       (apple !== null && e.item.applePersistentId !== null) ||
-      // Years more than one apart, runtimes more than 3 minutes apart (within
-      // that, the same cut reported by different sources) or directors who are
-      // clearly different people (a remake): another movie. A linked item or
-      // record whose source left a field out is judged by its catalog title's.
+      // Years more than one apart (or a film from after the edition the record
+      // sells), runtimes more than 3 minutes apart (within that, the same cut
+      // reported by different sources) or directors who are clearly different
+      // people (a remake): another movie. A linked item or record whose source
+      // left a field out is judged by its catalog title's.
       factsConflict(rec, e.identity) ||
       // Two different IMDb ids that the record itself names (a JSON v1 link or a
       // hint matching did not refute) mean two different movies; a hint yields

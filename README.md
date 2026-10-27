@@ -45,7 +45,7 @@ The paste is tab-separated text. If the first line names the columns, they're re
 screentrackr import apple-tv
 ```
 
-This reads the TV app's library directly through JavaScript for Automation. macOS asks once for permission to control the TV app. Movies with a recorded play date are marked watched. It's experimental: large libraries can be slow, and if the TV app times out the command fails and tells you so (raise the wait with `--timeout <seconds>`). The copy and paste route above always works.
+This reads the TV app's library directly through JavaScript for Automation. macOS asks once for permission to control the TV app. Movies with a recorded play date are marked watched; nothing else about a movie's status or rating changes. The TV app's year is the year of the edition it sells (a restoration can show a year decades after the film), so it is only used to rule out films made after it and is never saved as the movie's year: movies are matched on title, director and runtime, and an edition tag such as "(Director's Cut)" or ": The Ultimate Edition" is ignored. Movies you already have, by IMDb link or by title, director and runtime, get the TV app's id instead of a duplicate. It's experimental: large libraries can be slow, and if the TV app times out the command fails and tells you so (raise the wait with `--timeout <seconds>`). The copy and paste route above always works.
 
 ### CSV
 

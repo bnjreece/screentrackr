@@ -8,6 +8,13 @@
  * A cloud library can report a play count of 1 on nearly every track with no
  * played date at all, so the count alone is not proof of watching. Anything
  * else carries no status, so a merge keeps whatever status the library has.
+ *
+ * The TV app's `year` is the year of the edition on sale, not the film's (a
+ * 1991 film can show 1997, a restoration decades later). It becomes the
+ * record's `editionYear`, which only rules out films released after it, and
+ * never `sourceYear`: matching and merging rely on the title, director and
+ * runtime instead, and an import never writes it into the library. A "(1956)"
+ * at the end of the title is still the film's own year.
  */
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -41,6 +48,38 @@ interface JxaTrack {
 
 const MOVIE_KINDS = new Set(['movie', 'home video']);
 
+const APOSTROPHES = `'\u2018\u2019\u02bc`;
+/** A trailing edition named after a colon or dash: "The Collector's Edition", "40th Anniversary Edition", "Director's Cut". */
+const EDITION_SEGMENT = new RegExp(
+  `^(?:the\\s+)?(?:(?:[\\p{L}\\p{N}.${APOSTROPHES}]+\\s+){0,3}edition|directors?[${APOSTROPHES}]?s?\\s+cut)$`,
+  'iu',
+);
+const SEPARATORS = [': ', ' - ', ' \u2013 ', ' \u2014 '];
+
+/**
+ * Put a trailing edition written after a colon or dash ("Title: The Ultimate
+ * Edition", "Title - 40th Anniversary Edition") in parentheses, the form title
+ * normalization already strips, so it matches the film's own title. Only
+ * segments that end in "Edition", or that are a director's cut, qualify: a
+ * named cut such as ": The Next Cut" may be the film's own title.
+ */
+export function bracketEditionSuffix(title: string): string {
+  let at = -1;
+  let sep = '';
+  for (const s of SEPARATORS) {
+    const i = title.lastIndexOf(s);
+    if (i > at) {
+      at = i;
+      sep = s;
+    }
+  }
+  if (at <= 0) return title;
+  const base = title.slice(0, at).trim();
+  const segment = title.slice(at + sep.length).trim();
+  if (!base || !EDITION_SEGMENT.test(segment)) return title;
+  return `${base} (${segment})`;
+}
+
 /** Parse the JXA script's stdout into import records. Non-movie tracks and tracks without a name are dropped. */
 export function parseAppleTvJxaOutput(json: string): ImportRecord[] {
   let data: unknown;
@@ -56,16 +95,18 @@ export function parseAppleTvJxaOutput(json: string): ImportRecord[] {
     if (!raw || typeof raw !== 'object') continue;
     const t = raw as JxaTrack;
     if (typeof t.mediaKind === 'string' && !MOVIE_KINDS.has(t.mediaKind)) continue;
-    const title = cleanText(t.name);
-    if (!title) continue;
+    const name = cleanText(t.name);
+    if (!name) continue;
+    const title = bracketEditionSuffix(name);
 
-    const year = typeof t.year === 'number' && t.year > 0 ? cleanYear(t.year) : null;
+    const editionYear = typeof t.year === 'number' && t.year > 0 ? cleanYear(t.year) : null;
     const seconds = typeof t.duration === 'number' && Number.isFinite(t.duration) && t.duration > 0 ? t.duration : null;
     const added = typeof t.dateAdded === 'string' && !Number.isNaN(Date.parse(t.dateAdded)) ? t.dateAdded : undefined;
 
     const rec: ImportRecord = {
       sourceTitle: title,
-      sourceYear: year,
+      sourceYear: null,
+      editionYear,
       sourceDirector: cleanText(t.director),
       sourceGenre: cleanText(t.genre),
       sourceRuntimeMin: seconds === null ? null : Math.round(seconds / 60),

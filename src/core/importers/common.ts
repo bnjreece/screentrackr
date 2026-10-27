@@ -6,6 +6,13 @@ import type { ItemSource, MatchStatus, Status, WatchedEra } from '../types.js';
 export interface ImportRecord {
   sourceTitle: string;
   sourceYear?: number | null;
+  /**
+   * The year of the edition the source sells, not the film's (the Apple TV
+   * app's `year`: a 1972 film restored in 2015 shows 2015). The film came out
+   * no later than a year after it, so it only rules out later films. It is
+   * never stored and never counts as the record's year.
+   */
+  editionYear?: number | null;
   sourceDirector?: string | null;
   sourceRuntimeMin?: number | null;
   sourceGenre?: string | null;

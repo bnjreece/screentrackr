@@ -4,14 +4,14 @@
  *
  * - Unicode-folds and lowercases.
  * - Strips trailing edition/format/year parentheticals, e.g. "(Special Edition)",
- *   "(Director's Cut)", "(4K)", "(Unrated)", "(Theatrical)", "(2019)".
+ *   "(Director's Cut)", "(4K)", "(Unrated)", "(Theatrical)", "(Subtitled)", "(2019)".
  * - Treats "&" as "and".
  * - Drops apostrophes, turns other punctuation into spaces, collapses spaces.
  * - Drops one leading English article ("the", "a", "an") when more words follow.
  */
 
 const EDITION_WORDS =
-  /\b(?:edition|cut|version|4k|uhd|hd|unrated|rated|theatrical|remaster(?:ed)?|restored|imax|3d|blu ?ray|widescreen|fullscreen|anniversary)\b/;
+  /\b(?:edition|cut|uncut|extended|version|4k|uhd|hd|unrated|rated|theatrical|remaster(?:ed)?|restored|imax|3d|blu ?ray|widescreen|fullscreen|anniversary|subtitled|dubbed)\b/;
 
 const TRAILING_GROUP = /\s*[([]([^()[\]]*)[)\]]\s*$/;
 const YEAR_GROUP = /^\d{4}$/;
