@@ -26,11 +26,12 @@
  * - Jellyfin is the owner's own server, so a new item is owned (the default);
  *   a merge never changes an existing item's owned flag. Descriptive fields
  *   only fill blanks on an existing item (`fillOnly`).
- * - Two items with one IMDb id (unmerged versions) fold into one record.
+ * - Two items with one IMDb id (unmerged versions) come in once: the played
+ *   version, else the one played last, taken whole.
  * - Overview, images and file paths are never requested or read.
  */
 import { createHash } from 'node:crypto';
-import { cleanTconst, cleanText, foldRecords, ImportError, type ImportRecord, type ParsedImport } from './common.js';
+import { cleanTconst, cleanText, ImportError, type ImportRecord, type ParsedImport } from './common.js';
 
 export interface JellyfinMapOptions {
   /** Import `UserData.Rating` (rounded to a whole number from 1 to 10). Off by default. */
@@ -116,6 +117,39 @@ interface Pending {
 }
 
 /**
+ * Several versions of one film (the same IMDb id, not merged on the server)
+ * come in as one record: the played version, else the one played last, else
+ * the first. The chosen version is taken whole, so its own runtime and year
+ * decide which library item it is, never another version's.
+ */
+function pickVersions(pending: Pending[]): ImportRecord[] {
+  const best = new Map<string, Pending>();
+  const better = (a: Pending, b: Pending) => {
+    const pa = a.record.status === 'watched';
+    const pb = b.record.status === 'watched';
+    if (pa !== pb) return pa;
+    return (a.playedAt ?? -Infinity) > (b.playedAt ?? -Infinity);
+  };
+  for (const p of pending) {
+    const key = p.record.imdbIdHint;
+    if (!key) continue;
+    const have = best.get(key);
+    if (!have || better(p, have)) best.set(key, p);
+  }
+  const out: ImportRecord[] = [];
+  const done = new Set<string>();
+  for (const p of pending) {
+    const key = p.record.imdbIdHint;
+    if (!key) out.push(p.record);
+    else if (!done.has(key)) {
+      done.add(key);
+      out.push((best.get(key) as Pending).record);
+    }
+  }
+  return out;
+}
+
+/**
  * Map the `Items` of `GET /Items` responses to ImportRecords. Pure: no
  * network, no database.
  */
@@ -191,26 +225,21 @@ export function mapJellyfinItems(items: readonly unknown[], opts: JellyfinMapOpt
 
   // A bulk "mark played" gives many items one timestamp: that is the click,
   // not when any of them was watched.
-  const times = pending.map((p) => p.playedAt).filter((t): t is number => t !== null).sort((a, b) => a - b);
-  const crowded = (t: number) => {
-    let lo = 0;
-    while (lo < times.length && (times[lo] as number) < t - BULK_WINDOW_MS) lo++;
-    let hi = lo;
-    while (hi < times.length && (times[hi] as number) <= t + BULK_WINDOW_MS) hi++;
-    return hi - lo >= BULK_MIN_ITEMS;
-  };
-  let bulk = 0;
-  for (const p of pending) {
-    if (p.playedAt === null) continue;
-    if (crowded(p.playedAt)) bulk++;
-    else p.record.watchedAt = localDate(p.playedAt);
+  // An item is in a bulk group when 5 or more played items, it among them,
+  // fall within one 60 s span (latest minus earliest).
+  const dated = pending.filter((p) => p.playedAt !== null).sort((a, b) => (a.playedAt as number) - (b.playedAt as number));
+  const inBulk = new Set<Pending>();
+  for (let i = 0, j = 0; i < dated.length; i++) {
+    j = Math.max(j, i);
+    while (j < dated.length && (dated[j]?.playedAt as number) - (dated[i]?.playedAt as number) <= BULK_WINDOW_MS) j++;
+    if (j - i >= BULK_MIN_ITEMS) for (let k = i; k < j; k++) inBulk.add(dated[k] as Pending);
   }
+  for (const p of dated) {
+    if (!inBulk.has(p)) p.record.watchedAt = localDate(p.playedAt as number);
+  }
+  const bulk = inBulk.size;
 
-  const records = foldRecords(
-    pending.map((p) => p.record),
-    (r) => r.imdbIdHint,
-    (w) => warnings.push(w),
-  );
+  const records = pickVersions(pending);
   if (records.length < pending.length) {
     notices.push(`${pending.length - records.length} movie${pending.length - records.length === 1 ? ' is' : 's are'} on the server more than once (same IMDb id) and came in once.`);
   }
@@ -325,7 +354,7 @@ class Client {
 
   async request(method: 'GET' | 'POST', path: string, query?: Record<string, string>, body?: unknown): Promise<Response> {
     const url = new URL(this.base.href);
-    url.pathname = `${this.base.pathname}${path}`;
+    url.pathname = `${this.base.pathname.replace(/\/+$/, '')}${path}`;
     for (const [k, v] of Object.entries(query ?? {})) url.searchParams.set(k, v);
     const doFetch = this.o.fetch ?? globalThis.fetch;
     let res: Response;
@@ -415,11 +444,11 @@ export async function readJellyfinItems(o: JellyfinReadOptions): Promise<Jellyfi
     return { items, userName, warnings };
   } finally {
     if (loggedIn) {
-      try {
-        await client.request('POST', '/Sessions/Logout');
-      } catch {
-        warnings.push('Could not sign out of the Jellyfin session; it ends when the server expires it.');
-      }
+      const ok = await client.request('POST', '/Sessions/Logout').then(
+        (res) => res.ok,
+        () => false,
+      );
+      if (!ok) warnings.push('Could not sign out of the Jellyfin session; sign it out from the Jellyfin dashboard (Devices) or let the server expire it.');
     }
   }
 }

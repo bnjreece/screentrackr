@@ -3,7 +3,11 @@ import { readFileSync } from 'node:fs';
 import { UserError } from './context.js';
 
 /** All of stdin, without the one trailing newline a pipe or `echo` adds. */
-export function readStdinSecret(what: string): string {
+export function readStdinSecret(what: string, flag: string): string {
+  // Typed into a terminal, stdin echoes: refuse rather than show the secret.
+  if (process.stdin.isTTY) {
+    throw new UserError(`${flag} reads the ${what} from a pipe or file, not from the terminal (where it would show as you type).`);
+  }
   let text: string;
   try {
     text = readFileSync(0, 'utf8');

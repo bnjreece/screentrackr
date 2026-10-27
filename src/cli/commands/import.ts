@@ -88,16 +88,16 @@ async function readJellyfin(ctx: Ctx, f: JellyfinFlags): Promise<Parsed> {
   if (f.passwordStdin && envToken) throw new UserError('JELLYFIN_TOKEN is set, so --password-stdin is not used. Unset JELLYFIN_TOKEN to sign in with a password.');
   let auth: JellyfinAuth;
   if (f.tokenStdin || envToken) {
-    const token = f.tokenStdin ? readStdinSecret('token') : (envToken as string);
+    const token = f.tokenStdin ? readStdinSecret('token', '--token-stdin') : (envToken as string);
     if (!token.trim()) throw new UserError(f.tokenStdin ? 'No token on stdin.' : 'JELLYFIN_TOKEN is empty.');
     auth = { token, ...(f.userId ? { userId: f.userId } : {}), ...(f.user ? { userName: f.user } : {}) };
   } else {
     if (f.userId) throw new UserError('--user-id only applies with a token (JELLYFIN_TOKEN or --token-stdin)');
     if (!f.user) throw new UserError('Pass --user <name> to sign in, or set JELLYFIN_TOKEN.');
     let password: string;
-    if (f.passwordStdin) password = readStdinSecret('password');
+    if (f.passwordStdin) password = readStdinSecret('password', '--password-stdin');
     else if (process.stdin.isTTY) password = await promptHidden(`Jellyfin password for ${f.user}: `);
-    else throw new UserError('No password: pass it on stdin with --password-stdin, or set JELLYFIN_TOKEN.');
+    else throw new UserError('No password: pipe it in with --password-stdin, or set JELLYFIN_TOKEN.');
     auth = { userName: f.user, password };
   }
   ctx.log('Reading your movies from the Jellyfin server (read only).');

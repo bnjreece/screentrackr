@@ -111,6 +111,11 @@ describe('mapJellyfinItems', () => {
     expect(res.notices.join('\n')).toMatch(/watched date of 5 movies/);
     const four = mapJellyfinItems(five.slice(0, 4)).records;
     expect(four.every((r) => typeof r.watchedAt === 'string')).toBe(true);
+    // Five spread over two minutes are never 5 within one minute.
+    const spread = [0, 30, 60, 90, 120].map((s, i) =>
+      movie({ Name: `Spread ${i}` }, { Played: true, LastPlayedDate: new Date(Date.parse('2025-06-01T12:00:00Z') + s * 1000).toISOString() }),
+    );
+    expect(mapJellyfinItems(spread).records.every((r) => typeof r.watchedAt === 'string')).toBe(true);
   });
 
   it('brings ratings in only with ratings: rounded, thumbs warned, 0 and out of range left out', () => {
@@ -141,6 +146,14 @@ describe('mapJellyfinItems', () => {
     expect(res.records).toHaveLength(1);
     expect(res.records[0]).toMatchObject({ sourceTitle: 'Seven Lanterns', status: 'watched', watchedAt: localDate('2024-03-05T12:00:00Z') });
     expect(res.notices.join('\n')).toMatch(/2 movies are on the server more than once/);
+  });
+
+  it('takes the played version whole, so its own runtime decides which item it is', () => {
+    const res = mapJellyfinItems([
+      movie({ Name: 'Seven Lanterns', RunTimeTicks: 90 * 600_000_000, ProviderIds: { Imdb: 'tt9000004' } }, { Played: false, Rating: 3 }),
+      movie({ Name: 'Seven Lanterns', RunTimeTicks: 120 * 600_000_000, ProviderIds: { Imdb: 'tt9000004' } }, { Played: true, Rating: 9, LastPlayedDate: '2024-01-05T12:00:00Z' }),
+    ], { ratings: true });
+    expect(res.records).toEqual([expect.objectContaining({ sourceRuntimeMin: 120, status: 'watched', myRating: 9 })]);
   });
 
   it('handles missing and odd fields, and refuses items without UserData', () => {
@@ -248,6 +261,27 @@ describe('readJellyfinItems', () => {
       startIndex: '0',
     });
     expect(q.fields).not.toMatch(/Overview|Path/);
+  });
+
+  it('joins paths onto a root URL without a double slash', async () => {
+    for (const url of ['http://jellyfin.example.test:8096', 'http://jellyfin.example.test:8096/']) {
+      const server = fakeServer({
+        'POST /Users/AuthenticateByName': login,
+        'GET /Items': () => jsonRes({ Items: [], TotalRecordCount: 0 }),
+        'POST /Sessions/Logout': () => new Response(null, { status: 204 }),
+      });
+      await readJellyfinItems(opts(server.fetch, { url }));
+      expect(server.calls.map((c) => c.url.pathname)).toEqual(['/Users/AuthenticateByName', '/Items', '/Sessions/Logout']);
+    }
+  });
+
+  it('says so when signing out fails', async () => {
+    const server = fakeServer({
+      'POST /Users/AuthenticateByName': login,
+      'GET /Items': () => jsonRes({ Items: [], TotalRecordCount: 0 }),
+      'POST /Sessions/Logout': () => jsonRes({}, 500),
+    });
+    expect((await readJellyfinItems(opts(server.fetch))).warnings.join('\n')).toMatch(/Could not sign out/);
   });
 
   it('accepts an empty password (an account without one)', async () => {
@@ -432,6 +466,16 @@ describe('merging a Jellyfin import', () => {
     expect(byTitle['The Glass Harbor']).toMatchObject({ status: 'watched', owned: false, sourceGenre: 'Noir', sourceDirector: 'Orrin Vale' });
     expect(items()).toHaveLength(4);
   });
+
+  it('marks the existing item watched when only one of two versions is played, and adds no duplicate', () => {
+    applyImport(db, [{ sourceTitle: 'Seven Lanterns', sourceYear: 1995, sourceRuntimeMin: 120, status: 'queue', source: 'paste' }], { mode: 'merge' });
+    const records = mapJellyfinItems([
+      movie({ Name: 'Seven Lanterns', RunTimeTicks: 90 * 600_000_000, ProviderIds: { Imdb: 'tt9000004' } }, { Played: false }),
+      movie({ Name: 'Seven Lanterns', RunTimeTicks: 120 * 600_000_000, ProviderIds: { Imdb: 'tt9000004' } }, { Played: true, LastPlayedDate: '2024-01-05T12:00:00Z' }),
+    ]).records;
+    expect(applyImport(db, records, { mode: 'merge' })).toMatchObject({ added: 0, updated: 1 });
+    expect(items().map((i) => [i.sourceRuntimeMin, i.status])).toEqual([[120, 'watched']]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -502,6 +546,20 @@ describe('import jellyfin (command)', () => {
     vi.stubEnv('JELLYFIN_TOKEN', TOKEN);
     await expect(run({ url: SERVER, user: 'orrin', 'password-stdin': true })).rejects.toThrow(/Unset JELLYFIN_TOKEN/);
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses to read a token or password typed at the terminal, where it would echo', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    vi.stubEnv('JELLYFIN_TOKEN', '');
+    const was = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    try {
+      await expect(run({ url: SERVER, 'token-stdin': true })).rejects.toThrow(/from a pipe or file/);
+      await expect(run({ url: SERVER, user: 'orrin', 'password-stdin': true })).rejects.toThrow(/from a pipe or file/);
+    } finally {
+      if (was) Object.defineProperty(process.stdin, 'isTTY', was);
+      else delete (process.stdin as { isTTY?: boolean }).isTTY;
+    }
   });
 
   it('refuses --replace when the server sent no movies', async () => {
