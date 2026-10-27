@@ -1,10 +1,12 @@
 /** Commands that read or write single library items: show, add, set, remove, link. */
 import { createInterface } from 'node:readline/promises';
 import { catalogReady, type Db } from '../../core/db.js';
-import { addFromCatalog, getItem, linkItem, removeItem, resolveRef, updateItem, type ItemPatch } from '../../core/library.js';
+import { addFromCatalog, getItem, linkItem, removeItem, resolveRef, updateItemDetailed, type ItemPatch } from '../../core/library.js';
+import { listsOfItem } from '../../core/lists.js';
 import { findCatalogByTitle, getCatalogMovie, type CatalogMovie } from '../../core/movie.js';
 import { CatalogMissingError } from '../../core/search.js';
 import { STATUSES, WATCHED_ERAS, type LibraryItem, type Status, type WatchedEra } from '../../core/types.js';
+import { countPlays, deriveRewatch, viewingsOf, type Viewing } from '../../core/viewings.js';
 import { toId, toInt } from '../args.js';
 import { bool, str, type Command } from '../command.js';
 import { UserError, type Ctx } from '../context.js';
@@ -61,10 +63,35 @@ function itemLines(i: LibraryItem): [string, string | number | null][] {
   ];
 }
 
-function showText(item: LibraryItem | null, movie: CatalogMovie | null): string {
+/** How many of an item's plays `show` prints. */
+const SHOW_PLAYS = 10;
+
+/** One play line: date (or "no date"), R for a rewatch, source, rating, viewing id. */
+function playLine(v: Viewing, rewatch: boolean): string {
+  return [v.watchedAt ?? 'no date', rewatch ? 'R' : ' ', v.source, v.rating !== null ? `rated ${v.rating}` : '', `#${v.id}`].filter(Boolean).join('  ');
+}
+
+/** An item's plays and lists, as `show` prints them. */
+export interface ShowHistory {
+  viewings: Viewing[];
+  plays: number;
+  lists: string[];
+}
+
+function historyLines(h: ShowHistory): [string, string | number | null][] {
+  const rewatch = deriveRewatch(h.viewings);
+  const shown = h.viewings.slice(0, SHOW_PLAYS);
+  const lines: [string, string | number | null][] = [['Plays', h.plays]];
+  shown.forEach((v, i) => lines.push([i === 0 ? 'History' : '', playLine(v, rewatch.get(v.id) === true)]));
+  if (h.viewings.length > shown.length) lines.push(['', `... ${h.viewings.length - shown.length} more (screentrackr history <id>)`]);
+  lines.push(['Lists', h.lists.join(', ')]);
+  return lines;
+}
+
+function showText(item: LibraryItem | null, movie: CatalogMovie | null, history: ShowHistory | null): string {
   const blocks: string[] = [];
   if (movie) blocks.push(keyValues(movieLines(movie)));
-  if (item) blocks.push(keyValues(itemLines(item)));
+  if (item) blocks.push(keyValues([...itemLines(item), ...(history ? historyLines(history) : [])]));
   else blocks.push('Not in your library. Add it with `screentrackr add ' + (movie?.tconst ?? '') + '`.');
   return blocks.join('\n\n');
 }
@@ -88,7 +115,12 @@ export const show: Command = {
     if (!item && !movie) {
       throw new UserError(TCONST.test(ref) && !catalogReady(db) ? new CatalogMissingError().message : `No library item or catalog movie matches "${ref}"`);
     }
-    ctx.emit({ item, movie }, () => showText(item, movie));
+    let history: ShowHistory | null = null;
+    if (item) {
+      const viewings = viewingsOf(db, item.id);
+      history = { viewings, plays: countPlays(viewings), lists: listsOfItem(db, item.id) };
+    }
+    ctx.emit({ item, movie, ...(history ?? {}) }, () => showText(item, movie, history));
   },
 };
 
@@ -173,8 +205,8 @@ export const set: Command = {
     era: { type: 'string', value: `<${WATCHED_ERAS.join('|')}>`, description: 'When you watched it (status watched only)' },
     rating: { type: 'string', value: '<1-10>', description: 'Your rating' },
     'clear-rating': { type: 'boolean', description: 'Remove your rating' },
-    'watched-at': { type: 'string', value: '<date>', description: 'Watched date, YYYY-MM-DD' },
-    'clear-watched-at': { type: 'boolean', description: 'Remove the watched date' },
+    'watched-at': { type: 'string', value: '<date>', description: 'Watched date, YYYY-MM-DD: adds a play that day (not earlier than a play you have)' },
+    'clear-watched-at': { type: 'boolean', description: 'Remove the watched date and every play of the movie' },
     notes: { type: 'string', value: '<text>', description: 'Notes (empty string clears)' },
   },
   run(ctx, pos, values) {
@@ -193,7 +225,8 @@ export const set: Command = {
     if (rating !== undefined) patch.myRating = toInt('rating', rating) as number;
     if (bool(values, 'clear-rating')) patch.myRating = null;
     const watchedAt = str(values, 'watched-at');
-    if (watchedAt !== undefined && bool(values, 'clear-watched-at')) throw new UserError('Use either --watched-at or --clear-watched-at, not both');
+    const clearWatched = bool(values, 'clear-watched-at');
+    if (watchedAt !== undefined && clearWatched) throw new UserError('Use either --watched-at or --clear-watched-at, not both');
     if (watchedAt !== undefined) patch.watchedAt = watchedAt;
     if (bool(values, 'clear-watched-at')) patch.watchedAt = null;
     const notes = str(values, 'notes');
@@ -202,8 +235,11 @@ export const set: Command = {
 
     const db = ctx.db();
     const target = oneItem(db, ref, 'Set one by its id:');
-    const item = updateItem(db, target.id, patch);
-    ctx.emit(item, () => `Updated item ${item.id}, ${item.sourceTitle}: ${statusLabel(item.status, item.watchedEra)}${item.myRating !== null ? `, rated ${item.myRating}` : ''}.`);
+    const { item, viewingsRemoved } = updateItemDetailed(db, target.id, patch);
+    const removed = clearWatched ? ` Cleared the watched date: removed ${viewingsRemoved} play${viewingsRemoved === 1 ? '' : 's'}.` : '';
+    ctx.emit(clearWatched ? { ...item, viewingsRemoved } : item, () =>
+      `Updated item ${item.id}, ${item.sourceTitle}: ${statusLabel(item.status, item.watchedEra)}${item.myRating !== null ? `, rated ${item.myRating}` : ''}.${removed}`,
+    );
   },
 };
 

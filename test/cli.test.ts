@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { table } from '../src/cli/format.js';
 import { openDb } from '../src/core/db.js';
+import { addViewing } from '../src/core/viewings.js';
 
 const ROOT = join(import.meta.dirname, '..');
 const CLI = join(ROOT, 'dist', 'cli', 'index.js');
@@ -756,5 +757,66 @@ describe('export --out file permissions', () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain('Could not write');
     expect(readdirSync(dir)).toEqual(['library.json']);
+  });
+});
+
+describe('0.4.0 foundation surface', () => {
+  it('show lists plays (latest first, R for a rewatch), the play count and lists', () => {
+    importPaste();
+    const [id] = itemIds('Quiet Ledger');
+    const db = openDb(home);
+    try {
+      addViewing(db, id as number, { watchedAt: '2019-04-02', source: 'letterboxd', sourceRef: 'https://boxd.it/e1' });
+      addViewing(db, id as number, { watchedAt: '2021-10-31', rewatch: true, rating: 8, source: 'trakt' });
+      db.sql.prepare("INSERT INTO lists (name, norm_name) VALUES ('Halloween', 'halloween')").run();
+      db.sql.prepare('INSERT INTO list_items (list_id, item_id) VALUES (1, ?)').run(id as number);
+    } finally {
+      db.close();
+    }
+    const out = json<{ item: { id: number }; plays: number; viewings: { watchedAt: string }[]; lists: string[] }>(run(['show', String(id), '--json'], { home }));
+    expect(out.plays).toBe(2);
+    expect(out.viewings.map((v) => v.watchedAt)).toEqual(['2021-10-31', '2019-04-02']);
+    expect(out.lists).toEqual(['Halloween']);
+    const t = run(['show', String(id)], { home });
+    expect(t.code, t.stderr).toBe(0);
+    expect(t.stdout).toMatch(/Plays\s+2/);
+    expect(t.stdout).toMatch(/2021-10-31\s+R\s+trakt\s+rated 8/);
+    expect(t.stdout).toMatch(/Lists\s+Halloween/);
+  });
+
+  it('set --watched-at adds a play; an earlier date is refused; --clear-watched-at says how many went', () => {
+    importPaste();
+    const [id] = itemIds('Quiet Ledger');
+    expect(run(['set', String(id), '--watched-at', '2021-01-01'], { home }).code).toBe(0);
+    const early = run(['set', String(id), '--watched-at', '2020-01-01'], { home });
+    expect(early.code).toBe(1);
+    expect(early.stderr).toMatch(/later play.*history --remove/);
+    const clear = run(['set', String(id), '--clear-watched-at'], { home });
+    expect(clear.code, clear.stderr).toBe(0);
+    expect(clear.stdout).toMatch(/removed 1 play/);
+  });
+
+  it('registers the 0.4.0 commands, each saying it is not built yet', () => {
+    const help = run(['--help']);
+    for (const c of ['log', 'history', 'pick', 'where', 'lists', 'list', 'sync', 'config']) {
+      expect(help.stdout).toMatch(new RegExp(`^  ${c} `, 'm'));
+      const r = run([c], { home });
+      expect(r.code, c).toBe(1);
+      expect(r.stderr).toContain('not built yet');
+    }
+  });
+
+  it('doctor checks the watched dates against the plays', () => {
+    importPaste();
+    const d = json<{ watchedCache: { mismatches: number }; viewingCount: number; listCount: number }>(run(['doctor', '--json'], { home }));
+    expect(d).toMatchObject({ watchedCache: { mismatches: 0 }, viewingCount: 0, listCount: 0 });
+    const db = openDb(home);
+    try {
+      db.sql.exec("UPDATE library_items SET watched_at = '2001-01-01' WHERE id = (SELECT MIN(id) FROM library_items)");
+    } finally {
+      db.close();
+    }
+    expect(json<{ watchedCache: { mismatches: number } }>(run(['doctor', '--json'], { home })).watchedCache.mismatches).toBe(1);
+    expect(run(['doctor'], { home }).stdout).toMatch(/Watched dates\s+1 item/);
   });
 });

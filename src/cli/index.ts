@@ -9,7 +9,13 @@ import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { resolveHome } from '../core/home.js';
 import { LibraryError } from '../core/library.js';
 import type { Command, OptionSpec, Values } from './command.js';
+import { configCmd } from './commands/config.js';
 import { doctor } from './commands/doctor.js';
+import { history, log } from './commands/history.js';
+import { list, lists } from './commands/lists.js';
+import { pick } from './commands/pick.js';
+import { sync } from './commands/sync.js';
+import { where } from './commands/where.js';
 import { importCmd } from './commands/import.js';
 import { add, link, remove, set, show } from './commands/items.js';
 import { exportCmd } from './commands/export.js';
@@ -21,7 +27,29 @@ import { setup } from './commands/setup.js';
 import { createCtx, UserError, type Ctx } from './context.js';
 import { safeJson, sanitizeTerminal } from './sanitize.js';
 
-export const COMMANDS: Command[] = [setup, importCmd, search, show, add, remove, set, match, link, stats, exportCmd, mcp, doctor];
+export const COMMANDS: Command[] = [
+  setup,
+  importCmd,
+  sync,
+  search,
+  pick,
+  show,
+  where,
+  add,
+  remove,
+  set,
+  log,
+  history,
+  lists,
+  list,
+  match,
+  link,
+  stats,
+  exportCmd,
+  configCmd,
+  mcp,
+  doctor,
+];
 
 const GLOBAL: Record<string, OptionSpec> = {
   home: { type: 'string', value: '<dir>', description: 'Data directory (default $SCREENTRACKR_HOME or ~/.screentrackr)' },

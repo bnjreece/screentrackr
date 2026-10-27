@@ -2,6 +2,7 @@ import { existsSync, statSync } from 'node:fs';
 import { catalogReady } from '../../core/db.js';
 import { dbPath } from '../../core/home.js';
 import { SCHEMA_VERSION } from '../../core/schema.js';
+import { checkWatchedCache } from '../../core/viewings.js';
 import type { Command } from '../command.js';
 import { UserError } from '../context.js';
 import { keyValues } from '../format.js';
@@ -41,6 +42,10 @@ export const doctor: Command = {
       catalogWithCast: meta.get('catalog_with_cast') === '1',
       datasetDates,
       libraryCount: count('SELECT COUNT(*) AS n FROM library_items'),
+      viewingCount: count('SELECT COUNT(*) AS n FROM viewings'),
+      listCount: count('SELECT COUNT(*) AS n FROM lists'),
+      // Each item's cached watched date and source against its plays (see core/viewings.ts).
+      watchedCache: { mismatches: checkWatchedCache(db).length },
       libraryMatch: Object.fromEntries(
         (db.sql.prepare('SELECT match_status AS s, COUNT(*) AS n FROM library_items GROUP BY match_status ORDER BY match_status').all() as { s: string; n: number }[]).map(
           (r) => [r.s, Number(r.n)],
@@ -61,6 +66,13 @@ export const doctor: Command = {
             : 'not built. Run `screentrackr setup`.',
         ],
         ['Library', `${report.libraryCount} items${Object.keys(report.libraryMatch).length ? ` (${Object.entries(report.libraryMatch).map(([k, v]) => `${k} ${v}`).join(', ')})` : ''}`],
+        ['History', `${report.viewingCount} plays, ${report.listCount} lists`],
+        [
+          'Watched dates',
+          report.watchedCache.mismatches === 0
+            ? 'match the plays'
+            : `${report.watchedCache.mismatches} item${report.watchedCache.mismatches === 1 ? '' : 's'} out of step with their plays`,
+        ],
       ]),
     );
   },

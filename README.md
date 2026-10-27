@@ -161,7 +161,7 @@ screentrackr import jellyfin --url http://localhost:8096 --user <name>
 
 ### Merge or replace
 
-Imports merge by default: new movies are added, and fields the file has are updated. A merge never clears a status or rating that the file doesn't mention (the one thing an import may clear is a watched date that the same kind of source set earlier and now says is wrong; a date you set yourself is never cleared), an IMDb import never changes whether a movie is owned and never moves a movie out of watched, and importing the same file twice changes nothing. A record updates an existing movie only when exactly one item fits it: a different Apple id, a year more than one off (a year in the title counts, also before an edition tag like "(1978) (4K)"), a different runtime, a different director (except in `import apple-tv`, when the TV app's director is confirmed by the IMDb title both already share) or a different IMDb id rules an item out. For `import apple-tv`, the TV app's year is the year of the edition on sale, so it only rules out films made after it and is never stored, and a shared unconfirmed IMDb id is not enough on its own. A movie matched to IMDb that has no year, runtime or director of its own is judged by IMDb's, and how a title is written (an edition tag, the exact spelling) only tells editions of the same movie apart, never a film from its remake. A record that still fits several items (a title with no year, when you have the 1980 film and its 2020 remake) changes nothing and is listed with the candidate item ids; a row that changes nothing on one item but also fits a different one does not settle which one it is, so a later row in the same file still has to fit one on its own. Within one import each item is claimed by at most one record, so a file with two identical rows (two editions in an Apple TV paste) adds two items, a later change to that pair updates both, and importing an export restores every row. The full rules are in [docs/library-json-v1.md](docs/library-json-v1.md#which-item-a-record-updates). `--replace` starts over from the file, after saving a backup of your current library to `backups/` (an IMDb, Letterboxd or Plex import with no movies is refused instead, so it can never empty your library; a Plex listing that may be incomplete is refused too, and Trakt and Jellyfin imports only merge). Every import prints how many items were added, updated, unchanged, and need review.
+Imports merge by default: new movies are added, and fields the file has are updated. A merge never clears a status or rating that the file doesn't mention. Every play an import knows about is kept, and a movie's watched date is its latest play from any source, so an older date from one source never replaces a newer one from another (the one thing an import may remove is a play that the same kind of source gave earlier and now says is wrong; a date you set yourself is never removed), an IMDb import never changes whether a movie is owned and never moves a movie out of watched, and importing the same file twice changes nothing. A record updates an existing movie only when exactly one item fits it: a different Apple id, a year more than one off (a year in the title counts, also before an edition tag like "(1978) (4K)"), a different runtime, a different director (except in `import apple-tv`, when the TV app's director is confirmed by the IMDb title both already share) or a different IMDb id rules an item out. For `import apple-tv`, the TV app's year is the year of the edition on sale, so it only rules out films made after it and is never stored, and a shared unconfirmed IMDb id is not enough on its own. A movie matched to IMDb that has no year, runtime or director of its own is judged by IMDb's, and how a title is written (an edition tag, the exact spelling) only tells editions of the same movie apart, never a film from its remake. A record that still fits several items (a title with no year, when you have the 1980 film and its 2020 remake) changes nothing and is listed with the candidate item ids; a row that changes nothing on one item but also fits a different one does not settle which one it is, so a later row in the same file still has to fit one on its own. Within one import each item is claimed by at most one record, so a file with two identical rows (two editions in an Apple TV paste) adds two items, a later change to that pair updates both, and importing an export restores every row. The full rules are in [docs/library-json-v1.md](docs/library-json-v1.md#which-item-a-record-updates). `--replace` starts over from the file, after saving a backup of your current library to `backups/` (an IMDb, Letterboxd or Plex import with no movies is refused instead, so it can never empty your library; a Plex listing that may be incomplete is refused too, and Trakt and Jellyfin imports only merge). Every import prints how many items were added, updated, unchanged, and need review.
 
 The format is detected from the file. Pass `--format` (`json-v1`, `apple-paste`, `csv`, `imdb`, `letterboxd`, `trakt`, `legacy`, `neon-rows`) to choose it yourself. `legacy` and `neon-rows` read exports from the old ScreenTrackr web app.
 A plain `screentrackr import` of a ZIP or folder tells the export from the names of the files in it, without opening them: one with a `watched.csv` is read as a Letterboxd export, and one with Trakt's export files (such as `watched-history.json`) as a Trakt export. One that holds both, or neither, is refused; use `import letterboxd` or `import trakt` to say which. A single import file over 256 MB, or an export ZIP over 1 GB, is refused before it is read. `import plex` and `import jellyfin` read your own server instead of a file (see [Plex](#plex-media-server) and [Jellyfin](#jellyfin-your-own-server)).
@@ -191,6 +191,61 @@ screentrackr search --unwatched --max-runtime 100 --sort random --limit 5
 ```
 
 Output is a readable table. Every command takes `--json` for machine-readable output. Movies in your library that couldn't be matched to IMDb still show up in library searches, using the title, director, runtime and genre from your import, flagged as unmatched.
+
+### Discovery
+
+<!-- 0.4.0: searching the catalog by decade, vote range and what you have not watched. Written with the feature. -->
+
+## Watch history
+
+<!-- 0.4.0: every play, logging and listing them. Written with the feature. -->
+
+```text
+screentrackr log <id|tconst|title> [--on <date>] [--rewatch] [--rating <1-10>] [--keep-status]
+screentrackr history [<id|tconst|title>] [--year <yyyy>] [--from <date>] [--to <date>] [--source <source>] [-n <limit>] [--remove <viewing-id>]
+```
+
+## Pick a movie
+
+<!-- 0.4.0: what to watch tonight. Written with the feature. -->
+
+```text
+screentrackr pick [filters] [-n <1-10>] [--seed <n>] [--priority-first] [--any-status]
+```
+
+## Where to watch
+
+<!-- 0.4.0: a JustWatch search link per movie, and the saved country. Written with the feature. -->
+
+```text
+screentrackr where <id|tconst|title> [--country <cc>] [--open]
+screentrackr config <get|set|unset> <key> [<value>]
+```
+
+## Lists
+
+<!-- 0.4.0: your own lists of movies. Written with the feature. -->
+
+```text
+screentrackr lists
+screentrackr list <create|add|remove|show|rename|delete> <name> [<id|tconst|title>...]
+```
+
+## Stats
+
+<!-- 0.4.0: what you watched by year, decade, genre and director. Written with the feature. -->
+
+## Export to Letterboxd and Trakt
+
+<!-- 0.4.0: files in the formats their importers read. Written with the feature. -->
+
+## Sync
+
+<!-- 0.4.0: re-running your saved sources with one command. Written with the feature. -->
+
+```text
+screentrackr sync [add <kind> | list | remove <kind> | status | launchd] [--only <kind>] [--dry-run]
+```
 
 ## Use it from Claude Code
 
@@ -266,7 +321,7 @@ screentrackr doctor
 | `show` | The full record for one movie, by library id, IMDb id or title. An IMDb id or catalog title only finds items that are matched or linked by hand; an unmatched item (one imported with an unchecked IMDb id before `setup`, say) is reached by its id or its own title. A year in a title, as in `"The Glass Harbor (2009)"` or `"The Glass Harbor (2009) (4K)"`, only finds items of that year (within one); `set` works the same way. |
 | `add` | Adds a catalog movie to your library. An ambiguous title lists the candidates instead of guessing. A year in the title, like `--year`, only finds movies of that year (within one), and a title year that disagrees with `--year` finds nothing. A movie you already have is refused unless you pass `--new-edition`. |
 | `remove` | Removes one library item by id. |
-| `set` | Changes status, watched era (`long-ago`, `2010s`, `2020s`), your rating, watched date or notes. A reference that matches more than one item never writes; it lists the ids to use. References resolve as for `show`, and the MCP `get_movie` and `update_movie` tools do the same. |
+| `set` | Changes status, watched era (`long-ago`, `2010s`, `2020s`), your rating, watched date or notes. `--watched-at` records a play on that date (a date earlier than a play the movie already has is refused, since the watched date is the latest play); `--clear-watched-at` removes every play of the movie and says how many. A reference that matches more than one item never writes; it lists the ids to use. References resolve as for `show`, and the MCP `get_movie` and `update_movie` tools do the same. |
 | `match` | Retries matching for items that need it. `--review` lists them with candidates. |
 | `link` | Matches a library item to an IMDb id by hand. Manual links are never changed by later matching. |
 | `stats` | Counts by status, genre, decade and director, and how many items are unmatched. |

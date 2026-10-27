@@ -14,6 +14,7 @@ import { buildCatalog } from '../src/core/catalog/build.js';
 import { openDb, type Db } from '../src/core/db.js';
 import { addFromCatalog, getItem } from '../src/core/library.js';
 import { createMcpServer } from '../src/mcp/server.js';
+import { addViewing } from '../src/core/viewings.js';
 
 const ROOT = join(import.meta.dirname, '..');
 const CLI = join(ROOT, 'dist', 'cli', 'index.js');
@@ -340,4 +341,30 @@ describe('stdio session (Review Focus #1)', () => {
     expect((msgs[1]!.result as { tools: unknown[] }).tools).toHaveLength(8);
     expect((msgs[2]!.result as { isError?: boolean }).isError).toBeFalsy();
   }, 30_000);
+});
+
+describe('0.4.0: plays and lists on get_movie, update_movie watchedAt rules', () => {
+  it('get_movie returns each item with its plays, play count and lists', async () => {
+    const itemId = ids.q03 as number;
+    addViewing(db, itemId, { watchedAt: '2019-04-02', source: 'trakt' });
+    db.sql.prepare("INSERT INTO lists (name, norm_name) VALUES ('Halloween', 'halloween')").run();
+    db.sql.prepare('INSERT INTO list_items (list_id, item_id) SELECT id, ? FROM lists').run(itemId);
+    const r = await call('get_movie', { id: itemId });
+    expect(r.isError).toBeFalsy();
+    const lib = (r.structuredContent as { library: { viewings: { watchedAt: string }[]; plays: number; lists: string[] }[] }).library;
+    expect(lib[0]).toMatchObject({ plays: 1, lists: ['Halloween'], viewings: [{ watchedAt: '2019-04-02', source: 'trakt' }] });
+    expect(text(r)).toMatch(/1 play, last 2019-04-02; lists: Halloween/);
+    db.sql.exec('DELETE FROM lists');
+  });
+
+  it('update_movie refuses a date earlier than a play, and null removes every play', async () => {
+    const itemId = ids.q03 as number;
+    expect((await call('update_movie', { id: itemId, watchedAt: '2022-02-02' })).isError).toBeFalsy();
+    const early = await call('update_movie', { id: itemId, watchedAt: '2020-01-01' });
+    expect(early.isError).toBe(true);
+    expect(text(early)).toMatch(/later play/);
+    const cleared = await call('update_movie', { id: itemId, watchedAt: null });
+    expect(cleared.structuredContent).toMatchObject({ watchedAt: null, viewingsRemoved: 1 });
+    expect(text(cleared)).toMatch(/Removed 1 play/);
+  });
 });
