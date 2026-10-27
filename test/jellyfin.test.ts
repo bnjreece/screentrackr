@@ -131,6 +131,12 @@ describe('mapJellyfinItems', () => {
     expect(mapJellyfinItems(spread).records.every((r) => typeof r.watchedAt === 'string')).toBe(true);
   });
 
+  it('treats a runtime under half a minute as known, so --strict-played keeps a played short watched', () => {
+    const res = mapJellyfinItems([movie({ RunTimeTicks: 20 * 10_000_000 }, { Played: true, LastPlayedDate: '2024-01-05T12:00:00Z' })], { strictPlayed: true });
+    expect(res.records[0]).toMatchObject({ status: 'watched', sourceRuntimeMin: null });
+    expect(res.warnings.join('\n')).not.toMatch(/no known runtime/);
+  });
+
   it('counts a played movie of unknown runtime toward a bulk group even under --strict-played', () => {
     const at = '2025-06-01T12:00:00Z';
     const five = [0, 1, 2, 3].map((i) => movie({ Name: `Bulk ${i}` }, { Played: true, LastPlayedDate: at }));

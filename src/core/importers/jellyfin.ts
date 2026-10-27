@@ -195,6 +195,9 @@ export function mapJellyfinItems(items: readonly unknown[], opts: JellyfinMapOpt
     }
 
     const runtime = runtimeOf(item.RunTimeTicks);
+    // Known when the server has any length, even one under half a minute
+    // (which rounds to no runtime in minutes).
+    const runtimeKnown = typeof item.RunTimeTicks === 'number' && Number.isFinite(item.RunTimeTicks) && item.RunTimeTicks > 0;
     const record: ImportRecord = {
       sourceTitle: title,
       sourceYear: yearOf(item.ProductionYear),
@@ -208,8 +211,8 @@ export function mapJellyfinItems(items: readonly unknown[], opts: JellyfinMapOpt
 
     let playedAt: number | null = null;
     if (user.Played === true) {
-      if (runtime === null) unknownRuntimePlayed++;
-      if (!(opts.strictPlayed && runtime === null)) {
+      if (!runtimeKnown) unknownRuntimePlayed++;
+      if (!(opts.strictPlayed && !runtimeKnown)) {
         record.status = 'watched';
         playedAt = parseDate(user.LastPlayedDate);
       }
