@@ -19,6 +19,7 @@ import { getCatalogMovie, type CatalogMovie } from '../core/movie.js';
 import { CatalogMissingError, searchMovies, type MovieResult } from '../core/search.js';
 import { libraryStats } from '../core/stats.js';
 import { STATUSES, WATCHED_ERAS, type LibraryItem } from '../core/types.js';
+import { SetupJob, type SetupJobStatus } from './setup-job.js';
 
 /** The most lines a text summary may have. */
 const MAX_TEXT_LINES = 20;
@@ -46,8 +47,12 @@ function ok(data: object, text: string): CallToolResult {
   return { structuredContent: data as Record<string, unknown>, content: [{ type: 'text', text: capped.join('\n') }] };
 }
 
+/** Appended to "Catalog not built" errors: an MCP-only user can build it without a terminal. */
+export const SETUP_HINT = 'Or call the setup_catalog tool to build it from here (a one-time download of about 1 GB that takes several minutes).';
+
 function fail(err: unknown): CallToolResult {
-  const message = err instanceof Error ? err.message : String(err);
+  let message = err instanceof Error ? err.message : String(err);
+  if (err instanceof CatalogMissingError) message = `${message} ${SETUP_HINT}`;
   return { isError: true, content: [{ type: 'text', text: message }] };
 }
 
@@ -135,16 +140,61 @@ const SEARCH_DESCRIPTION = [
   'Runtimes are in minutes. limit defaults to 20 (max 200); page with offset. Library movies that could not be matched to IMDb still appear, using their own title, director, genre and runtime, with matchStatus "unmatched".',
 ].join(' ');
 
+interface CatalogInfo {
+  ready: boolean;
+  builtAt: string | null;
+  movies: number | null;
+  withCast: boolean | null;
+  includeTvMovies: boolean | null;
+}
+
+function catalogInfo(db: Db): CatalogInfo {
+  const meta = (key: string) =>
+    (db.sql.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string | null } | undefined)?.value ?? null;
+  const builtAt = meta('catalog_built_at');
+  if (!builtAt) return { ready: false, builtAt: null, movies: null, withCast: null, includeTvMovies: null };
+  const movies = (db.sql.prepare('SELECT COUNT(*) AS n FROM titles').get() as { n: number }).n;
+  return { ready: true, builtAt, movies, withCast: meta('catalog_with_cast') === '1', includeTvMovies: meta('catalog_include_tv_movies') === '1' };
+}
+
+function setupText(catalog: CatalogInfo, job: SetupJobStatus): string {
+  const lines: string[] = [];
+  if (catalog.ready) lines.push(`Catalog ready: ${(catalog.movies ?? 0).toLocaleString('en-US')} movies, built ${catalog.builtAt}.`);
+  else lines.push('Catalog not built yet.');
+  if (job.state === 'running') {
+    lines.push(`Setup running for ${job.elapsedSeconds ?? 0}s. It usually takes several minutes; check again with catalog_status.`);
+    if (job.progress.length) lines.push('Latest progress:', ...job.progress.map((p) => `  ${p.trim()}`));
+  } else if (job.state === 'succeeded' && job.result) {
+    const r = job.result;
+    lines.push(
+      `Setup finished in ${job.elapsedSeconds ?? 0}s: ${r.catalog.movies.toLocaleString('en-US')} movies.`,
+      `Library matching: ${r.matching.matched} matched, ${r.matching.ambiguous} ambiguous, ${r.matching.unmatched} unmatched.`,
+      r.credit,
+    );
+  } else if (job.state === 'failed') {
+    lines.push(`Setup failed: ${job.error ?? 'unknown error'}`, 'Call setup_catalog again to retry; finished downloads are reused.');
+  } else if (!catalog.ready) {
+    lines.push('Call setup_catalog to build it (a one-time download of about 1 GB that takes several minutes).');
+  }
+  return lines.join('\n');
+}
+
+export interface McpServerOptions {
+  /** The background setup used by setup_catalog and catalog_status. Defaults to a worker-thread job over db.home. */
+  setupJob?: SetupJob;
+}
+
 /**
  * Build the MCP server over an open database. The caller owns `db` and its
  * lifetime; connect the returned server to any transport.
  */
-export function createMcpServer(db: Db): McpServer {
+export function createMcpServer(db: Db, opts: McpServerOptions = {}): McpServer {
+  const setupJob = opts.setupJob ?? new SetupJob(db.home);
   const server = new McpServer(
     { name: 'screentrackr', version: version() },
     {
       instructions:
-        'screentrackr knows the user\'s movie library (status, own rating) and the IMDb catalog. Use search_movies for questions about what to watch; write tools take a library id or tconst, never a title.',
+        'screentrackr knows the user\'s movie library (status, own rating) and the IMDb catalog. Use search_movies for questions about what to watch; write tools take a library id or tconst, never a title. If a tool says the catalog is not built, offer to run setup_catalog, then poll catalog_status until it finishes.',
     },
   );
 
@@ -296,6 +346,60 @@ export function createMcpServer(db: Db): McpServer {
       if (!item) throw new ToolInputError(`Item ${args.id} not found`);
       removeItem(db, args.id);
       return ok({ removed: item }, `Removed ${itemLine(item)}.`);
+    }),
+  );
+
+  server.registerTool(
+    'setup_catalog',
+    {
+      title: 'Build the movie catalog',
+      description:
+        'Download the IMDb datasets (about 1 GB, cached in the data folder) and build the local movie catalog, the same as `screentrackr setup`. It runs in the background and takes several minutes: this returns at once, then call catalog_status every 30 seconds or so until it reports finished or failed. If the catalog is already built this does nothing unless refresh is true, which checks IMDb for newer files and rebuilds. A failed or interrupted setup can simply be started again; finished downloads are reused. Library changes may fail with "database is locked" while it builds; retry them afterwards. Statuses, ratings, notes and manual links are never changed.',
+      inputSchema: {
+        refresh: z.boolean().optional().describe('Check IMDb for newer dataset files and rebuild, even if the catalog is already built.'),
+        withCast: z.boolean().optional().describe('Load top-billed cast (default true). false builds faster and smaller.'),
+        includeTvMovies: z.boolean().optional().describe('Also include TV movies (default false).'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    handler((args) => {
+      const catalog = catalogInfo(db);
+      if (setupJob.isRunning) {
+        const status = setupJob.status();
+        return ok({ started: false, catalog, setup: status }, `Setup is already running.\n${setupText(catalog, status)}`);
+      }
+      if (catalog.ready && !args.refresh) {
+        const status = setupJob.status();
+        return ok(
+          { started: false, catalog, setup: status },
+          `${setupText(catalog, status)}\nNothing to do. Pass refresh: true to check IMDb for newer data and rebuild.`,
+        );
+      }
+      const status = setupJob.start({
+        refresh: args.refresh ?? false,
+        withCast: args.withCast ?? true,
+        includeTvMovies: args.includeTvMovies ?? false,
+      });
+      return ok(
+        { started: true, catalog, setup: status },
+        'Setup started in the background. It downloads about 1 GB and takes several minutes. Call catalog_status to follow it.',
+      );
+    }),
+  );
+
+  server.registerTool(
+    'catalog_status',
+    {
+      title: 'Catalog and setup status',
+      description:
+        'Whether the movie catalog is built (when, how many movies), and the state of a setup started with setup_catalog: running with its latest progress lines, finished, or failed with the reason.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    handler(() => {
+      const catalog = catalogInfo(db);
+      const status = setupJob.status();
+      return ok({ catalog, setup: status }, setupText(catalog, status));
     }),
   );
 

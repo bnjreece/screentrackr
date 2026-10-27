@@ -1,0 +1,49 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/dist/mcpb-manifest-v0.3.schema.json",
+  "manifest_version": "0.3",
+  "name": "screentrackr",
+  "display_name": "ScreenTrackr",
+  "version": "0.1.0",
+  "description": "Ask your movie library real questions: what you own, what you've watched, your ratings, next to a local IMDb catalog.",
+  "long_description": "ScreenTrackr keeps your movie library (what you own, what you've watched, your ratings) next to a full movie catalog that it builds on your computer from IMDb's public datasets. Ask in plain words, for example \"Which Villeneuve movies do I own that I haven't watched?\" or \"What highly rated thrillers under two hours should I rent?\"\n\nFirst run: ask Claude to set up the catalog. It downloads about 1 GB from datasets.imdbws.com once and takes several minutes. Everything stays on your computer in ~/.screentrackr, the same folder the screentrackr command line tool uses. No account, no API key, no telemetry.\n\nInformation courtesy of IMDb (https://www.imdb.com). Used with permission. Not affiliated with IMDb or Apple.",
+  "author": {
+    "name": "Benjamin Reece",
+    "url": "https://github.com/bnjreece"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bnjreece/screentrackr"
+  },
+  "homepage": "https://github.com/bnjreece/screentrackr#readme",
+  "documentation": "https://github.com/bnjreece/screentrackr#claude-desktop",
+  "support": "https://github.com/bnjreece/screentrackr/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/cli/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/cli/index.js", "mcp"],
+      "env": {}
+    }
+  },
+  "tools": [
+    { "name": "search_movies", "description": "Search your library or the whole catalog by director, cast, genre, rating, runtime, year and status." },
+    { "name": "get_movie", "description": "One movie by library id or IMDb id, with every library edition of it." },
+    { "name": "library_stats", "description": "Counts for your library by status, genre, director and decade." },
+    { "name": "update_movie", "description": "Set status, watched era or date, or your rating on one library item." },
+    { "name": "add_to_library", "description": "Add a catalog movie to your library." },
+    { "name": "remove_from_library", "description": "Permanently remove one library item." },
+    { "name": "setup_catalog", "description": "Download the IMDb datasets and build the local catalog in the background." },
+    { "name": "catalog_status", "description": "Whether the catalog is built, and the progress of a running setup." }
+  ],
+  "tools_generated": false,
+  "keywords": ["movies", "imdb", "watchlist", "library", "sqlite", "local"],
+  "license": "MIT",
+  "compatibility": {
+    "platforms": ["darwin", "win32"],
+    "runtimes": {
+      "node": ">=22.13.0"
+    }
+  }
+}
