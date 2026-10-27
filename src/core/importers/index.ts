@@ -22,12 +22,22 @@ import { exportLibrary } from '../export.js';
 import { backupsDir } from '../home.js';
 import { LIBRARY_COLUMNS, rowToItem, WATCHED_AT_RE, type LibraryRow } from '../library.js';
 import { factsConflict, identityOf, sameMovie, type Identity } from '../identity.js';
-import { directorsConflict, directorsOf, matchOne, meaningfulCredit, type MatchCandidate } from '../match.js';
+import { directorsConflict, directorsOf, matchOne, meaningfulCredit, SCORE, type MatchCandidate } from '../match.js';
 import { normalizeTitle } from '../normalize.js';
-import { ITEM_SOURCES, MATCH_STATUSES, STATUSES, WATCHED_ERAS, type LibraryItem, type MatchStatus } from '../types.js';
+import {
+  EXTERNAL_ID_KINDS,
+  ITEM_SOURCES,
+  MATCH_STATUSES,
+  STATUSES,
+  WATCHED_ERAS,
+  type ExternalIds,
+  type LibraryItem,
+  type MatchStatus,
+} from '../types.js';
 import { parseApplePaste } from './apple-paste.js';
 import { FORMATS, ImportError, type ImportFormat, type ImportRecord, type ParsedImport } from './common.js';
 import { parseCsv } from './csv.js';
+import { isImdbHeader, parseImdb } from './imdb.js';
 import { isJsonV1, parseJsonV1 } from './json-v1.js';
 import { isLegacyExport, parseLegacy } from './legacy.js';
 import { isNeonRows, parseNeonRows } from './neon-legacy-rows.js';
@@ -59,6 +69,7 @@ export function detectFormat(text: string, filename?: string): ImportFormat {
     );
   }
   const firstLine = t.split(/\r?\n/, 1)[0] ?? '';
+  if (isImdbHeader(firstLine)) return 'imdb';
   if (filename?.toLowerCase().endsWith('.csv')) return 'csv';
   if (firstLine.includes('\t')) return 'apple-paste';
   if (firstLine.includes(',') && /(^|,)\s*"?(title|name)"?\s*(,|$)/i.test(firstLine)) return 'csv';
@@ -93,6 +104,13 @@ export function parseImportDetailed(
     case 'csv':
       parsed = parseCsv(body);
       break;
+    case 'imdb': {
+      // The library API has no options: a list file is read as a watchlist,
+      // and only Movie rows come in. `screentrackr import imdb` takes options.
+      const res = parseImdb([{ name: filename ?? 'file', text: body }], {});
+      parsed = { records: res.records, warnings: [...res.notices, ...res.warnings, ...res.skippedSummary] };
+      break;
+    }
   }
   return { format: fmt, ...parsed };
 }
@@ -131,6 +149,19 @@ function validate(records: ImportRecord[]): void {
     if (typeof r.sourceTitle !== 'string' || !r.sourceTitle.trim()) fail('missing title');
     if (!(ITEM_SOURCES as readonly string[]).includes(r.source)) fail(`invalid source "${String(r.source)}"`);
     if (r.status !== undefined && !(STATUSES as readonly string[]).includes(r.status)) fail(`invalid status "${String(r.status)}"`);
+    if (r.statusIfNew !== undefined && !(STATUSES as readonly string[]).includes(r.statusIfNew)) {
+      fail(`invalid new-item status "${String(r.statusIfNew)}"`);
+    }
+    for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'imdbIdExact'] as const) {
+      if (r[flag] !== undefined && typeof r[flag] !== 'boolean') fail(`${flag} must be true or false`);
+    }
+    if (r.externalIds != null) {
+      if (typeof r.externalIds !== 'object' || Array.isArray(r.externalIds)) fail('externalIds must be an object');
+      for (const [kind, value] of Object.entries(r.externalIds)) {
+        if (!(EXTERNAL_ID_KINDS as readonly string[]).includes(kind)) fail(`unknown external id kind "${kind}"`);
+        if (value != null && (typeof value !== 'string' || value.length > 1000)) fail(`invalid ${kind} id`);
+      }
+    }
     if (r.watchedEra != null) {
       if (!(WATCHED_ERAS as readonly string[]).includes(r.watchedEra)) fail(`invalid watched era "${String(r.watchedEra)}"`);
       if (r.status !== 'watched') fail('a watched era needs status watched');
@@ -189,6 +220,14 @@ function targetFor(db: Db, r: ImportRecord): Target {
   if (hint && /^tt\d{7,}$/.test(hint) && !catalogReady(db)) {
     return { tconst: hint, matchStatus: 'unmatched', matchScore: null, candidates: [] };
   }
+  // The source's own id for exactly this title: the catalog's title when it
+  // has it, otherwise nothing (never another title found by name).
+  if (hint && /^tt\d{7,}$/.test(hint) && r.imdbIdExact === true) {
+    const known = db.sql.prepare('SELECT 1 FROM titles WHERE tconst = ?').get(hint) !== undefined;
+    return known
+      ? { tconst: hint, matchStatus: 'matched', matchScore: SCORE.hint, candidates: [] }
+      : { tconst: hint, matchStatus: 'unmatched', matchScore: null, candidates: [] };
+  }
   const res = matchOne(db, {
     title: r.sourceTitle,
     year: r.sourceYear ?? null,
@@ -214,7 +253,7 @@ function targetFor(db: Db, r: ImportRecord): Target {
 }
 
 interface Existing {
-  item: LibraryItem;
+  item: PoolItem;
   norm: string;
   /** The item's effective identity (see identityOf), kept current as the import updates the item. */
   identity: Identity;
@@ -235,11 +274,42 @@ function cleanRecord(r: ImportRecord): ImportRecord {
     applePersistentId: blankToNull(r.applePersistentId),
     imdbIdHint: blankToNull(r.imdbIdHint),
     sourceDirector: credit(r.sourceDirector),
+    externalIds: canonicalIds(r.externalIds),
   };
 }
 
-const existing = (db: Db, raw: LibraryItem): Existing => {
-  const item = { ...raw, applePersistentId: blankToNull(raw.applePersistentId) };
+/** External ids with blank values dropped, trimmed, in a stable key order (so equal sets compare equal). */
+function canonicalIds(ids: ExternalIds | null | undefined): ExternalIds {
+  const out: Record<string, string> = {};
+  for (const kind of Object.keys(ids ?? {}).sort()) {
+    const v = blankToNull((ids as Record<string, string | null | undefined>)[kind]);
+    if (v !== null) out[kind] = v;
+  }
+  return out as ExternalIds;
+}
+
+const sameIds = (a: ExternalIds, b: ExternalIds): boolean => JSON.stringify(canonicalIds(a)) === JSON.stringify(canonicalIds(b));
+
+/** An item as the import sees it: its row plus its external ids. */
+type PoolItem = LibraryItem & { externalIds: ExternalIds };
+
+function externalIdsOf(db: Db): Map<number, ExternalIds> {
+  const rows = db.sql.prepare('SELECT item_id, kind, value FROM item_external_ids ORDER BY item_id, kind').all() as {
+    item_id: number;
+    kind: string;
+    value: string;
+  }[];
+  const out = new Map<number, ExternalIds>();
+  for (const row of rows) {
+    const ids = (out.get(row.item_id) ?? {}) as Record<string, string>;
+    ids[row.kind] = row.value;
+    out.set(row.item_id, ids as ExternalIds);
+  }
+  return out;
+}
+
+const existing = (db: Db, raw: LibraryItem, ids: ExternalIds | undefined): Existing => {
+  const item: PoolItem = { ...raw, applePersistentId: blankToNull(raw.applePersistentId), externalIds: canonicalIds(ids) };
   return { item, norm: normalizeTitle(item.sourceTitle), identity: identityOf(db, item) };
 };
 
@@ -309,7 +379,14 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
   const hint = r.imdbIdHint?.trim().toLowerCase() ?? null;
   const supplied = r.tconst ?? (hint && /^tt\d{7,}$/.test(hint) && !t.hintRefuted ? hint : null);
 
-  const found = pool.filter((e) => sameApple(e) || (recLink !== null && itemLink(e) === recLink) || e.norm === norm);
+  // A source's own film ids work like the Apple id: the same id of a kind is
+  // the same film, a different id of the same kind is another film.
+  const recIds = Object.entries(r.externalIds ?? {}) as [keyof ExternalIds, string][];
+  const sharedIds = (e: Existing) => recIds.filter(([kind]) => e.item.externalIds[kind] !== undefined);
+  const idsDiffer = (e: Existing) => sharedIds(e).some(([kind, v]) => e.item.externalIds[kind] !== v);
+  const sameIdsAs = (e: Existing) => sharedIds(e).length > 0 && !idsDiffer(e);
+
+  const found = pool.filter((e) => sameApple(e) || sameIdsAs(e) || (recLink !== null && itemLink(e) === recLink) || e.norm === norm);
 
   // A TV app track whose store credit names a director of the catalog title it
   // matched, against an item established as that same title: the item's
@@ -322,9 +399,11 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
     r.fromTvApp === true && t.directorConfirmed === true && recLink !== null && itemLink(e) === recLink;
 
   const conflicts = (e: Existing): boolean => {
+    if (idsDiffer(e)) return true;
     if (sameApple(e)) return false;
+    if (apple !== null && e.item.applePersistentId !== null) return true;
+    if (sameIdsAs(e)) return false;
     return (
-      (apple !== null && e.item.applePersistentId !== null) ||
       // Years more than one apart (or a film from after the edition the record
       // sells), runtimes more than 3 minutes apart (within that, the same cut
       // reported by different sources) or directors who are clearly different
@@ -350,7 +429,7 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
   const exactTitle = (xs: Existing[]) =>
     xs.every((e) => sameMovie(e.identity, (xs[0] as Existing).identity)) ? (e: Existing) => e.item.sourceTitle === title : () => false;
   const narrow = (xs: Existing[]): Existing[] => {
-    for (const keep of [() => sameApple, () => (e: Existing) => recLink !== null && itemLink(e) === recLink, exactTitle]) {
+    for (const keep of [() => sameApple, () => sameIdsAs, () => (e: Existing) => recLink !== null && itemLink(e) === recLink, exactTitle]) {
       if (xs.length === 1) break;
       const narrowed = xs.filter(keep(xs));
       if (narrowed.length) xs = narrowed;
@@ -387,10 +466,10 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
   return { kind: 'update', id: first.item.id };
 }
 
-/** Whether two items hold the same data, ids and dates aside. */
-function sameContent(a: LibraryItem, b: LibraryItem): boolean {
-  const content = (x: LibraryItem) => {
-    const rest: Partial<LibraryItem> = { ...x };
+/** Whether two items hold the same data (external ids included), local ids and dates aside. */
+function sameContent(a: PoolItem, b: PoolItem): boolean {
+  const content = (x: PoolItem) => {
+    const rest: Partial<PoolItem> = { ...x };
     delete rest.id;
     delete rest.addedAt;
     delete rest.updatedAt;
@@ -405,14 +484,14 @@ function sameContent(a: LibraryItem, b: LibraryItem): boolean {
  * claimed before any other record is resolved, so an import of an export finds
  * every row's own item whatever the order of the rows.
  */
-function isTwin(cur: LibraryItem, r: ImportRecord, t: Target): boolean {
-  const status = r.status ?? 'queue';
+function isTwin(cur: PoolItem, r: ImportRecord, t: Target): boolean {
+  const status = newStatus(r);
   const same =
     cur.sourceTitle === r.sourceTitle.trim() &&
     cur.tconst === t.tconst &&
     cur.status === status &&
     cur.watchedEra === (status === 'watched' ? (r.watchedEra ?? null) : null) &&
-    cur.owned === (r.owned ?? true) &&
+    cur.owned === newOwned(r) &&
     cur.source === r.source &&
     cur.sourceYear === (r.sourceYear ?? null) &&
     credit(cur.sourceDirector) === credit(r.sourceDirector) &&
@@ -423,34 +502,52 @@ function isTwin(cur: LibraryItem, r: ImportRecord, t: Target): boolean {
     cur.watchedAt === (r.watchedAt ?? null) &&
     cur.myRating === (r.myRating ?? null) &&
     cur.notes === (r.notes ?? null) &&
-    blankToNull(cur.applePersistentId) === blankToNull(r.applePersistentId);
+    blankToNull(cur.applePersistentId) === blankToNull(r.applePersistentId) &&
+    sameIds(cur.externalIds, r.externalIds ?? {});
   return same && mergeChanges(cur, r, t).length === 0;
 }
+
+/** The status a new item gets: the record's, else its new-item status, else queue. */
+const newStatus = (r: ImportRecord) => r.status ?? r.statusIfNew ?? 'queue';
+/** Whether a new item is owned: the record's owned, else its new-item value, else owned. */
+const newOwned = (r: ImportRecord) => r.owned ?? r.ownedIfNew ?? true;
+
+/** mergeChanges marks an external id the item lacks with this column prefix; it is written to item_external_ids. */
+const EXT_PREFIX = 'ext:';
 
 const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 
 type Col = [column: string, value: string | number | null];
 
-/** The column changes needed to merge `r` into `cur`. Absent or null fields never clear anything. */
-function mergeChanges(cur: LibraryItem, r: ImportRecord, t: Target): Col[] {
+/**
+ * The column changes needed to merge `r` into `cur`. Absent or null fields
+ * never clear anything. `ownedIfNew` and `statusIfNew` are never read here
+ * (they are for new items only), and with `fillOnly` the descriptive fields
+ * only fill blanks. External ids the item lacks come back as `ext:<kind>`.
+ */
+function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   const out: Col[] = [];
-  const keep = <K extends keyof LibraryItem & keyof ImportRecord>(key: K, column: string) => {
+  const keep = <K extends keyof LibraryItem & keyof ImportRecord>(key: K, column: string, descriptive = false) => {
     const v = r[key];
     if (v === undefined || v === null || v === cur[key]) return;
+    if (descriptive && r.fillOnly === true && cur[key] !== null) return;
     out.push([column, typeof v === 'boolean' ? (v ? 1 : 0) : (v as string | number)]);
   };
-  keep('sourceYear', 'source_year');
-  keep('sourceDirector', 'source_director');
-  keep('sourceRuntimeMin', 'source_runtime_min');
-  keep('sourceGenre', 'source_genre');
-  keep('collection', 'collection');
+  keep('sourceYear', 'source_year', true);
+  keep('sourceDirector', 'source_director', true);
+  keep('sourceRuntimeMin', 'source_runtime_min', true);
+  keep('sourceGenre', 'source_genre', true);
+  keep('collection', 'collection', true);
   keep('owned', 'owned');
   keep('sourceOwnedRaw', 'source_owned_raw');
   keep('watchedAt', 'watched_at');
   keep('myRating', 'my_rating');
-  keep('notes', 'notes');
+  keep('notes', 'notes', true);
   keep('applePersistentId', 'apple_persistent_id');
+  for (const [kind, value] of Object.entries(r.externalIds ?? {})) {
+    if (value && cur.externalIds[kind as keyof ExternalIds] === undefined) out.push([`${EXT_PREFIX}${kind}`, value]);
+  }
 
   if (r.status !== undefined) {
     if (r.status !== cur.status) out.push(['status', r.status]);
@@ -489,6 +586,7 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
     `INSERT INTO library_items (tconst, source_title, source_year, source_director, source_runtime_min, source_genre, collection, owned, source_owned_raw, status, watched_era, watched_at, my_rating, notes, match_status, match_score, source, apple_persistent_id, added_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${NOW_SQL}), ${NOW_SQL})`,
   );
+  const addExternalId = db.sql.prepare('INSERT OR IGNORE INTO item_external_ids (item_id, kind, value) VALUES (?, ?, ?)');
   const clearCandidates = db.sql.prepare('DELETE FROM match_candidates WHERE item_id = ?');
   const addCandidate = db.sql.prepare('INSERT INTO match_candidates (item_id, tconst, score) VALUES (?, ?, ?)');
   const storeCandidates = (id: number, t: Target) => {
@@ -497,11 +595,12 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
   };
 
   return transaction(db.sql, () => {
-    if (opts.mode === 'replace') db.sql.exec('DELETE FROM match_candidates; DELETE FROM library_items;');
+    if (opts.mode === 'replace') db.sql.exec('DELETE FROM match_candidates; DELETE FROM item_external_ids; DELETE FROM library_items;');
 
+    const ids = externalIdsOf(db);
     const pool: Existing[] = (
       db.sql.prepare(`SELECT ${LIBRARY_COLUMNS} FROM library_items ORDER BY id`).all() as unknown as LibraryRow[]
-    ).map((row) => existing(db, rowToItem(row)));
+    ).map((row) => existing(db, rowToItem(row), ids.get(row.id)));
     // One import claims each existing item for at most one record, and an item
     // it adds is never a candidate for a later record: N records that fit N
     // items claim N distinct items, and a record left with no unclaimed
@@ -543,7 +642,7 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
         return;
       }
       if (target.kind === 'insert') {
-        const status = r.status ?? 'queue';
+        const status = newStatus(r);
         const addedAt = r.addedAt && !Number.isNaN(Date.parse(r.addedAt)) ? r.addedAt : null;
         const res = insert.run(
           t.tconst,
@@ -553,7 +652,7 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
           r.sourceRuntimeMin ?? null,
           r.sourceGenre ?? null,
           r.collection ?? null,
-          r.owned === false ? 0 : 1,
+          newOwned(r) ? 1 : 0,
           r.sourceOwnedRaw ?? null,
           status,
           status === 'watched' ? (r.watchedEra ?? null) : null,
@@ -566,7 +665,9 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
           r.applePersistentId ?? null,
           addedAt,
         );
-        storeCandidates(Number(res.lastInsertRowid), t);
+        const id = Number(res.lastInsertRowid);
+        for (const [kind, value] of Object.entries(r.externalIds ?? {})) addExternalId.run(id, kind, value);
+        storeCandidates(id, t);
         summary.added++;
         final = t.matchStatus;
       } else {
@@ -574,11 +675,18 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
         if (!(target.kind === 'unchanged' && target.claim === false)) claimed.add(found.item.id);
         const changes = target.kind === 'update' ? mergeChanges(found.item, r, t) : [];
         if (changes.length) {
+          const columns = changes.filter(([c]) => !c.startsWith(EXT_PREFIX));
           db.sql
-            .prepare(`UPDATE library_items SET ${changes.map(([c]) => `${c} = ?`).join(', ')}, updated_at = ${NOW_SQL} WHERE id = ?`)
-            .run(...changes.map(([, v]) => v), found.item.id);
+            .prepare(`UPDATE library_items SET ${columns.map(([c]) => `${c} = ?, `).join('')}updated_at = ${NOW_SQL} WHERE id = ?`)
+            .run(...columns.map(([, v]) => v), found.item.id);
+          const ext: Record<string, string> = { ...found.item.externalIds };
+          for (const [c, v] of changes) {
+            if (!c.startsWith(EXT_PREFIX)) continue;
+            addExternalId.run(found.item.id, c.slice(EXT_PREFIX.length), v);
+            ext[c.slice(EXT_PREFIX.length)] = String(v);
+          }
           if (changes.some(([c]) => c === 'match_status' || c === 'tconst')) storeCandidates(found.item.id, t);
-          Object.assign(found, existing(db, rowToItem(select.get(found.item.id) as unknown as LibraryRow)));
+          Object.assign(found, existing(db, rowToItem(select.get(found.item.id) as unknown as LibraryRow), ext));
           summary.updated++;
         } else {
           summary.unchanged++;

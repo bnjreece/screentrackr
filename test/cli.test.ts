@@ -286,6 +286,62 @@ describe('import', () => {
   });
 });
 
+describe('import imdb', () => {
+  const EXPORTS = join(import.meta.dirname, 'fixtures', 'imdb-export');
+  const RATINGS = join(EXPORTS, 'ratings.csv');
+  const WATCHLIST = join(EXPORTS, 'watchlist.csv');
+
+  it('reads several exports together, counts skipped title types, and a repeat changes nothing', () => {
+    const r = run(['import', 'imdb', WATCHLIST, RATINGS, '--as', 'watchlist', '--json'], { home });
+    expect(r.code, r.stderr).toBe(0);
+    const out = json<{ format: string; added: number; skippedByType: Record<string, number> }>(r);
+    expect(out).toMatchObject({ format: 'imdb', added: 7 });
+    expect(out.skippedByType).toEqual({ 'TV Series': 1, 'TV Movie': 1, 'TV Episode': 1, Short: 1 });
+    const again = json<{ added: number; updated: number; unchanged: number }>(
+      run(['import', 'imdb', WATCHLIST, RATINGS, '--as', 'watchlist', '--json'], { home }),
+    );
+    expect(again).toMatchObject({ added: 0, updated: 0, unchanged: 7 });
+    const text = run(['import', 'imdb', RATINGS], { home });
+    expect(text.stderr).toMatch(/Skipped 2 rows that are not a movie: TV Episode 1, Short 1/);
+  }, 60_000);
+
+  it('detects an IMDb export passed to plain import, and notes how a list file was read', () => {
+    const r = run(['import', RATINGS, '--json'], { home });
+    expect(r.code, r.stderr).toBe(0);
+    expect(json<{ format: string; added: number }>(r)).toMatchObject({ format: 'imdb', added: 5 });
+    const list = run(['import', WATCHLIST], { home });
+    expect(list.code, list.stderr).toBe(0);
+    expect(list.stderr).toMatch(/read as your watchlist/);
+  }, 60_000);
+
+  it('never empties the library from a header-only export under --replace', () => {
+    importPaste();
+    const before = run(['export'], { home }).stdout;
+    const r = run(['import', 'imdb', join(EXPORTS, 'ratings-empty.csv'), '--replace'], { home });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/Nothing was changed/);
+    expect(JSON.parse(run(['export'], { home }).stdout).items).toEqual(JSON.parse(before).items);
+    expect(run(['import', 'imdb', join(EXPORTS, 'ratings-empty.csv'), '--json'], { home }).code).toBe(0);
+  }, 60_000);
+
+  it('rejects flags that do not apply', () => {
+    for (const args of [
+      ['import', 'imdb'],
+      ['import', 'imdb', RATINGS, '--format', 'csv'],
+      ['import', 'imdb', WATCHLIST, '--as', 'favorites'],
+      ['import', 'imdb', WATCHLIST, '--collection', 'Shelf'],
+      ['import', 'imdb', WATCHLIST, '--as', 'watchlist', '--checkin-dates'],
+      ['import', 'imdb', RATINGS, '--include-type', 'tvSeries'],
+      ['import', PASTE, '--as', 'watchlist'],
+      ['import', 'imdb', join(tmp, 'missing.csv')],
+      ['import', 'imdb', PASTE],
+    ]) {
+      const r = run(args, { home });
+      expect(r.code, args.join(' ')).toBe(1);
+    }
+  }, 60_000);
+});
+
 describe('import apple-tv', () => {
   it('rejects flags that do not apply, before touching the TV app', () => {
     for (const args of [

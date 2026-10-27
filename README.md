@@ -68,15 +68,31 @@ The Example Heist,2011,Jane Doe,watched,8,
 Another Made-Up Movie,,,priority,,tt9000001
 ```
 
+### IMDb (CSV export)
+
+IMDb lets you download your ratings, your watchlist, your check-ins and each of your lists as CSV files. Sign in on imdb.com in a desktop browser, open Your Ratings (or the watchlist, check-ins or a list) and click the Export icon at the top right. IMDb prepares the file in the background: download it from [imdb.com/exports](https://www.imdb.com/exports/) once it is no longer "in progress". A file stays there for 4 weeks; if it has expired, export again. screentrackr only reads the files you download. It never signs in to IMDb or fetches anything from imdb.com.
+
+```sh
+screentrackr import imdb imdb-ratings.csv imdb-watchlist.csv
+```
+
+- **Ratings** (the file with `Your Rating` and `Date Rated` columns): each movie is marked watched with your rating, a whole number from 1 to 10. The date you rated it is not used as a watch date.
+- **List exports** (watchlist, check-ins and custom lists share one layout, and the file doesn't say which it is). Pass `--as` to say: `--as watchlist` (the default, with a notice) puts movies you don't have yet in the queue and never changes the status of a movie you already have, so a watched movie stays watched. `--as checkins` marks movies watched; add `--checkin-dates` to use each check-in's date as the watched date. `--as list` sets no status; add `--collection <name>` to name the list's collection. A rated movie in any list is marked watched with that rating.
+- IMDb has no idea of what you own, so a new movie from IMDb is not marked owned and a movie you already have keeps its owned flag. Title, year, directors and genres only fill fields a movie you already have left blank; they never replace what your other imports said.
+- Only rows whose Title Type is Movie come in (and TV Movie, when you built the catalog with `--include-tv-movies`). TV series, episodes, shorts and the rest are skipped and counted; `--include-type short,video` (also `tvMovie`, `tvSpecial`, `tvShort`) brings those in, unmatched.
+- Each row's IMDb id decides the match: the catalog's movie when the catalog has that id, otherwise the movie stays unmatched (keeping the id) rather than being matched to another title by name. The runtime in the file depends on your location, so it is ignored. IMDb's own rating, votes and release date are never stored, and neither is a list's description.
+- Several files are read together, so a movie that is both rated and on your watchlist becomes one movie, watched. A rating overwrites the rating a movie had, so importing a newer export updates your ratings; importing the same files again changes nothing.
+- A ratings or list export passed to plain `screentrackr import` is recognized too (a list is then read as a watchlist). Files saved again in a spreadsheet are read as well: semicolons, Windows-1252 text and day-first or month-first dates. The pre-2018 export format is refused with a message.
+
 ### ScreenTrackr JSON
 
 `screentrackr export` writes your whole library as ScreenTrackr JSON v1, and `screentrackr import` reads it back with nothing lost. Use it for backups and for moving between machines. The format is documented in [docs/library-json-v1.md](docs/library-json-v1.md).
 
 ### Merge or replace
 
-Imports merge by default: new movies are added, and fields the file has are updated. A merge never clears a status or rating that the file doesn't mention, and importing the same file twice changes nothing. A record updates an existing movie only when exactly one item fits it: a different Apple id, a year more than one off (a year in the title counts, also before an edition tag like "(1978) (4K)"), a different runtime, a different director (except in `import apple-tv`, when the TV app's director is confirmed by the IMDb title both already share) or a different IMDb id rules an item out. For `import apple-tv`, the TV app's year is the year of the edition on sale, so it only rules out films made after it and is never stored, and a shared unconfirmed IMDb id is not enough on its own. A movie matched to IMDb that has no year, runtime or director of its own is judged by IMDb's, and how a title is written (an edition tag, the exact spelling) only tells editions of the same movie apart, never a film from its remake. A record that still fits several items (a title with no year, when you have the 1980 film and its 2020 remake) changes nothing and is listed with the candidate item ids; a row that changes nothing on one item but also fits a different one does not settle which one it is, so a later row in the same file still has to fit one on its own. Within one import each item is claimed by at most one record, so a file with two identical rows (two editions in an Apple TV paste) adds two items, a later change to that pair updates both, and importing an export restores every row. The full rules are in [docs/library-json-v1.md](docs/library-json-v1.md#which-item-a-record-updates). `--replace` starts over from the file, after saving a backup of your current library to `backups/`. Every import prints how many items were added, updated, unchanged, and need review.
+Imports merge by default: new movies are added, and fields the file has are updated. A merge never clears a status or rating that the file doesn't mention, an IMDb import never changes whether a movie is owned and never moves a movie out of watched, and importing the same file twice changes nothing. A record updates an existing movie only when exactly one item fits it: a different Apple id, a year more than one off (a year in the title counts, also before an edition tag like "(1978) (4K)"), a different runtime, a different director (except in `import apple-tv`, when the TV app's director is confirmed by the IMDb title both already share) or a different IMDb id rules an item out. For `import apple-tv`, the TV app's year is the year of the edition on sale, so it only rules out films made after it and is never stored, and a shared unconfirmed IMDb id is not enough on its own. A movie matched to IMDb that has no year, runtime or director of its own is judged by IMDb's, and how a title is written (an edition tag, the exact spelling) only tells editions of the same movie apart, never a film from its remake. A record that still fits several items (a title with no year, when you have the 1980 film and its 2020 remake) changes nothing and is listed with the candidate item ids; a row that changes nothing on one item but also fits a different one does not settle which one it is, so a later row in the same file still has to fit one on its own. Within one import each item is claimed by at most one record, so a file with two identical rows (two editions in an Apple TV paste) adds two items, a later change to that pair updates both, and importing an export restores every row. The full rules are in [docs/library-json-v1.md](docs/library-json-v1.md#which-item-a-record-updates). `--replace` starts over from the file, after saving a backup of your current library to `backups/` (an IMDb export with no rows is refused instead, so it can never empty your library). Every import prints how many items were added, updated, unchanged, and need review.
 
-The format is detected from the file. Pass `--format` (`json-v1`, `apple-paste`, `csv`, `legacy`, `neon-rows`) to choose it yourself. `legacy` and `neon-rows` read exports from the old ScreenTrackr web app.
+The format is detected from the file. Pass `--format` (`json-v1`, `apple-paste`, `csv`, `imdb`, `legacy`, `neon-rows`) to choose it yourself. `legacy` and `neon-rows` read exports from the old ScreenTrackr web app.
 
 ## Searching
 
@@ -154,7 +170,7 @@ Every command takes `--home <dir>`, `--json` and `--help`.
 
 ```text
 screentrackr setup [--refresh] [--no-cast] [--include-tv-movies]
-screentrackr import <file|apple-tv> [--format <format>] [--merge | --replace]
+screentrackr import <file|apple-tv|imdb <file.csv>...> [--format <format>] [--merge | --replace]
 screentrackr search [filters]
 screentrackr show <id|tconst|title>
 screentrackr add <tconst|title> [--year <yyyy>] [--status <status>] [--new-edition]
@@ -171,7 +187,7 @@ screentrackr doctor
 | Command | What it does |
 |---|---|
 | `setup` | Downloads the IMDb datasets and builds the catalog. `--refresh` checks for newer files. Afterwards it refreshes automatic matches; your statuses, ratings, notes and manual links are never changed. |
-| `import` | Brings in a library file, or the Apple TV app's library with `import apple-tv`. |
+| `import` | Brings in a library file, the Apple TV app's library with `import apple-tv`, or IMDb CSV exports with `import imdb` (`--as`, `--collection`, `--include-type`, `--checkin-dates`). |
 | `search` | The main query. Filters are listed below. |
 | `show` | The full record for one movie, by library id, IMDb id or title. An IMDb id or catalog title only finds items that are matched or linked by hand; an unmatched item (one imported with an unchecked IMDb id before `setup`, say) is reached by its id or its own title. A year in a title, as in `"The Glass Harbor (2009)"` or `"The Glass Harbor (2009) (4K)"`, only finds items of that year (within one); `set` works the same way. |
 | `add` | Adds a catalog movie to your library. An ambiguous title lists the candidates instead of guessing. A year in the title, like `--year`, only finds movies of that year (within one), and a title year that disagrees with `--year` finds nothing. A movie you already have is refused unless you pass `--new-edition`. |

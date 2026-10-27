@@ -5,7 +5,7 @@
  */
 import { z } from 'zod';
 import { LIBRARY_FORMAT, LIBRARY_FORMAT_VERSION } from '../export.js';
-import { ITEM_SOURCES, MATCH_STATUSES, STATUSES, WATCHED_ERAS } from '../types.js';
+import { EXTERNAL_ID_KINDS, ITEM_SOURCES, MATCH_STATUSES, STATUSES, WATCHED_ERAS } from '../types.js';
 import { ImportError, type ImportRecord, type ParsedImport } from './common.js';
 
 const nullable = <T extends z.ZodType>(t: T) => t.nullable().optional().default(null);
@@ -29,6 +29,7 @@ const ItemSchema = z.object({
   matchScore: nullable(z.number()),
   source: z.enum(ITEM_SOURCES).nullish().transform((v) => v ?? 'json'),
   applePersistentId: nullable(z.string()),
+  externalIds: z.partialRecord(z.enum(EXTERNAL_ID_KINDS), z.string().max(1000)).nullish(),
   addedAt: z.string().nullish(),
   updatedAt: z.string().nullish(),
 });
@@ -79,6 +80,7 @@ export function parseJsonV1(data: unknown): ParsedImport {
       rec.matchStatus = it.matchStatus === 'manual' ? 'manual' : 'matched';
       rec.matchScore = it.matchScore;
     }
+    if (it.externalIds) rec.externalIds = it.externalIds;
     if (it.addedAt) rec.addedAt = it.addedAt;
     return rec;
   });

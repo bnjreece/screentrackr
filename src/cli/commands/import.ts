@@ -1,35 +1,127 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { catalogReady } from '../../core/db.js';
+import { catalogReady, type Db } from '../../core/db.js';
 import { readAppleTvLibrary } from '../../core/importers/apple-tv.js';
-import { applyImport, FORMATS, parseImportDetailed, type ImportFormat, type ParsedImport } from '../../core/importers/index.js';
-import { bool, str, type Command } from '../command.js';
+import {
+  decodeImdbFile,
+  IMDB_INCLUDE_TYPES,
+  IMDB_LIST_KINDS,
+  parseImdb,
+  type ImdbIncludeType,
+  type ImdbListKind,
+  type ImdbOptions,
+} from '../../core/importers/imdb.js';
+import { applyImport, detectFormat, FORMATS, parseImportDetailed, type ImportFormat, type ParsedImport } from '../../core/importers/index.js';
+import { bool, str, strs, type Command } from '../command.js';
 import { UserError } from '../context.js';
+
+function readBytes(file: string): Buffer {
+  try {
+    return readFileSync(file);
+  } catch (err) {
+    throw new UserError(`Could not read ${file}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
+  }
+}
+
+/** Whether the catalog was built with TV movies, so IMDb's TV Movie rows can match. */
+function catalogHasTvMovies(db: Db): boolean {
+  const row = db.sql.prepare("SELECT value FROM meta WHERE key = 'catalog_include_tv_movies'").get() as { value: string | null } | undefined;
+  return row?.value === '1';
+}
+
+interface Parsed extends ParsedImport {
+  format: ImportFormat | 'apple-tv';
+  notices: string[];
+  skippedByType?: Record<string, number>;
+}
+
+function parseImdbFiles(db: Db, files: string[], opts: ImdbOptions): Parsed {
+  const warnings: string[] = [];
+  const inputs = files.map((file) => {
+    const decoded = decodeImdbFile(readBytes(file));
+    if (decoded.warning) warnings.push(`${basename(file)}: ${decoded.warning}`);
+    return { name: basename(file), text: decoded.text };
+  });
+  const includeTypes = new Set<ImdbIncludeType>(opts.includeTypes ?? []);
+  if (catalogHasTvMovies(db)) includeTypes.add('tvMovie');
+  const res = parseImdb(inputs, { ...opts, includeTypes: [...includeTypes] });
+  return {
+    format: 'imdb',
+    records: res.records,
+    warnings: [...warnings, ...res.warnings, ...res.skippedSummary],
+    notices: res.notices,
+    skippedByType: res.skippedByType,
+  };
+}
 
 export const importCmd: Command = {
   name: 'import',
   summary: 'Bring in a library file (merge by default)',
-  usage: 'import <file|apple-tv> [--format <format>] [--merge | --replace]',
-  details: `Formats: ${FORMATS.join(', ')}. The format is detected when --format is omitted.\n\`import apple-tv\` (experimental, macOS only) reads the TV app's library directly. Movies with a recorded play date are marked watched; the rest keep their current status.\n--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.\n--replace backs up your library to backups/ first, then replaces it.`,
+  usage: 'import <file|apple-tv|imdb <file.csv>...> [--format <format>] [--merge | --replace]',
+  details: [
+    `Formats: ${FORMATS.join(', ')}. The format is detected when --format is omitted.`,
+    "`import apple-tv` (experimental, macOS only) reads the TV app's library directly. Movies with a recorded play date are marked watched; the rest keep their current status.",
+    "`import imdb <file.csv>...` reads IMDb CSV exports you downloaded from imdb.com (Your Ratings, your watchlist, check-ins or a list). Rated movies are marked watched with your rating; watchlist movies go in the queue only when they are new; nothing is marked owned. Several files are read together. --as says what a list export is (watchlist by default), --collection names a list's collection, --include-type brings in more than movies (repeatable or comma-separated: " +
+      IMDB_INCLUDE_TYPES.join(', ') +
+      '), --checkin-dates uses check-in dates as watched dates.',
+    '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
+    '--replace backs up your library to backups/ first, then replaces it.',
+  ].join('\n'),
   options: {
     format: { type: 'string', value: '<format>', description: `One of ${FORMATS.join(', ')}` },
     merge: { type: 'boolean', description: 'Merge into the library (the default)' },
     replace: { type: 'boolean', description: 'Replace the library, after a backup' },
     timeout: { type: 'string', value: '<seconds>', description: 'apple-tv only: how long to wait for the TV app (default 120)' },
+    as: { type: 'string', value: `<${IMDB_LIST_KINDS.join('|')}>`, description: 'imdb only: what an IMDb list export is (default watchlist)' },
+    collection: { type: 'string', value: '<name>', description: 'imdb --as list only: collection name for the list (fills a blank collection)' },
+    'include-type': {
+      type: 'string',
+      multiple: true,
+      value: '<type>',
+      description: `imdb only: also bring in ${IMDB_INCLUDE_TYPES.join(', ')} (repeatable)`,
+    },
+    'checkin-dates': { type: 'boolean', description: 'imdb --as checkins only: use check-in dates as watched dates' },
   },
   async run(ctx, pos, values) {
     const file = pos[0];
     if (!file) throw new UserError('Usage: screentrackr import <file>');
-    if (pos.length > 1) throw new UserError(`Unexpected argument "${pos[1]}"`);
+    const imdb = file === 'imdb';
+    const files = imdb ? pos.slice(1) : [file];
+    if (imdb && !files.length) throw new UserError('Usage: screentrackr import imdb <file.csv>...');
+    if (!imdb && pos.length > 1) throw new UserError(`Unexpected argument "${pos[1]}"`);
     if (bool(values, 'merge') && bool(values, 'replace')) throw new UserError('Use either --merge or --replace, not both');
     const format = str(values, 'format');
     const timeout = str(values, 'timeout');
     const appleTv = file === 'apple-tv';
-    if (appleTv && format !== undefined) throw new UserError('--format does not apply to `import apple-tv`');
+    if ((appleTv || imdb) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
     if (!appleTv && timeout !== undefined) throw new UserError('--timeout only applies to `import apple-tv`');
     if (format !== undefined && !(FORMATS as readonly string[]).includes(format)) {
       throw new UserError(`Unknown format "${format}" (expected ${FORMATS.join(', ')})`);
     }
+
+    const as = str(values, 'as');
+    const collection = str(values, 'collection');
+    const includeRaw = (strs(values, 'include-type') ?? []).flatMap((v) => v.split(',')).map((v) => v.trim()).filter(Boolean);
+    const checkinDates = bool(values, 'checkin-dates');
+    const imdbFlags = as !== undefined || collection !== undefined || includeRaw.length > 0 || checkinDates;
+    if (as !== undefined && !(IMDB_LIST_KINDS as readonly string[]).includes(as)) {
+      throw new UserError(`--as expects ${IMDB_LIST_KINDS.join(', ')} (got "${as}")`);
+    }
+    const includeTypes = includeRaw.map((t) => {
+      const known = IMDB_INCLUDE_TYPES.find((k) => k.toLowerCase() === t.toLowerCase());
+      if (!known) throw new UserError(`--include-type expects ${IMDB_INCLUDE_TYPES.join(', ')} (got "${t}")`);
+      return known;
+    });
+    if (collection !== undefined && as !== 'list') throw new UserError('--collection only applies with --as list');
+    if (collection !== undefined && !collection.trim()) throw new UserError('--collection needs a name');
+    if (checkinDates && as !== 'checkins') throw new UserError('--checkin-dates only applies with --as checkins');
+    const imdbOpts: ImdbOptions = {
+      ...(as ? { as: as as ImdbListKind } : {}),
+      ...(collection ? { collection } : {}),
+      includeTypes,
+      checkinDates,
+    };
+
     let timeoutMs: number | undefined;
     if (timeout !== undefined) {
       const secs = Number(timeout);
@@ -37,26 +129,39 @@ export const importCmd: Command = {
       timeoutMs = Math.round(secs * 1000);
     }
 
-    let parsed: ParsedImport & { format: ImportFormat | 'apple-tv' };
+    let parsed: Parsed;
     if (appleTv) {
+      if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
       ctx.log('Reading the TV app library (experimental). macOS may ask to allow access to the TV app.');
-      parsed = { format: 'apple-tv', records: await readAppleTvLibrary({ timeoutMs }), warnings: [] };
+      parsed = { format: 'apple-tv', records: await readAppleTvLibrary({ timeoutMs }), warnings: [], notices: [] };
+    } else if (imdb) {
+      parsed = parseImdbFiles(ctx.db(), files, imdbOpts);
     } else {
-      let text: string;
-      try {
-        text = readFileSync(file, 'utf8');
-      } catch (err) {
-        throw new UserError(`Could not read ${file}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
+      const bytes = readBytes(file);
+      const text = bytes.toString('utf8');
+      const fmt = (format as ImportFormat | undefined) ?? detectFormat(text, basename(file));
+      if (fmt === 'imdb') {
+        parsed = parseImdbFiles(ctx.db(), [file], imdbOpts);
+      } else {
+        if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+        parsed = { ...parseImportDetailed(text, fmt, basename(file)), notices: [] };
       }
-      parsed = parseImportDetailed(text, format as ImportFormat | undefined, basename(file));
+    }
+
+    const replace = bool(values, 'replace');
+    // An empty IMDb export (only a header) is "no rows", never "delete everything".
+    if (parsed.format === 'imdb' && replace && parsed.records.length === 0) {
+      throw new UserError('Nothing to import from the IMDb file, so --replace would empty your library. Nothing was changed.');
     }
 
     const db = ctx.db();
+    for (const n of parsed.notices) ctx.log(n);
     for (const w of parsed.warnings) ctx.log(`Warning: ${w}`);
     if (!catalogReady(db)) ctx.log('The catalog is not built yet, so movies are left unmatched. Run `screentrackr setup` to match them.');
-    const summary = applyImport(db, parsed.records, { mode: bool(values, 'replace') ? 'replace' : 'merge' });
+    const summary = applyImport(db, parsed.records, { mode: replace ? 'replace' : 'merge' });
 
-    ctx.emit({ format: parsed.format, records: parsed.records.length, warnings: parsed.warnings, ...summary }, () =>
+    const extra = parsed.skippedByType ? { skippedByType: parsed.skippedByType } : {};
+    ctx.emit({ format: parsed.format, records: parsed.records.length, warnings: parsed.warnings, ...extra, ...summary }, () =>
       [
         `Imported ${parsed.records.length} records (${parsed.format}).`,
         `Added ${summary.added}, updated ${summary.updated}, unchanged ${summary.unchanged}, needs review ${summary.needsReview}.`,

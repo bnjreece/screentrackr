@@ -10,8 +10,23 @@ export type WatchedEra = (typeof WATCHED_ERAS)[number];
 export const MATCH_STATUSES = ['matched', 'ambiguous', 'unmatched', 'manual'] as const;
 export type MatchStatus = (typeof MATCH_STATUSES)[number];
 
-export const ITEM_SOURCES = ['paste', 'apple-tv', 'json', 'csv', 'manual', 'legacy'] as const;
+/**
+ * Where an item first came from. `imdb` is the IMDb CSV importer; `letterboxd`,
+ * `trakt`, `plex` and `jellyfin` are reserved for importers of those sources,
+ * so the database accepts them without another table rebuild.
+ */
+export const ITEM_SOURCES = ['paste', 'apple-tv', 'json', 'csv', 'manual', 'legacy', 'imdb', 'letterboxd', 'trakt', 'plex', 'jellyfin'] as const;
 export type ItemSource = (typeof ITEM_SOURCES)[number];
+
+/**
+ * Kinds of a source's own stable per-film id (ImportRecord.externalIds). Each
+ * value must name one film for good in that source (a Letterboxd film URI, a
+ * Trakt movie id), never a per-server or per-file id that changes. Adding a
+ * kind needs no migration: the database stores any kind, the code validates.
+ */
+export const EXTERNAL_ID_KINDS = ['letterboxd', 'trakt', 'plex', 'jellyfin'] as const;
+export type ExternalIdKind = (typeof EXTERNAL_ID_KINDS)[number];
+export type ExternalIds = Partial<Record<ExternalIdKind, string>>;
 
 /** One row of library_items, in camelCase. */
 export interface LibraryItem {
