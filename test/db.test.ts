@@ -1,10 +1,11 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { catalogReady, openDb, type Db } from '../src/core/db.js';
 import { resolveHome } from '../src/core/home.js';
-import { SCHEMA_VERSION } from '../src/core/schema.js';
+import { MIGRATIONS, SCHEMA_VERSION } from '../src/core/schema.js';
+import { sqlite } from '../src/core/sqlite.js';
 
 describe('resolveHome', () => {
   const saved = process.env.SCREENTRACKR_HOME;
@@ -51,13 +52,13 @@ describe('openDb', () => {
     (d.sql.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string })
       .value;
 
-  it('creates the db file, dirs and schema version 1', () => {
+  it('creates the db file, dirs and the current schema version', () => {
     db = openDb(home);
-    expect(SCHEMA_VERSION).toBe(1);
+    expect(SCHEMA_VERSION).toBe(3);
     expect(existsSync(join(home, 'screentrackr.db'))).toBe(true);
     expect(existsSync(join(home, 'cache'))).toBe(true);
     expect(existsSync(join(home, 'backups'))).toBe(true);
-    expect(version(db)).toBe('1');
+    expect(version(db)).toBe('3');
     expect(db.home).toBe(home);
   });
 
@@ -82,7 +83,7 @@ describe('openDb', () => {
       .run();
     db.close();
     db = openDb(home);
-    expect(version(db)).toBe('1');
+    expect(version(db)).toBe('3');
     const n = db.sql.prepare('SELECT COUNT(*) AS n FROM library_items').get() as { n: number };
     expect(n.n).toBe(1);
   });
@@ -119,6 +120,7 @@ describe('openDb', () => {
       'title_people',
       'library_items',
       'match_candidates',
+      'item_external_ids',
     ]) {
       expect(names).toContain(t);
     }
@@ -160,6 +162,84 @@ describe('openDb', () => {
     expect(row.match_status).toBe('unmatched');
     expect(typeof row.added_at).toBe('string');
     expect(typeof row.updated_at).toBe('string');
+  });
+});
+
+describe('migrating a version 1 database', () => {
+  it('keeps every item, id and match candidate, and accepts the new sources', () => {
+    const home = mkdtempSync(join(tmpdir(), 'screentrackr-mig-'));
+    try {
+      // A database as version 1 left it.
+      mkdirSync(home, { recursive: true });
+      const raw = new sqlite.DatabaseSync(join(home, 'screentrackr.db'));
+      raw.exec('PRAGMA foreign_keys = ON');
+      raw.exec(MIGRATIONS[0] as string);
+      raw.exec("INSERT INTO meta (key, value) VALUES ('schema_version', '1')");
+      raw.exec(`INSERT INTO library_items (id, source_title, status, watched_era, my_rating, source, owned, apple_persistent_id, match_status, added_at, updated_at)
+        VALUES (7, 'The Glass Harbor', 'watched', '2010s', 8, 'paste', 0, 'A1', 'ambiguous', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z'),
+               (12, 'Night Ferry', 'queue', NULL, NULL, 'csv', 1, NULL, 'unmatched', '2026-01-03T00:00:00.000Z', '2026-01-03T00:00:00.000Z')`);
+      raw.exec("INSERT INTO match_candidates (item_id, tconst, score) VALUES (7, 'tt9000001', 0.8), (7, 'tt9000002', 0.7)");
+      raw.close();
+
+      const db = openDb(home);
+      try {
+        expect(db.sql.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({ value: '3' });
+        expect(db.sql.prepare('SELECT id, source_title, status, watched_era, my_rating, source, owned, apple_persistent_id, added_at, updated_at FROM library_items ORDER BY id').all()).toEqual([
+          { id: 7, source_title: 'The Glass Harbor', status: 'watched', watched_era: '2010s', my_rating: 8, source: 'paste', owned: 0, apple_persistent_id: 'A1', added_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-02T00:00:00.000Z' },
+          { id: 12, source_title: 'Night Ferry', status: 'queue', watched_era: null, my_rating: null, source: 'csv', owned: 1, apple_persistent_id: null, added_at: '2026-01-03T00:00:00.000Z', updated_at: '2026-01-03T00:00:00.000Z' },
+        ]);
+        expect(db.sql.prepare('SELECT item_id, tconst, score FROM match_candidates ORDER BY tconst').all()).toEqual([
+          { item_id: 7, tconst: 'tt9000001', score: 0.8 },
+          { item_id: 7, tconst: 'tt9000002', score: 0.7 },
+        ]);
+        expect(db.sql.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%_v1' OR name LIKE '%_v2'").all()).toEqual([]);
+        db.sql.prepare("INSERT INTO library_items (source_title, status, source) VALUES ('X', 'queue', 'imdb')").run();
+        db.sql.prepare("INSERT INTO item_external_ids (item_id, kind, value) VALUES (12, 'letterboxd', 'https://boxd.it/x1')").run();
+        // Foreign keys still cascade from the rebuilt table.
+        db.sql.prepare('DELETE FROM library_items WHERE id = 7').run();
+        db.sql.prepare('DELETE FROM library_items WHERE id = 12').run();
+        expect(db.sql.prepare('SELECT COUNT(*) AS n FROM match_candidates').get()).toEqual({ n: 0 });
+        expect(db.sql.prepare('SELECT COUNT(*) AS n FROM item_external_ids').get()).toEqual({ n: 0 });
+        expect(db.sql.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('migrating a version 2 database', () => {
+  it('adds the watched date source column, NULL for every existing item, keeping their dates', () => {
+    const home = mkdtempSync(join(tmpdir(), 'screentrackr-mig-'));
+    try {
+      mkdirSync(home, { recursive: true });
+      const raw = new sqlite.DatabaseSync(join(home, 'screentrackr.db'));
+      raw.exec('PRAGMA foreign_keys = ON');
+      raw.exec(MIGRATIONS[0] as string);
+      raw.exec(MIGRATIONS[1] as string);
+      raw.exec("INSERT INTO meta (key, value) VALUES ('schema_version', '2')");
+      raw.exec(`INSERT INTO library_items (id, source_title, status, watched_at, source) VALUES
+        (3, 'Night Ferry', 'watched', '2024-02-03', 'trakt'),
+        (4, 'The Glass Harbor', 'queue', NULL, 'imdb')`);
+      raw.exec("INSERT INTO item_external_ids (item_id, kind, value) VALUES (3, 'trakt', '901')");
+      raw.close();
+
+      const db = openDb(home);
+      try {
+        expect(db.sql.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({ value: '3' });
+        expect(db.sql.prepare('SELECT id, watched_at, watched_at_source FROM library_items ORDER BY id').all()).toEqual([
+          { id: 3, watched_at: '2024-02-03', watched_at_source: null },
+          { id: 4, watched_at: null, watched_at_source: null },
+        ]);
+        expect(db.sql.prepare('SELECT item_id, kind, value FROM item_external_ids').all()).toEqual([{ item_id: 3, kind: 'trakt', value: '901' }]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

@@ -16,8 +16,12 @@ import {
   type ParsedImport,
 } from './common.js';
 
-/** Split CSV text into rows of cells. Handles quotes, doubled quotes and newlines inside quotes. */
-export function parseCsvRows(text: string): string[][] {
+/**
+ * Split CSV text into rows of cells. Handles quotes, doubled quotes and
+ * newlines inside quotes. `delimiter` is `,` unless a caller knows better (a
+ * spreadsheet saved with a European locale writes `;`).
+ */
+export function parseCsvRows(text: string, delimiter: ',' | ';' = ','): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let cell = '';
@@ -41,7 +45,7 @@ export function parseCsvRows(text: string): string[][] {
       continue;
     }
     if (ch === '"' && cell === '') quoted = true;
-    else if (ch === ',') {
+    else if (ch === delimiter) {
       row.push(cell);
       cell = '';
     } else if (ch === '\n' || ch === '\r') {

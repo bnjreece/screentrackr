@@ -117,7 +117,93 @@ CREATE TABLE match_candidates (
 );
 `;
 
-export const MIGRATIONS: readonly string[] = [V1];
+/**
+ * V2: more item sources, and a source's own stable ids.
+ *
+ * SQLite can't change a CHECK constraint in place, so library_items is rebuilt
+ * with the wider `source` list, keeping every row and id. match_candidates
+ * references library_items with ON DELETE CASCADE, so its rows are set aside
+ * first and the table is dropped before its parent (dropping the parent with
+ * the child still there would cascade and delete them).
+ *
+ * item_external_ids holds ImportRecord.externalIds: at most one value per kind
+ * per item. Kinds are validated in code (EXTERNAL_ID_KINDS), not here, so a
+ * new kind never needs another rebuild.
+ */
+const V2 = `
+CREATE TABLE library_items_v2 (
+  id                  INTEGER PRIMARY KEY,
+  tconst              TEXT,
+  source_title        TEXT NOT NULL,
+  source_year         INTEGER,
+  source_director     TEXT,
+  source_runtime_min  INTEGER,
+  source_genre        TEXT,
+  collection          TEXT,
+  owned               INTEGER NOT NULL DEFAULT 1 CHECK (owned IN (0, 1)),
+  source_owned_raw    TEXT,
+  status              TEXT NOT NULL DEFAULT 'queue'
+                        CHECK (status IN ('queue', 'priority', 'someday', 'watched')),
+  watched_era         TEXT CHECK (watched_era IS NULL OR watched_era IN ('long-ago', '2010s', '2020s')),
+  watched_at          TEXT,
+  my_rating           INTEGER CHECK (my_rating IS NULL OR (my_rating BETWEEN 1 AND 10)),
+  notes               TEXT,
+  match_status        TEXT NOT NULL DEFAULT 'unmatched'
+                        CHECK (match_status IN ('matched', 'ambiguous', 'unmatched', 'manual')),
+  match_score         REAL,
+  source              TEXT NOT NULL
+                        CHECK (source IN ('paste', 'apple-tv', 'json', 'csv', 'manual', 'legacy', 'imdb', 'letterboxd', 'trakt', 'plex', 'jellyfin')),
+  apple_persistent_id TEXT,
+  added_at            TEXT NOT NULL DEFAULT ${NOW},
+  updated_at          TEXT NOT NULL DEFAULT ${NOW}
+);
+INSERT INTO library_items_v2 (id, tconst, source_title, source_year, source_director, source_runtime_min, source_genre, collection, owned, source_owned_raw, status, watched_era, watched_at, my_rating, notes, match_status, match_score, source, apple_persistent_id, added_at, updated_at)
+  SELECT id, tconst, source_title, source_year, source_director, source_runtime_min, source_genre, collection, owned, source_owned_raw, status, watched_era, watched_at, my_rating, notes, match_status, match_score, source, apple_persistent_id, added_at, updated_at
+  FROM library_items;
+CREATE TEMP TABLE match_candidates_v1 AS SELECT item_id, tconst, score FROM match_candidates;
+DROP TABLE match_candidates;
+DROP TABLE library_items;
+ALTER TABLE library_items_v2 RENAME TO library_items;
+CREATE INDEX library_items_tconst ON library_items(tconst);
+CREATE INDEX library_items_status ON library_items(status);
+CREATE INDEX library_items_match_status ON library_items(match_status);
+
+CREATE TABLE match_candidates (
+  item_id INTEGER NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+  tconst  TEXT NOT NULL,
+  score   REAL NOT NULL,
+  PRIMARY KEY (item_id, tconst)
+);
+INSERT INTO match_candidates (item_id, tconst, score) SELECT item_id, tconst, score FROM match_candidates_v1;
+DROP TABLE match_candidates_v1;
+
+CREATE TABLE item_external_ids (
+  item_id INTEGER NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+  kind    TEXT NOT NULL,
+  value   TEXT NOT NULL,
+  PRIMARY KEY (item_id, kind)
+);
+CREATE INDEX item_external_ids_value ON item_external_ids(kind, value);
+`;
+
+/**
+ * V3: which import source set an item's watched date (watched_at_source).
+ *
+ * Imports never clear a field, with one exception: an import may clear a
+ * watched date that the same source set earlier (a partial export's dates
+ * that a later full export shows were fake). This column records that
+ * source. NULL means the user set the date (`set`, `update_movie`), a JSON v1
+ * file gave it without saying where it came from, or it was set before this
+ * column existed: such a date is never cleared by an import. Values are
+ * ITEM_SOURCES, checked in code like external id kinds, so a new source never
+ * needs a rebuild. Existing rows start NULL, so nothing already in a library
+ * becomes clearable.
+ */
+const V3 = `
+ALTER TABLE library_items ADD COLUMN watched_at_source TEXT;
+`;
+
+export const MIGRATIONS: readonly string[] = [V1, V2, V3];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
 

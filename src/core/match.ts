@@ -405,7 +405,10 @@ interface ItemRow {
 }
 
 /**
- * Re-run matching over the library. `manual` items are never touched. With
+ * Re-run matching over the library. `manual` items are never touched. An item
+ * with an `imdb` external id (IMDb's own id for it) is linked to that title
+ * when the catalog has it and otherwise left unmatched with the id kept: it
+ * is never matched to another title by name. With
  * `onlyUnresolved`, only `unmatched` and `ambiguous` items are processed. A
  * `matched` item keeps its tconst while that title is still in the catalog.
  * Candidates are stored for `ambiguous` items and cleared otherwise.
@@ -422,9 +425,23 @@ export function rematch(db: Db, opts: { onlyUnresolved?: boolean } = {}): { matc
   const update = db.sql.prepare('UPDATE library_items SET tconst = ?, match_status = ?, match_score = ? WHERE id = ?');
   const clear = db.sql.prepare('DELETE FROM match_candidates WHERE item_id = ?');
   const addCandidate = db.sql.prepare('INSERT INTO match_candidates (item_id, tconst, score) VALUES (?, ?, ?)');
+  const exactIds = new Map(
+    (db.sql.prepare("SELECT item_id, value FROM item_external_ids WHERE kind = 'imdb'").all() as { item_id: number; value: string }[]).map(
+      (r) => [r.item_id, r.value],
+    ),
+  );
+  const inCatalog = db.sql.prepare('SELECT 1 FROM titles WHERE tconst = ?');
 
   transaction(db.sql, () => {
     for (const it of items) {
+      const exact = exactIds.get(it.id);
+      if (exact !== undefined) {
+        const known = inCatalog.get(exact) !== undefined;
+        counts[known ? 'matched' : 'unmatched']++;
+        update.run(exact, known ? 'matched' : 'unmatched', known ? SCORE.hint : null, it.id);
+        clear.run(it.id);
+        continue;
+      }
       const res = matchOne(db, {
         title: it.source_title,
         year: it.source_year,
