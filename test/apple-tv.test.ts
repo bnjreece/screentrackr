@@ -54,7 +54,9 @@ describe('parseAppleTvJxaOutput', () => {
     const [ferry, lanterns] = recs;
     expect(ferry).toMatchObject({
       sourceTitle: 'Night Ferry',
-      sourceYear: 2014,
+      // The TV app's year is the edition's, never the film's.
+      sourceYear: null,
+      editionYear: 2014,
       sourceDirector: 'Dana Fincher',
       sourceGenre: 'Thriller',
       sourceRuntimeMin: 113,
@@ -65,6 +67,7 @@ describe('parseAppleTvJxaOutput', () => {
     expect(lanterns).toMatchObject({
       sourceTitle: 'Paper Lanterns',
       sourceYear: null,
+      editionYear: null,
       sourceDirector: null,
       sourceGenre: null,
       sourceRuntimeMin: 90,

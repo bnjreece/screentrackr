@@ -130,6 +130,8 @@ const knownNames = (names: string[]) => names.some((n) => nameWords(n).length > 
 export interface MatchInput {
   title: string;
   year?: number | null;
+  /** The year of the edition the source sells: the film is no later than this (plus a year). Never scored as a year. */
+  editionYear?: number | null;
   director?: string | null;
   runtimeMin?: number | null;
   imdbIdHint?: string | null;
@@ -188,6 +190,15 @@ export function directorsConflict(a: string | null | undefined, b: string | null
 /** Whether two known years are more than the matching tolerance apart. */
 export function yearsConflict(a: number | null, b: number | null): boolean {
   return a !== null && b !== null && Math.abs(a - b) > YEAR_TOLERANCE;
+}
+
+/**
+ * Whether a film year is too late for an edition sold in `editionYear` (see
+ * ImportRecord.editionYear): more than the matching tolerance after it. An
+ * edition year is only ever an upper bound; any earlier film year fits.
+ */
+export function afterEdition(filmYear: number | null, editionYear: number | null | undefined): boolean {
+  return filmYear !== null && editionYear != null && filmYear > editionYear + YEAR_TOLERANCE;
 }
 
 function lookupCandidates(db: Db, norm: string): TitleRow[] {
@@ -285,8 +296,9 @@ function hintContradiction(
   year: number | null,
   runtime: number | null,
   sourceDirectors: string[],
+  editionYear: number | null = null,
 ): 'year' | 'runtime' | 'director' | null {
-  if (yearsConflict(year, row.year)) return 'year';
+  if (yearsConflict(year, row.year) || afterEdition(row.year, editionYear)) return 'year';
   if (runtime !== null && row.runtime_min !== null && Math.abs(runtime - row.runtime_min) > RUNTIME_TOLERANCE_MIN && runtimeRival(db, row, norm, year, runtime)) {
     return 'runtime';
   }
@@ -307,11 +319,15 @@ function hintContradiction(
  *
  * A candidate whose year is more than one off the source's is never matched
  * automatically, however strong its other evidence: at best it is ambiguous.
+ *
+ * An `editionYear` (the Apple TV app's year) is not the film's year: it earns
+ * no year points and only drops candidates released more than a year after it.
  */
 export function matchOne(db: Db, input: MatchInput): MatchResult {
   const rawTitle = input.title ?? '';
   // A trailing "(2019)" on the source title is the strongest year evidence there is.
   const year = sourceYearOf(rawTitle, input.year);
+  const editionYear = input.editionYear ?? null;
   const sourceDirectors = splitPeople(input.director ?? null);
 
   const hint = input.imdbIdHint?.trim();
@@ -323,7 +339,7 @@ export function matchOne(db: Db, input: MatchInput): MatchResult {
         .prepare(`SELECT ${TITLE_COLS} FROM titles t LEFT JOIN ratings r ON r.tconst = t.tconst WHERE t.tconst = ?`)
         .get(hint) as unknown as TitleRow | undefined) ?? null;
     if (hintRow) {
-      const why = hintContradiction(db, hintRow, normalizeTitle(rawTitle), year, input.runtimeMin ?? null, sourceDirectors);
+      const why = hintContradiction(db, hintRow, normalizeTitle(rawTitle), year, input.runtimeMin ?? null, sourceDirectors, editionYear);
       if (!why) {
         return { status: 'matched', tconst: hintRow.tconst, score: SCORE.hint, candidates: [{ tconst: hintRow.tconst, score: SCORE.hint }] };
       }
@@ -338,8 +354,9 @@ export function matchOne(db: Db, input: MatchInput): MatchResult {
   const runtime = input.runtimeMin ?? null;
   const wanted = knownNames(sourceDirectors);
 
-  const rows = lookupCandidates(db, norm);
-  if (hintRow && !rows.some((r) => r.tconst === hintRow.tconst)) rows.push(hintRow);
+  // A film released after the edition on sale (beyond the year's tolerance) cannot be it.
+  const rows = lookupCandidates(db, norm).filter((r) => !afterEdition(r.year, editionYear));
+  if (hintRow && !afterEdition(hintRow.year, editionYear) && !rows.some((r) => r.tconst === hintRow.tconst)) rows.push(hintRow);
 
   const scored = rows.map((row) => {
     const exact = row.norm_title === norm || (row.original_title !== null && normalizeTitle(row.original_title) === norm);
@@ -354,7 +371,7 @@ export function matchOne(db: Db, input: MatchInput): MatchResult {
     }
     if (row.votes && row.votes > 0) score += Math.min(SCORE.votesMax, Math.log10(row.votes));
     if (hintRow && row.tconst === hintRow.tconst) score += hintBonus;
-    return { tconst: row.tconst, score, exact, yearConflict: yearsConflict(year, row.year) };
+    return { tconst: row.tconst, score, exact, yearConflict: yearsConflict(year, row.year) || afterEdition(row.year, editionYear) };
   });
 
   scored.sort((a, b) => b.score - a.score || a.tconst.localeCompare(b.tconst));
