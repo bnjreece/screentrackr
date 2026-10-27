@@ -230,17 +230,21 @@ export function mapJellyfinItems(items: readonly unknown[], opts: JellyfinMapOpt
   // not when any of them was watched.
   // An item is in a bulk group when 5 or more played items, it among them,
   // fall within one 60 s span (latest minus earliest).
-  const dated = pending.filter((p) => p.playedAt !== null).sort((a, b) => (a.playedAt as number) - (b.playedAt as number));
+  // Every played item counts toward a group, including ones --strict-played
+  // leaves without a status; only watched records then take a date.
+  const dated = pending.filter((p) => p.played && p.lastPlayed !== null).sort((a, b) => (a.lastPlayed as number) - (b.lastPlayed as number));
   const inBulk = new Set<Pending>();
   for (let i = 0, j = 0; i < dated.length; i++) {
     j = Math.max(j, i);
-    while (j < dated.length && (dated[j]?.playedAt as number) - (dated[i]?.playedAt as number) <= BULK_WINDOW_MS) j++;
+    while (j < dated.length && (dated[j]?.lastPlayed as number) - (dated[i]?.lastPlayed as number) <= BULK_WINDOW_MS) j++;
     if (j - i >= BULK_MIN_ITEMS) for (let k = i; k < j; k++) inBulk.add(dated[k] as Pending);
   }
-  for (const p of dated) {
-    if (!inBulk.has(p)) p.record.watchedAt = localDate(p.playedAt as number);
+  let bulk = 0;
+  for (const p of pending) {
+    if (p.playedAt === null) continue;
+    if (inBulk.has(p)) bulk++;
+    else p.record.watchedAt = localDate(p.playedAt);
   }
-  const bulk = inBulk.size;
 
   const records = pickVersions(pending);
   if (records.length < pending.length) {
@@ -258,7 +262,7 @@ export function mapJellyfinItems(items: readonly unknown[], opts: JellyfinMapOpt
   if (unwatched) notices.push(`${unwatched} movies are not played on the server: a movie you don't have yet goes in the queue, and a movie you have keeps its status.`);
   if (rounded) warnings.push(`${rounded} ratings were not whole numbers and were rounded.`);
   if (thumbs) warnings.push(`${thumbs} ratings are exactly 10 or 1, which is usually a thumbs up or down in Jellyfin rather than a score.`);
-  if (outOfRange) warnings.push(`${outOfRange} ratings below 1 were left out.`);
+  if (outOfRange) warnings.push(`${outOfRange} ratings outside 1 to 10 were left out.`);
 
   const skippedByType = Object.fromEntries(skipped);
   const total = [...skipped.values()].reduce((a, b) => a + b, 0);
@@ -423,6 +427,14 @@ export async function readJellyfinItems(o: JellyfinReadOptions): Promise<Jellyfi
   let userId: string;
   let userName: string;
 
+  const LOGOUT_FAILED = 'Could not sign out of the Jellyfin session; sign it out from the Jellyfin dashboard (Devices) or let the server expire it.';
+  const logout = async (): Promise<boolean> =>
+    !loggedIn ||
+    (await client.request('POST', '/Sessions/Logout').then(
+      (res) => res.ok,
+      () => false,
+    ));
+
   if ('token' in o.auth) {
     const token = o.auth.token.trim();
     if (!token) throw new ImportError('The Jellyfin token is empty.');
@@ -433,22 +445,17 @@ export async function readJellyfinItems(o: JellyfinReadOptions): Promise<Jellyfi
     const res = await client.json('POST', '/Users/AuthenticateByName', undefined, { Username: o.auth.userName, Pw: o.auth.password });
     const token = isObject(res) && typeof res.AccessToken === 'string' ? res.AccessToken : null;
     const user = isObject(res) && isObject(res.User) ? res.User : null;
-    if (!token || !HEADER_SAFE.test(token) || !user || typeof user.Id !== 'string') {
-      throw new ImportError(`The Jellyfin server at ${shown(base)} did not return a session for that user.`);
-    }
+    const noSession = `The Jellyfin server at ${shown(base)} did not return a session for that user.`;
+    if (!token || !HEADER_SAFE.test(token)) throw new ImportError(noSession);
     client.setToken(token);
     loggedIn = true;
+    if (!user || typeof user.Id !== 'string') {
+      throw new ImportError((await logout()) ? noSession : `${noSession} ${LOGOUT_FAILED}`);
+    }
     userId = user.Id;
     userName = typeof user.Name === 'string' ? user.Name : o.auth.userName;
   }
 
-  const LOGOUT_FAILED = 'Could not sign out of the Jellyfin session; sign it out from the Jellyfin dashboard (Devices) or let the server expire it.';
-  const logout = async (): Promise<boolean> =>
-    !loggedIn ||
-    (await client.request('POST', '/Sessions/Logout').then(
-      (res) => res.ok,
-      () => false,
-    ));
   let items: unknown[];
   try {
     items = await readAll(client, base, userId, o.pageSize ?? 200);

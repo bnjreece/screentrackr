@@ -118,6 +118,15 @@ describe('mapJellyfinItems', () => {
     expect(mapJellyfinItems(spread).records.every((r) => typeof r.watchedAt === 'string')).toBe(true);
   });
 
+  it('counts a played movie of unknown runtime toward a bulk group even under --strict-played', () => {
+    const at = '2025-06-01T12:00:00Z';
+    const five = [0, 1, 2, 3].map((i) => movie({ Name: `Bulk ${i}` }, { Played: true, LastPlayedDate: at }));
+    five.push(movie({ Name: 'No Runtime', RunTimeTicks: null }, { Played: true, LastPlayedDate: at }));
+    const res = mapJellyfinItems(five, { strictPlayed: true });
+    expect(res.records.filter((r) => r.status === 'watched')).toHaveLength(4);
+    expect(res.records.some((r) => r.watchedAt !== undefined)).toBe(false);
+  });
+
   it('brings ratings in only with ratings: rounded, thumbs warned, 0 and out of range left out', () => {
     const items = [
       movie({ Name: 'Thumb' }, { Rating: 10, Likes: true }),
@@ -125,14 +134,15 @@ describe('mapJellyfinItems', () => {
       movie({ Name: 'Zero' }, { Rating: 0 }),
       movie({ Name: 'Tiny' }, { Rating: 0.4 }),
       movie({ Name: 'None' }, { Rating: null }),
+      movie({ Name: 'Huge' }, { Rating: 11 }),
     ];
     expect(mapJellyfinItems(items).records.some((r) => 'myRating' in r)).toBe(false);
     const res = mapJellyfinItems(items, { ratings: true });
-    expect(res.records.map((r) => r.myRating)).toEqual([10, 8, undefined, undefined, undefined]);
+    expect(res.records.map((r) => r.myRating)).toEqual([10, 8, undefined, undefined, undefined, undefined]);
     const w = res.warnings.join('\n');
     expect(w).toMatch(/1 ratings were not whole numbers/);
     expect(w).toMatch(/1 ratings are exactly 10 or 1/);
-    expect(w).toMatch(/1 ratings below 1/);
+    expect(w).toMatch(/2 ratings outside 1 to 10/);
     // A rating alone is not watched.
     expect(res.records[1]).not.toHaveProperty('status');
   });
@@ -321,6 +331,15 @@ describe('readJellyfinItems', () => {
       'POST /Sessions/Logout': () => jsonRes({}, 500),
     });
     expect((await readJellyfinItems(opts(server.fetch))).warnings.join('\n')).toMatch(/Could not sign out/);
+  });
+
+  it('signs out a session whose login reply has no user, and reads nothing', async () => {
+    const server = fakeServer({
+      'POST /Users/AuthenticateByName': () => jsonRes({ AccessToken: SESSION, User: {} }),
+      'POST /Sessions/Logout': () => new Response(null, { status: 204 }),
+    });
+    await expect(readJellyfinItems(opts(server.fetch))).rejects.toThrow(/did not return a session/);
+    expect(server.calls.map((c) => c.url.pathname)).toEqual(['/media/Users/AuthenticateByName', '/media/Sessions/Logout']);
   });
 
   it('accepts an empty password (an account without one)', async () => {
