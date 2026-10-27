@@ -289,6 +289,28 @@ describe('reading the server', () => {
     expect(res.complete).toBe(false);
   });
 
+  it('refuses a library list shorter than its own size', async () => {
+    const { fetch } = fakeFetch({ sections: SECTIONS.slice(0, 1), movies: { '3': [film('a')] } });
+    const short = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === '/library/sections/all') {
+        return new Response(JSON.stringify({ MediaContainer: { size: 2, Directory: SECTIONS.slice(0, 1) } }), { headers: { 'content-type': 'application/json' } });
+      }
+      return fetch(input, init);
+    }) as typeof fetch;
+    await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: short })).rejects.toThrow(/2 libraries but listed 1/);
+  });
+
+  it('does not trust a read holding movies without a ratingKey', async () => {
+    const bare = { ...film('a'), ratingKey: undefined };
+    const { fetch } = scripted([
+      { body: { MediaContainer: { size: 1, totalSize: 2, Metadata: [bare] } } },
+      { body: { MediaContainer: { size: 1, totalSize: 2, Metadata: [bare] } } },
+    ]);
+    const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch, pageSize: 1 });
+    expect(res.complete).toBe(false);
+    expect(res.warnings.join('\n')).toMatch(/without a Plex id/);
+  });
+
   it('trusts an empty page only when it says size 0', async () => {
     const first = { body: { MediaContainer: { size: 1, Metadata: [film('a')] } } };
     const claims = scripted([first, { body: { MediaContainer: { size: 200 } } }]);
@@ -629,19 +651,42 @@ describe('mapping Plex movies', () => {
       { ...glassHarbor2009, ratingKey: 'd2', Director: [{ tag: 'Selma Ruiz' }], viewCount: 0, userRating: undefined },
       { ...glassHarbor2009, ratingKey: 'd3', Director: undefined },
     ]);
+    // The row without directors fits both films, so nothing folds.
     expect(res.records.map((r) => [r.sourceDirector, r.status ?? null])).toEqual([
       ['Teodor Brask', 'watched'],
       ['Selma Ruiz', null],
+      [null, 'watched'],
     ]);
+  });
+
+  it('does not let listing order decide where an ambiguous row folds', () => {
+    const a = { ...glassHarbor2009, ratingKey: 'p1', viewCount: 0, userRating: undefined };
+    const b = { ...glassHarbor2009, ratingKey: 'p2', Director: [{ tag: 'Selma Ruiz' }], viewCount: 0, userRating: undefined };
+    const sparse = { ...glassHarbor2009, ratingKey: 'p3', Director: undefined, viewCount: 1, userRating: 9 };
+    for (const order of [[a, b, sparse], [sparse, a, b], [b, sparse, a]]) {
+      const res = map(order);
+      expect(res.records).toHaveLength(3);
+      const rated = res.records.filter((r) => r.myRating === 9);
+      expect(rated.map((r) => r.sourceDirector ?? null)).toEqual([null]);
+    }
+    // Runtimes that chain (100, 102, 104) do not fold either.
+    const chain = map([100, 102, 104].map((m, i) => ({ ...glassHarbor2009, ratingKey: `r${i}`, duration: m * 60000 })));
+    expect(chain.records).toHaveLength(3);
   });
 
   it('folds by every year in a group, not only the first', () => {
     const res = map([
       { ...glassHarbor2009, year: 2000 },
+      { ...glassHarbor2009, ratingKey: 'y1', year: 2001 },
+    ]);
+    expect(res.records.map((r) => r.sourceYear)).toEqual([2000]);
+    // 1999 and 2001 each fit 2000 but not each other: no group, nothing folds.
+    const spread = map([
+      { ...glassHarbor2009, year: 2000 },
       { ...glassHarbor2009, ratingKey: 'y1', year: 1999 },
       { ...glassHarbor2009, ratingKey: 'y2', year: 2001 },
     ]);
-    expect(res.records.map((r) => r.sourceYear)).toEqual([2000, 2001]);
+    expect(spread.records.map((r) => r.sourceYear)).toEqual([2000, 1999, 2001]);
   });
 
   it('counts a movie in several libraries once when looking for a bulk-marked day', () => {
@@ -660,6 +705,12 @@ describe('mapping Plex movies', () => {
 });
 
 describe('a saved listing (--from-file)', () => {
+  it('does not count saved movies without a ratingKey toward the total', () => {
+    const bare = { ...lanternSeason, ratingKey: undefined };
+    const page = { MediaContainer: { librarySectionID: 3, totalSize: 2, size: 1, Metadata: [bare] } };
+    expect(parsePlexDump(JSON.stringify([page, page])).complete).toBe(false);
+  });
+
   it('reads one container, an array of containers, or a bare list', () => {
     const one = JSON.stringify({ MediaContainer: { size: 1, Metadata: [glassHarbor2009] } });
     const many = JSON.stringify([{ MediaContainer: { Metadata: [glassHarbor2009] } }, { MediaContainer: { Metadata: [lanternSeason] } }]);

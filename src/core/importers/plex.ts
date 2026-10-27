@@ -243,32 +243,38 @@ export function mapPlexItems(items: PlexMetadata[], opts: PlexMapOptions = {}): 
   // title first, then the year field; within one of every year in the group),
   // the runtime (within 3 minutes of every runtime in the group) and the
   // directors (no clear conflict with any in the group). A missing year or
-  // runtime only folds with another missing one.
+  // runtime only folds with another missing one. Rows that could join more
+  // than one group (a row without directors next to two films with
+  // different directors, or runtimes that chain) are not folded at all, so
+  // the result never depends on the order Plex listed them in.
   const groupOf = new Map<ImportRecord, string>();
-  const groups = new Map<string, { years: (number | null)[]; runtimes: (number | null)[]; directors: (string | null)[] }[]>();
   const close = (a: number | null, b: number | null, tol: number) => (a === null || b === null ? a === b : Math.abs(a - b) <= tol);
+  const byBase = new Map<string, { rec: ImportRecord; year: number | null; runtime: number | null; director: string | null }[]>();
   for (const o of out) {
     if (!o.rec.imdbIdHint) continue;
     const t = o.rec.sourceTitle;
     const base = `imdb:${o.rec.imdbIdHint}|${o.edition}|${titleEditionTag(t)}|${normalizeTitle(t)}`;
-    const year = titleSuffixYear(t) ?? o.rec.sourceYear ?? null;
-    const director = o.rec.sourceDirector ?? null;
-    const list = groups.get(base) ?? [];
-    let idx = list.findIndex(
-      (g) =>
-        g.years.every((y) => close(y, year, 1)) &&
-        g.runtimes.every((rt) => close(rt, o.runtime, 3)) &&
-        g.directors.every((d) => !directorsConflict(d, director)),
-    );
-    if (idx < 0) {
-      list.push({ years: [], runtimes: [], directors: [] });
-      idx = list.length - 1;
+    const list = byBase.get(base) ?? [];
+    list.push({ rec: o.rec, year: titleSuffixYear(t) ?? o.rec.sourceYear ?? null, runtime: o.runtime, director: o.rec.sourceDirector ?? null });
+    byBase.set(base, list);
+  }
+  for (const [base, rows] of byBase) {
+    const fits = (a: (typeof rows)[number], b: (typeof rows)[number]) =>
+      close(a.year, b.year, 1) && close(a.runtime, b.runtime, 3) && !directorsConflict(a.director, b.director);
+    // Connected parts of the "fits" graph; a part folds only when every pair
+    // in it fits (so no row has a choice of groups).
+    const part = rows.map((_, i) => i);
+    const find = (i: number): number => (part[i] === i ? i : (part[i] = find(part[i] as number)));
+    for (let i = 0; i < rows.length; i++) {
+      for (let j = i + 1; j < rows.length; j++) if (fits(rows[i]!, rows[j]!)) part[find(j)] = find(i);
     }
-    list[idx]?.years.push(year);
-    list[idx]?.runtimes.push(o.runtime);
-    list[idx]?.directors.push(director);
-    groups.set(base, list);
-    groupOf.set(o.rec, `${base}#${idx}`);
+    const members = new Map<number, number[]>();
+    rows.forEach((_, i) => members.set(find(i), [...(members.get(find(i)) ?? []), i]));
+    for (const [root, idx] of members) {
+      if (idx.length < 2) continue;
+      const clique = idx.every((i) => idx.every((j) => i === j || fits(rows[i]!, rows[j]!)));
+      if (clique) for (const i of idx) groupOf.set(rows[i]!.rec, `${base}#${root}`);
+    }
   }
   const records = foldRecords(
     out.map((o) => o.rec),
@@ -331,7 +337,13 @@ export function parsePlexDump(text: string): PlexDump {
       if (total === null) complete = false;
       else totals.set(key, Math.max(totals.get(key) ?? 0, total));
       const keys = seen.get(key) ?? new Set<string>();
-      (mc.Metadata as PlexMetadata[]).forEach((m, j) => keys.add(cleanText(m?.ratingKey) ?? `${i}:${j}`));
+      // A movie without a ratingKey can't be told from a repeat of itself, so
+      // it can't count toward the total.
+      (mc.Metadata as PlexMetadata[]).forEach((m) => {
+        const rk = cleanText(m?.ratingKey);
+        if (rk === null) complete = false;
+        else keys.add(rk);
+      });
       seen.set(key, keys);
     });
     for (const [key, total] of totals) if ((seen.get(key)?.size ?? 0) < total) complete = false;
@@ -447,6 +459,13 @@ const container = (body: unknown): Record<string, unknown> => {
 async function listSections(client: PlexClient, opts: PlexReadOptions, notices: string[]): Promise<PlexSection[]> {
   const { body } = await client.get('/library/sections/all');
   const dirs = container(body).Directory;
+  if (dirs !== undefined && !Array.isArray(dirs)) throw new ImportError('The Plex server answered with an unreadable list of libraries; stopped without importing');
+  // A list shorter than its own size left libraries out, and their movies
+  // would look deleted to --replace.
+  const listed = num(container(body).size);
+  if (listed !== null && listed !== (Array.isArray(dirs) ? dirs.length : 0)) {
+    throw new ImportError(`The Plex server said it has ${listed} libraries but listed ${Array.isArray(dirs) ? dirs.length : 0}; stopped without importing`);
+  }
   const all = (Array.isArray(dirs) ? dirs : []).map((d) => {
     const x = d as Record<string, unknown>;
     return { key: cleanText(x.key) ?? '', title: cleanText(x.title) ?? '', type: cleanText(x.type), agent: cleanText(x.agent) };
@@ -486,6 +505,9 @@ async function listMovies(
   let start = 0;
   let total: number | null = null;
   let irregular = false;
+  // A movie without a ratingKey can't be told from a repeat of itself, so a
+  // read holding one can't show it is whole.
+  let unkeyed = false;
   for (let page = 0; ; page++) {
     if (page >= MAX_PAGES) throw new ImportError(`"${section.title}" kept returning new pages after ${MAX_PAGES} requests; stopped without importing`);
     const { body, headers } = await client.get(
@@ -524,7 +546,7 @@ async function listMovies(
       if (key !== null) {
         if (seen.has(key)) continue;
         seen.add(key);
-      }
+      } else unkeyed = true;
       out.push(m);
       fresh++;
     }
@@ -537,9 +559,11 @@ async function listMovies(
     // with no total at all, when it ended on an empty page after pages that
     // neither overlapped nor started somewhere other than asked.
     const done = (endedEmpty: boolean): { movies: PlexMetadata[]; complete: boolean } => {
-      if (total !== null ? out.length >= total : endedEmpty && !irregular) return { movies: out, complete: true };
+      if (!unkeyed && (total !== null ? out.length >= total : endedEmpty && !irregular)) return { movies: out, complete: true };
       warnings.push(
-        total !== null
+        unkeyed
+          ? `"${section.title}" listed movies without a Plex id, so the list can't be checked for repeats and may be incomplete`
+          : total !== null
           ? `"${section.title}" returned fewer movies than it reported (${out.length} of ${total})`
           : `"${section.title}" paged irregularly without saying how many movies it has, so the list may be incomplete`,
       );
