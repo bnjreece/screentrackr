@@ -184,6 +184,9 @@ export const importCmd: Command = {
     const format = str(values, 'format');
     const timeout = str(values, 'timeout');
     const appleTv = file === 'apple-tv';
+    // A server's state is not a whole library: unplayed movies would replace
+    // watched ones and ratings left out would be cleared.
+    if (jellyfin && bool(values, 'replace')) throw new UserError('--replace does not apply to `import jellyfin`; it always merges. Nothing was changed.');
     if ((appleTv || imdb || jellyfin) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
     if (!appleTv && !jellyfin && timeout !== undefined) throw new UserError('--timeout only applies to `import apple-tv` and `import jellyfin`');
     if (format !== undefined && !(FORMATS as readonly string[]).includes(format)) {
@@ -246,9 +249,6 @@ export const importCmd: Command = {
     // An empty IMDb export (only a header) is "no rows", never "delete everything".
     if (parsed.format === 'imdb' && replace && parsed.records.length === 0) {
       throw new UserError('Nothing to import from the IMDb file, so --replace would empty your library. Nothing was changed.');
-    }
-    if (parsed.format === 'jellyfin' && replace && parsed.records.length === 0) {
-      throw new UserError('No movies came back from the Jellyfin server, so --replace would empty your library. Nothing was changed.');
     }
 
     const db = ctx.db();

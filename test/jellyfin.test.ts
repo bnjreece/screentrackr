@@ -109,6 +109,12 @@ describe('mapJellyfinItems', () => {
     expect(res.records.slice(0, 5).every((r) => r.status === 'watched' && r.watchedAt === undefined)).toBe(true);
     expect(res.records[5]).toMatchObject({ watchedAt: localDate('2025-06-03T12:00:00Z') });
     expect(res.notices.join('\n')).toMatch(/watched date of 5 movies/);
+    // A whole library marked at once is found quickly, every item once.
+    const many = Array.from({ length: 20_000 }, (_, i) => movie({ Name: `Many ${i}` }, { Played: true, LastPlayedDate: at(0) }));
+    const t0 = Date.now();
+    const big = mapJellyfinItems(many);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(big.notices.join('\n')).toMatch(/watched date of 20000 movies/);
     const four = mapJellyfinItems(five.slice(0, 4)).records;
     expect(four.every((r) => typeof r.watchedAt === 'string')).toBe(true);
     // Five spread over two minutes are never 5 within one minute.
@@ -650,9 +656,14 @@ describe('import jellyfin (command)', () => {
     }
   });
 
-  it('refuses --replace when the server sent no movies', async () => {
-    vi.stubGlobal('fetch', fakeServer({ 'GET /Items': () => jsonRes({ Items: [], TotalRecordCount: 0 }) }).fetch);
+  it('refuses --replace before any request, so a watched movie or a rating is never lost', async () => {
+    const db = ctx.db();
+    applyImport(db, [{ sourceTitle: 'Quiet Ledger', sourceYear: 1999, status: 'watched', myRating: 9, source: 'paste' }], { mode: 'merge' });
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
     vi.stubEnv('JELLYFIN_TOKEN', TOKEN);
-    await expect(run({ url: SERVER, 'user-id': USER_ID, replace: true })).rejects.toThrow(/--replace would empty your library/);
+    await expect(run({ url: SERVER, 'user-id': USER_ID, replace: true })).rejects.toThrow(/--replace does not apply/);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(db.sql.prepare('SELECT status, my_rating FROM library_items').all()).toEqual([{ status: 'watched', my_rating: 9 }]);
   });
 });

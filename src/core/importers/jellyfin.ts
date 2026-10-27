@@ -234,10 +234,13 @@ export function mapJellyfinItems(items: readonly unknown[], opts: JellyfinMapOpt
   // leaves without a status; only watched records then take a date.
   const dated = pending.filter((p) => p.played && p.lastPlayed !== null).sort((a, b) => (a.lastPlayed as number) - (b.lastPlayed as number));
   const inBulk = new Set<Pending>();
-  for (let i = 0, j = 0; i < dated.length; i++) {
+  for (let i = 0, j = 0, marked = 0; i < dated.length; i++) {
     j = Math.max(j, i);
     while (j < dated.length && (dated[j]?.lastPlayed as number) - (dated[i]?.lastPlayed as number) <= BULK_WINDOW_MS) j++;
-    if (j - i >= BULK_MIN_ITEMS) for (let k = i; k < j; k++) inBulk.add(dated[k] as Pending);
+    if (j - i < BULK_MIN_ITEMS) continue;
+    // Each item is added once: windows overlap, so start where the last one ended.
+    for (let k = Math.max(i, marked); k < j; k++) inBulk.add(dated[k] as Pending);
+    marked = j;
   }
   let bulk = 0;
   for (const p of pending) {
