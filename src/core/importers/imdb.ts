@@ -12,9 +12,11 @@
  *   columns, then Your Rating and Date Rated.
  *
  * Rules (each one keeps an IMDb import from damaging a library it merges into):
- * - The Const is an exact `imdbIdHint` (`imdbIdExact`): the catalog's title
- *   when the catalog has it, otherwise an unmatched item that keeps the id,
- *   never another title found by name. It is never a JSON v1 style link.
+ * - The Const is an exact `imdbIdHint` (`imdbIdExact`), stored as the item's
+ *   `imdb` external id so later matching (`setup`, `match`, a JSON v1
+ *   restore) keeps to it: the catalog's title when the catalog has it,
+ *   otherwise an unmatched item that keeps the id, never another title found
+ *   by name. It is never a JSON v1 style link.
  * - Only Movie rows (plus TV Movie, or other types, when asked) come in; the
  *   rest are counted by type and skipped.
  * - A rating means watched, with that rating. Date Rated is not a watch date.
@@ -26,7 +28,8 @@
  * - Runtime (mins) depends on the account's location, and a runtime more than
  *   3 minutes off the catalog can refute a correct Const or rule out the
  *   owner's own item, so it is never read. Neither are IMDb Rating, Num
- *   Votes, Release Date, URL or the list Description.
+ *   Votes, Release Date or URL, and the list Description only becomes notes
+ *   when asked (`notesFromDescription`).
  * - Rows for one Const, across every file of one import, fold into one record.
  */
 import { cleanText, cleanTconst, cleanYear, foldRecords, ImportError, type ImportRecord, type ParsedImport } from './common.js';
@@ -49,6 +52,8 @@ export interface ImdbOptions {
   includeTypes?: readonly ImdbIncludeType[];
   /** With `as: 'checkins'`: use each check-in's Created date as the watched date. */
   checkinDates?: boolean;
+  /** List exports: use a row's Description (your note on it) as the movie's notes (fills blank notes only). */
+  notesFromDescription?: boolean;
 }
 
 export interface ImdbFile {
@@ -210,7 +215,8 @@ function parseFile(file: ImdbFile, opts: ImdbOptions, out: { records: ImportReco
 
   let order: DateOrder = 'same';
   if (kind === 'checkins' && opts.checkinDates) {
-    order = slashOrder(body.map((c) => at(c, 'created') ?? ''));
+    // One file has one date order, so any date column can decide it.
+    order = slashOrder(body.flatMap((c) => ['created', 'modified', 'date rated', 'release date'].map((name) => at(c, name) ?? '')));
     if (order === null && body.some((c) => SLASH_DATE.test((at(c, 'created') ?? '').trim()))) {
       out.warnings.push(`${file.name}: could not tell whether its dates are day-first or month-first, so they were left out`);
     }
@@ -251,7 +257,15 @@ function parseFile(file: ImdbFile, opts: ImdbOptions, out: { records: ImportReco
       return;
     }
 
-    const rec: ImportRecord = { sourceTitle, imdbIdHint: tconst, imdbIdExact: true, source: 'imdb', ownedIfNew: false, fillOnly: true };
+    const rec: ImportRecord = {
+      sourceTitle,
+      imdbIdHint: tconst,
+      imdbIdExact: true,
+      externalIds: { imdb: tconst },
+      source: 'imdb',
+      ownedIfNew: false,
+      fillOnly: true,
+    };
     const year = cleanYear(at(cells, 'year'));
     if (year !== null) rec.sourceYear = year;
     const directors = (at(cells, 'directors') ?? '')
@@ -276,6 +290,10 @@ function parseFile(file: ImdbFile, opts: ImdbOptions, out: { records: ImportReco
       }
     }
     if (kind === 'list' && opts.collection?.trim()) rec.collection = opts.collection.trim();
+    if (opts.notesFromDescription) {
+      const note = cleanText(at(cells, 'description'));
+      if (note) rec.notes = note;
+    }
     out.records.push(rec);
   });
 }

@@ -562,6 +562,22 @@ describe('merging a Jellyfin import', () => {
     expect(items().map((i) => [i.sourceRuntimeMin, i.status])).toEqual([[120, 'watched']]);
   });
 
+  it('records jellyfin as the date source, and a later bulk "mark played" never clears that date', () => {
+    const real = '2024-03-02T20:00:00Z';
+    applyImport(db, mapJellyfinItems([movie({ ProviderIds: { Imdb: 'tt9000004' } }, { Played: true, LastPlayedDate: real })]).records, { mode: 'merge' });
+    const source = () => db.sql.prepare('SELECT watched_at, watched_at_source FROM library_items').all();
+    expect(source()).toEqual([{ watched_at: localDate(real), watched_at_source: 'jellyfin' }]);
+    // The owner marks it and four others played in one click.
+    const click = '2025-06-01T10:00:00Z';
+    const bulk = mapJellyfinItems([
+      movie({ ProviderIds: { Imdb: 'tt9000004' } }, { Played: true, LastPlayedDate: click }),
+      ...[1, 2, 3, 4].map((i) => movie({ Name: `Other ${i}`, ProductionYear: 2001 + i }, { Played: true, LastPlayedDate: click })),
+    ]).records;
+    expect(bulk.every((r) => r.watchedAt === undefined && r.clearWatchedAtIfOwn === undefined)).toBe(true);
+    applyImport(db, bulk, { mode: 'merge' });
+    expect(source()[0]).toEqual({ watched_at: localDate(real), watched_at_source: 'jellyfin' });
+  });
+
   it('with two unplayed versions, the last played one stands for the film and adds no duplicate', () => {
     applyImport(db, [{ sourceTitle: 'Seven Lanterns', sourceYear: 1995, sourceRuntimeMin: 120, status: 'priority', source: 'paste' }], { mode: 'merge' });
     const records = mapJellyfinItems([

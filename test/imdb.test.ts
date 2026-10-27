@@ -3,7 +3,7 @@
  * check-ins, custom lists). Every title, person and id in the fixtures is
  * invented; none of it comes from a real export.
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -11,7 +11,9 @@ import { buildCatalog } from '../src/core/catalog/build.js';
 import { openDb, type Db } from '../src/core/db.js';
 import { decodeImdbFile, parseImdb, type ImdbOptions } from '../src/core/importers/imdb.js';
 import { applyImport, detectFormat, ImportError, parseImportDetailed, type ImportRecord } from '../src/core/importers/index.js';
-import { LIBRARY_COLUMNS, rowToItem, type LibraryRow } from '../src/core/library.js';
+import { exportLibrary } from '../src/core/export.js';
+import { LIBRARY_COLUMNS, linkItem, rowToItem, type LibraryRow } from '../src/core/library.js';
+import { rematch } from '../src/core/match.js';
 import type { LibraryItem } from '../src/core/types.js';
 
 const IMDB = join(import.meta.dirname, 'fixtures', 'imdb');
@@ -79,6 +81,7 @@ describe('parsing the ratings export', () => {
       sourceGenre: 'Drama, Mystery',
       imdbIdHint: 'tt9000001',
       imdbIdExact: true,
+      externalIds: { imdb: 'tt9000001' },
       status: 'watched',
       myRating: 8,
       source: 'imdb',
@@ -190,6 +193,14 @@ describe('files saved again in a spreadsheet', () => {
     expect(res.records[1]).toMatchObject({ status: 'watched', myRating: 7 });
   });
 
+  it('lets any date column of the file decide the order of an ambiguous check-in date', () => {
+    const text = `${LIST_HEADER}\n1,tt9000004,03/04/2025,13/04/2025,,"Seven Lanterns","Seven Lanterns",u,Movie,8.4,117,1995,"Crime",1,1995,"Dana Fincher",,\n`;
+    const res = parse([{ name: 'l.csv', text }], { as: 'checkins', checkinDates: true });
+    expect(res.records[0]?.watchedAt).toBe('2025-04-03');
+    const rated = `${LIST_HEADER}\n1,tt9000004,03/04/2025,03/04/2025,,"Seven Lanterns","Seven Lanterns",u,Movie,8.4,117,1995,"Crime",1,1995,"Dana Fincher",8,04/25/2025\n`;
+    expect(parse([{ name: 'l.csv', text: rated }], { as: 'checkins', checkinDates: true }).records[0]?.watchedAt).toBe('2025-03-04');
+  });
+
   it('drops dates it cannot read as day-first or month-first, with a warning', () => {
     const text = `${LIST_HEADER}\n1,tt9000004,03/04/2025,03/04/2025,,"Seven Lanterns","Seven Lanterns",u,Movie,8.4,117,1995,"Crime",1,1995,"Dana Fincher",,\n`;
     const res = parse([{ name: 'l.csv', text }], { as: 'checkins', checkinDates: true });
@@ -295,6 +306,169 @@ describe('importing into the library', () => {
     expect(importFiles([{ name: 'f.csv', text: feature }])).toMatchObject({ added: 1 });
     expect(byConst('tt9000010')).toHaveLength(1);
     expect(items()).toHaveLength(2);
+  });
+
+  it('the Const stays the item\'s identity through setup, match and a JSON v1 restore', () => {
+    // A short missing from the catalog with the same title, year and director as a feature in it.
+    const text = `${RATINGS_HEADER}\ntt9400002,7,2024-01-01,"Night Ferry","Night Ferry",u,Short,6.0,12,2002,"Short",10,"2002","Dana Fincher"\n`;
+    importFiles([{ name: 'r.csv', text }], { includeTypes: ['short'] });
+    const short = { sourceTitle: 'Night Ferry', tconst: 'tt9400002', matchStatus: 'unmatched', matchScore: null };
+    expect(items()).toMatchObject([short]);
+    expect(db.sql.prepare('SELECT kind, value FROM item_external_ids').all()).toEqual([{ kind: 'imdb', value: 'tt9400002' }]);
+    for (const onlyUnresolved of [true, false]) {
+      rematch(db, { onlyUnresolved });
+      expect(items()).toMatchObject([short]);
+    }
+    const exported = exportLibrary(db);
+    expect(exported.items[0]?.externalIds).toEqual({ imdb: 'tt9400002' });
+    applyImport(db, parseImportDetailed(JSON.stringify(exported)).records, { mode: 'replace' });
+    expect(items()).toMatchObject([short]);
+    rematch(db);
+    expect(items()).toMatchObject([short]);
+    // A Const the catalog has is linked by rematch as well, never swapped for a rival.
+    db.sql.exec('DELETE FROM library_items');
+    importFiles([file('ratings.csv')]);
+    rematch(db);
+    expect(byConst('tt9000001')[0]).toMatchObject({ matchStatus: 'matched', matchScore: 100 });
+  });
+
+  it('an exact IMDb id never lands on an item hand-linked to another title', () => {
+    applyImport(db, [{ sourceTitle: 'Night Ferry', sourceYear: 2002, source: 'paste' }], { mode: 'merge' });
+    const id = items()[0]?.id as number;
+    linkItem(db, id, 'tt9000010');
+    const text = `${RATINGS_HEADER}\ntt9400002,7,2024-01-01,"Night Ferry","Night Ferry",u,Short,6.0,12,2002,"Short",10,"2002","Dana Fincher"\n`;
+    importFiles([{ name: 'r.csv', text }], { includeTypes: ['short'] });
+    expect(db.sql.prepare('SELECT item_id, kind, value FROM item_external_ids WHERE item_id = ?').all(id)).toEqual([]);
+    expect(items().find((i) => i.id === id)).toMatchObject({ tconst: 'tt9000010', matchStatus: 'manual' });
+  });
+
+  it('another format\'s record for a same-named feature never merges into an IMDb short missing from the catalog', () => {
+    const text = `${RATINGS_HEADER}\ntt9400002,7,2024-01-01,"Night Ferry","Night Ferry",u,Short,6.0,12,2002,"Short",10,"2002","Dana Fincher"\n`;
+    importFiles([{ name: 'r.csv', text }], { includeTypes: ['short'] });
+    // A CSV row that matches the feature in the catalog (same title, year and director).
+    const res = applyImport(db, [{ sourceTitle: 'Night Ferry', sourceYear: 2002, sourceDirector: 'Dana Fincher', myRating: 4, owned: true, source: 'csv' }], {
+      mode: 'merge',
+    });
+    expect(res).toMatchObject({ added: 1, updated: 0 });
+    const short = { sourceTitle: 'Night Ferry', tconst: 'tt9400002', matchStatus: 'unmatched', myRating: 7, owned: false };
+    expect(items()).toMatchObject([short, { tconst: 'tt9000010', matchStatus: 'matched', myRating: 4, owned: true }]);
+    rematch(db);
+    expect(items()).toMatchObject([short, { tconst: 'tt9000010', matchStatus: 'matched' }]);
+    applyImport(db, parseImportDetailed(JSON.stringify(exportLibrary(db))).records, { mode: 'replace' });
+    expect(items()).toMatchObject([short, { tconst: 'tt9000010', matchStatus: 'matched', myRating: 4 }]);
+  });
+
+  it('linking an IMDb item by hand to another title drops the old id, so the next import finds it', () => {
+    const short = `${RATINGS_HEADER}\ntt9400002,7,2024-01-01,"Night Ferry","Night Ferry",u,Short,6.0,12,2002,"Short",10,"2002","Dana Fincher"\n`;
+    importFiles([{ name: 'r.csv', text: short }], { includeTypes: ['short'] });
+    const id = items()[0]?.id as number;
+    linkItem(db, id, 'tt9000010');
+    expect(db.sql.prepare('SELECT kind FROM item_external_ids WHERE item_id = ?').all(id)).toEqual([]);
+    const feature = `${RATINGS_HEADER}\ntt9000010,8,2024-02-01,"Night Ferry","Night Ferry",u,Movie,6.8,112,2002,"Drama",10,"2002","Dana Fincher"\n`;
+    expect(importFiles([{ name: 'f.csv', text: feature }])).toMatchObject({ added: 0, updated: 1 });
+    expect(items()).toMatchObject([{ id, tconst: 'tt9000010', matchStatus: 'manual', myRating: 8 }]);
+    expect(db.sql.prepare('SELECT kind, value FROM item_external_ids WHERE item_id = ?').all(id)).toEqual([{ kind: 'imdb', value: 'tt9000010' }]);
+    // The link and the id survive a JSON v1 round trip, and a repeat changes nothing.
+    applyImport(db, parseImportDetailed(JSON.stringify(exportLibrary(db))).records, { mode: 'replace' });
+    expect(items()).toMatchObject([{ tconst: 'tt9000010', matchStatus: 'manual', myRating: 8 }]);
+    expect(importFiles([{ name: 'f.csv', text: feature }])).toMatchObject({ added: 0, updated: 0, unchanged: 1 });
+  });
+
+  it('linking by hand to the same title keeps the id', () => {
+    importFiles([file('ratings.csv')]);
+    const id = byConst('tt9000001')[0]?.id as number;
+    linkItem(db, id, 'tt9000001');
+    expect(db.sql.prepare('SELECT value FROM item_external_ids WHERE item_id = ?').all(id)).toEqual([{ value: 'tt9000001' }]);
+  });
+
+  it('notes come from a list row\'s Description only when asked', () => {
+    importFiles([file('watchlist.csv')], { as: 'watchlist' });
+    expect(byConst('tt9000024')[0]?.notes).toBeNull();
+    db.sql.exec('DELETE FROM library_items');
+    importFiles([file('watchlist.csv')], { as: 'watchlist', notesFromDescription: true });
+    expect(byConst('tt9000024')[0]?.notes).toBe('Watch on the "big" screen\nwith the projector');
+    expect(byConst('tt9000004')[0]?.notes).toBeNull();
+  });
+
+  it('a dry run reports the counts and writes nothing', () => {
+    importFiles([file('ratings.csv')]);
+    const before = JSON.stringify(exportLibrary(db).items);
+    const text = file('ratings.csv').text.replace('tt9000001,8,', 'tt9000001,10,');
+    const records = parse([{ name: 'n.csv', text }, file('watchlist.csv')], { as: 'watchlist' }).records;
+    const res = applyImport(db, records, { mode: 'merge', dryRun: true });
+    expect(res).toMatchObject({ dryRun: true, updated: 1, backupPath: null });
+    expect(res.added).toBeGreaterThan(0);
+    expect(JSON.stringify(exportLibrary(db).items)).toBe(before);
+    const backups = join(tmp, 'home', 'backups');
+    const backupsBefore = readdirSync(backups).length;
+    expect(applyImport(db, records, { mode: 'replace', dryRun: true })).toMatchObject({ dryRun: true, backupPath: null });
+    expect(JSON.stringify(exportLibrary(db).items)).toBe(before);
+    expect(readdirSync(backups)).toHaveLength(backupsBefore);
+    expect(applyImport(db, records, { mode: 'merge' }).dryRun).toBeUndefined();
+  });
+
+  it('an exact IMDb id keeps its link when a record reaches the item another way', async () => {
+    // Before setup: an Apple TV item, then the IMDb row of the short it is.
+    const bare = openDb(join(tmp, `exact-${Date.now()}`));
+    try {
+      const apple: ImportRecord = { sourceTitle: 'Night Ferry', applePersistentId: 'A7', source: 'apple-tv', owned: true };
+      const lb: ImportRecord = { sourceTitle: 'Night Ferry', externalIds: { letterboxd: 'https://boxd.it/x7' }, source: 'letterboxd', fillOnly: true, ownedIfNew: false };
+      applyImport(bare, [apple], { mode: 'merge' });
+      const text = `${RATINGS_HEADER}\ntt9400002,7,2024-01-01,"Night Ferry","Night Ferry",u,Short,6.0,12,2002,"Short",10,"2002","Dana Fincher"\n`;
+      applyImport(bare, parse([{ name: 'r.csv', text }], { includeTypes: ['short'] }).records, { mode: 'merge' });
+      applyImport(bare, [lb], { mode: 'merge' });
+      const all = () => (bare.sql.prepare(`SELECT ${LIBRARY_COLUMNS} FROM library_items ORDER BY id`).all() as unknown as LibraryRow[]).map(rowToItem);
+      const short = { sourceTitle: 'Night Ferry', applePersistentId: 'A7', tconst: 'tt9400002', matchStatus: 'unmatched', myRating: 7 };
+      expect(all()).toMatchObject([short]);
+      expect(bare.sql.prepare('SELECT kind FROM item_external_ids ORDER BY kind').all()).toEqual([{ kind: 'imdb' }, { kind: 'letterboxd' }]);
+      // The catalog has a feature of that title, which these rows alone would match.
+      await buildCatalog(bare, { cacheDir: IMDB });
+      for (const r of [apple, lb, { sourceTitle: 'Night Ferry', source: 'csv' } as ImportRecord]) {
+        applyImport(bare, [r], { mode: 'merge' });
+        expect(all()).toMatchObject([short]);
+      }
+      const exported = exportLibrary(bare);
+      applyImport(bare, parseImportDetailed(JSON.stringify(exported)).records, { mode: 'replace' });
+      expect(all()).toMatchObject([short]);
+    } finally {
+      bare.close();
+    }
+  });
+
+  it('rejects a JSON v1 item whose link and imdb external id name different titles, before writing anything', () => {
+    importFiles([file('ratings.csv')]);
+    const before = JSON.stringify(exportLibrary(db).items);
+    for (const extra of [
+      { tconst: 'tt9000001', matchStatus: 'matched' },
+      { tconst: 'tt9000001', matchStatus: 'manual' },
+      { tconst: 'tt9000001', matchStatus: 'unmatched' },
+    ]) {
+      const text = JSON.stringify({ format: 'screentrackr-library', version: 1, items: [{ sourceTitle: 'Night Ferry', externalIds: { imdb: 'tt9000002' }, ...extra }] });
+      for (const mode of ['merge', 'replace'] as const) {
+        expect(() => applyImport(db, parseImportDetailed(text).records, { mode })).toThrow(/name different titles/);
+      }
+    }
+    expect(JSON.stringify(exportLibrary(db).items)).toBe(before);
+  });
+
+  it('fill-only fields fill a blank string as well as null', () => {
+    applyImport(
+      db,
+      [
+        { sourceTitle: 'Seven Lanterns', sourceYear: 1995, collection: '', status: 'priority', source: 'json' },
+        { sourceTitle: 'Salt & Signal', sourceYear: 2004, notes: '  ', sourceGenre: '', owned: true, source: 'json' },
+      ],
+      { mode: 'merge' },
+    );
+    const ids = items().map((i) => i.id);
+    importFiles([file('watchlist.csv')], { as: 'list', collection: 'Shelf', notesFromDescription: true });
+    const [lanterns, salt] = items().filter((i) => ids.includes(i.id));
+    expect(lanterns).toMatchObject({ collection: 'Shelf', status: 'priority' });
+    expect(salt).toMatchObject({ notes: 'for movie night', sourceGenre: 'Adventure, Comedy', owned: true });
+  });
+
+  it('rejects an imdb external id that is not an IMDb id', () => {
+    expect(() => applyImport(db, [{ sourceTitle: 'X', source: 'json', externalIds: { imdb: 'nope' } }], { mode: 'merge' })).toThrow(/invalid imdb id/);
   });
 
   it('a Const in the catalog is taken as is, even when the export year is further off', () => {

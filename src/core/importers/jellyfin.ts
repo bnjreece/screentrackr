@@ -19,6 +19,10 @@
  * - `watchedAt` is the local date of `LastPlayedDate`, only for played items,
  *   and dropped when 5 or more played items share a timestamp within 60 s
  *   (a bulk "mark played"). It is the last playback, not the first watch.
+ *   A dropped or missing date never clears one: records never set
+ *   `clearWatchedAtIfOwn`. A bulk click overwrites LastPlayedDate on the
+ *   server, so a date an earlier Jellyfin import set is the real last
+ *   playback and is worth more than no date.
  * - Ratings are left out unless asked (`ratings`): then 1 to 10, rounded.
  * - `ProviderIds.Imdb` is a match hint, never a link: an owner can identify a
  *   file as the wrong film. The Jellyfin item id is not stable (moving a

@@ -291,6 +291,8 @@ export function updateItem(db: Db, id: number, patch: ItemPatch): LibraryItem {
       throw new LibraryError(`Invalid watched date "${patch.watchedAt}" (expected YYYY-MM-DD or an ISO date-time)`);
     }
     set('watched_at', v);
+    // A date the user sets (or clears) is theirs: no import may clear it later.
+    set('watched_at_source', null);
   }
 
   if (patch.myRating !== undefined) {
@@ -317,7 +319,10 @@ export function removeItem(db: Db, id: number): void {
 
 /**
  * Link an item to a catalog tconst by hand. The item becomes `manual`, which
- * rematching never overwrites, and its stored candidates are cleared.
+ * rematching never overwrites, and its stored candidates are cleared. An
+ * `imdb` external id naming another title (an IMDb export's id the owner has
+ * just corrected) is dropped, so a later IMDb import of the linked title
+ * finds this item.
  */
 export function linkItem(db: Db, id: number, tconst: string): LibraryItem {
   assertId(id);
@@ -328,6 +333,7 @@ export function linkItem(db: Db, id: number, tconst: string): LibraryItem {
       .prepare(`UPDATE library_items SET tconst = ?, match_status = 'manual', match_score = NULL, updated_at = ${NOW_SQL} WHERE id = ?`)
       .run(tconst, id);
     db.sql.prepare('DELETE FROM match_candidates WHERE item_id = ?').run(id);
+    db.sql.prepare("DELETE FROM item_external_ids WHERE item_id = ? AND kind = 'imdb' AND value <> ?").run(id, tconst);
   });
   return requireItem(db, id);
 }
