@@ -136,8 +136,6 @@ export class SetupJob {
   private error: string | null = null;
   private run: SetupRun | null = null;
   private running: Promise<void> | null = null;
-  private release: (() => void) | null = null;
-  private readonly onExit = () => this.release?.();
 
   constructor(
     readonly home: string,
@@ -155,10 +153,10 @@ export class SetupJob {
    */
   start(options: Omit<SetupInput, 'home'>): SetupJobStatus {
     if (this.state === 'running') throw new Error('Setup is already running.');
+    // Held until the work has ended. If the process exits first, the operating
+    // system drops the lock only once the process (and its worker) is gone;
+    // releasing it from an 'exit' hook would free it while the worker still runs.
     const release = acquireSetupLock(this.home);
-    this.release = release;
-    // If the process exits mid-setup the worker dies with it: drop the lock now.
-    process.once('exit', this.onExit);
 
     this.state = 'running';
     this.options = { ...options };
@@ -195,8 +193,6 @@ export class SetupJob {
         this.run = null;
         this.running = null;
         release();
-        this.release = null;
-        process.off('exit', this.onExit);
       });
     return this.status();
   }

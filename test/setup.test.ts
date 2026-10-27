@@ -239,6 +239,16 @@ describe('SetupJob', () => {
     expect(setupRunning(home)).toBeUndefined();
   });
 
+  it('leaves the lock to the operating system at process exit (no exit hook that frees it early)', async () => {
+    const before = process.listenerCount('exit');
+    const m = manualRunner();
+    const job = new SetupJob(home, m.runner);
+    job.start(FULL);
+    expect(process.listenerCount('exit')).toBe(before);
+    m.resolve(FAKE_RESULT);
+    await job.settled();
+  });
+
   it('stop() ends a running setup and releases the lock', async () => {
     const m = manualRunner();
     const job = new SetupJob(home, m.runner);
