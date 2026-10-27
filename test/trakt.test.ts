@@ -11,7 +11,7 @@ import { buildCatalog } from '../src/core/catalog/build.js';
 import { openDb, type Db } from '../src/core/db.js';
 import { applyImport, detectFormat, ImportError, parseImportDetailed, type ImportRecord } from '../src/core/importers/index.js';
 import { parseTrakt, readTraktExport, traktFileOf, type TraktFile, type TraktOptions } from '../src/core/importers/trakt.js';
-import { LIBRARY_COLUMNS, rowToItem, type LibraryRow } from '../src/core/library.js';
+import { LIBRARY_COLUMNS, rowToItem, updateItem, type LibraryRow } from '../src/core/library.js';
 import type { LibraryItem } from '../src/core/types.js';
 import { listZip } from '../src/core/zip.js';
 import { COMETS, COPPER, DUNE, exportFiles, GLASS, makeZip, SALT, toBytes } from './fixtures/trakt-export.js';
@@ -171,59 +171,9 @@ describe('which files are read', () => {
   });
 });
 
-describe('the ZIP reader', () => {
-  it('rejects something that is not a ZIP, and caps entry sizes', () => {
-    expect(() => listZip(Buffer.from('not a zip at all'))).toThrow(/not a ZIP/i);
-    const big = makeZip({ 'ratings-movies.json': Buffer.alloc(5000, 0x20) });
-    const [entry] = listZip(big);
-    expect(entry?.name).toBe('ratings-movies.json');
-    expect(entry?.read(10_000).length).toBe(5000);
-    expect(() => entry?.read(1000)).toThrow(/too large/i);
-  });
-
-  it('checks a stored entry\'s sizes before copying it', () => {
-    const zip = makeZip({ 'ratings-movies.json': Buffer.alloc(5000, 0x20) }, { store: true });
-    const cd = zip.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
-    zip.writeUInt32LE(10, cd + 24); // claim 10 bytes uncompressed
-    const [entry] = listZip(zip);
-    expect(() => entry?.read(100)).toThrow(/sizes disagree/);
-  });
-
-  it('refuses a directory that declares fewer entries than it holds', () => {
-    const zip = makeZip({ 'ratings-movies.json': Buffer.from('[]'), 'lists-watchlist.json': Buffer.from('[]') });
-    const end = zip.length - 22;
-    zip.writeUInt16LE(1, end + 8);
-    zip.writeUInt16LE(1, end + 10);
-    expect(() => listZip(zip)).toThrow(/damaged/);
-  });
-
-  it('refuses an entry whose local name differs from the directory', () => {
-    const zip = makeZip({ 'ratings-movies.json': Buffer.from('[]') });
-    zip.write('x', 30); // first byte of the local header's name
-    const [entry] = listZip(zip);
-    expect(() => entry?.read(100)).toThrow(/names disagree/);
-  });
-
-  it('refuses a directory that ends before the end record (entries hidden in a gap)', () => {
-    const zip = makeZip({ 'ratings-movies.json': Buffer.from('[]'), '_errors.json': Buffer.from('[{"endpoint":"x"}]') });
-    const end = zip.length - 22;
-    const cdOffset = zip.readUInt32LE(end + 16);
-    const firstLen = 46 + 'ratings-movies.json'.length;
-    zip.writeUInt16LE(1, end + 8);
-    zip.writeUInt16LE(1, end + 10);
-    zip.writeUInt32LE(firstLen, end + 12);
-    expect(cdOffset + firstLen).toBeLessThan(end);
-    expect(() => listZip(zip)).toThrow(/damaged/);
-  });
-
-  it('rejects a corrupted entry', () => {
-    const zip = makeZip({ 'ratings-movies.json': Buffer.from('[1,2,3]') }, { store: true });
-    zip[30 + 'ratings-movies.json'.length] = 0x7b; // change the first data byte
-    const [entry] = listZip(zip);
-    expect(() => entry?.read(1000)).toThrow(/damaged|checksum/i);
-  });
-
-  it('flags entry names that climb out of the archive', () => {
+describe('unsafe ZIP entries', () => {
+  // The ZIP reader itself is tested in zip.test.ts; this checks the importer skips unsafe names.
+  it('skips entry names that climb out of the archive', () => {
     const zip = makeZip({ '../ratings-movies.json': Buffer.from('[]'), '/abs/lists-watchlist.json': Buffer.from('[]') });
     expect(listZip(zip).map((e) => e.unsafe)).toEqual([true, true]);
     expect(() => readTraktExport([((p) => (writeFileSync(p, zip), p))(join(tmp, `evil-${++n}.zip`))])).toThrow(/no Trakt export files/i);
@@ -325,8 +275,10 @@ describe('parsing', () => {
       expect(r.status).toBe('watched');
       expect(r).not.toHaveProperty('watchedAt');
       expect(r).not.toHaveProperty('watchedEra');
+      expect(r.clearWatchedAtIfOwn).toBe(true);
     }
     expect(rec(res.records, 101)).toMatchObject({ watchedAt: '2021-03-03', watchedEra: '2020s' });
+    expect(rec(res.records, 101)).not.toHaveProperty('clearWatchedAtIfOwn');
     expect(res.notices.join('\n')).toMatch(/10 watched movies/);
 
     const kept = parse(files, { keepBulkDates: true });
@@ -582,6 +534,58 @@ describe('detecting a single Trakt file in a plain import', () => {
 });
 
 describe('applying a Trakt import', () => {
+  it('a full export clears dates an earlier partial export gave plays it now shows were logged in bulk', () => {
+    const at = '2019-01-01T00:00:00.000Z';
+    const real = { id: 1, watched_at: '2021-03-03T12:00:00.000Z', action: 'watch', type: 'movie', movie: GLASS };
+    // The partial export: nine plays at one second is not a bulk log, so they keep their dates.
+    const partial = parse({ 'watched-history.json': [...bulkPlays(9, at), real] });
+    expect(partial.bulkDated).toBe(0);
+    applyImport(db, partial.records, { mode: 'merge' });
+    expect(items().filter((i) => i.watchedAt === '2019-01-01')).toHaveLength(9);
+    // One of them got a date you set yourself; a different source set the date of another.
+    const own = byTitle('Bulk Reel 1')[0] as LibraryItem;
+    updateItem(db, own.id, { watchedAt: '2018-06-01' });
+    applyImport(db, [{ sourceTitle: 'Bulk Reel 2', sourceYear: 2001, status: 'watched', watchedAt: '2017-02-02', source: 'letterboxd' }], {
+      mode: 'merge',
+    });
+
+    // The full export has a tenth play at that second: now it is a bulk log.
+    const full = parse({ 'watched-history.json': [...bulkPlays(10, at), real] });
+    expect(full.bulkDated).toBe(10);
+    const summary = applyImport(db, full.records, { mode: 'merge' });
+    expect(summary).toMatchObject({ added: 1 });
+
+    const after = items();
+    expect(after).toHaveLength(11);
+    // Dates and eras Trakt set from the bulk second are gone, as in a fresh import of the full export.
+    for (let i = 3; i <= 10; i++) {
+      expect(byTitle(`Bulk Reel ${i}`)[0]).toMatchObject({ status: 'watched', watchedAt: null, watchedEra: null });
+    }
+    // A date you set and one another source set stay.
+    expect(byTitle('Bulk Reel 1')[0]).toMatchObject({ status: 'watched', watchedAt: '2018-06-01' });
+    expect(byTitle('Bulk Reel 2')[0]).toMatchObject({ status: 'watched', watchedAt: '2017-02-02' });
+    // A real play keeps its date.
+    expect(byTitle('The Glass Harbor')[0]).toMatchObject({ watchedAt: '2021-03-03', watchedEra: '2020s' });
+
+    // Same as importing the full export into an empty library, apart from the two protected dates.
+    const fresh = after.filter((i) => !['Bulk Reel 1', 'Bulk Reel 2'].includes(i.sourceTitle)).map((i) => [i.sourceTitle, i.watchedAt, i.watchedEra])
+      .sort();
+    db.sql.exec('DELETE FROM match_candidates; DELETE FROM item_external_ids; DELETE FROM library_items;');
+    applyImport(db, full.records, { mode: 'merge' });
+    expect(
+      items()
+        .filter((i) => !['Bulk Reel 1', 'Bulk Reel 2'].includes(i.sourceTitle))
+        .map((i) => [i.sourceTitle, i.watchedAt, i.watchedEra])
+        .sort(),
+    ).toEqual(fresh);
+
+    // A second run of the full export changes nothing.
+    db.sql.exec('DELETE FROM match_candidates; DELETE FROM item_external_ids; DELETE FROM library_items;');
+    applyImport(db, partial.records, { mode: 'merge' });
+    applyImport(db, full.records, { mode: 'merge' });
+    expect(applyImport(db, full.records, { mode: 'merge' })).toMatchObject({ added: 0, updated: 0 });
+  });
+
   it('adds new movies: matched by IMDb hint, owned only from the collection, watchlist and rating-only ones in the queue', () => {
     const { records } = parse(exportFiles());
     const summary = applyImport(db, records, { mode: 'merge' });

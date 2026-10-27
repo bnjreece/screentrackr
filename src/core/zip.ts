@@ -38,7 +38,9 @@ function isUnsafe(name: string): boolean {
 export function listZip(buf: Buffer): ZipEntry[] {
   let end = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 0xffff); i--) {
-    if (buf.readUInt32LE(i) === EOCD) {
+    // The real end record's comment runs exactly to the end of the file; a
+    // signature inside the archive comment does not, so the scan goes on.
+    if (buf.readUInt32LE(i) === EOCD && i + 22 + buf.readUInt16LE(i + 20) === buf.length) {
       end = i;
       break;
     }

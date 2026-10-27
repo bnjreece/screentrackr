@@ -32,9 +32,9 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import type { Status, WatchedEra } from '../types.js';
+import type { Status } from '../types.js';
 import { listZip } from '../zip.js';
-import { cleanTconst, ImportError, type ImportRecord, type ParsedImport } from './common.js';
+import { cleanTconst, eraOf, ImportError, type ImportRecord, type ParsedImport } from './common.js';
 
 /** The export files the importer reads, by name stem. */
 export const TRAKT_KINDS = ['watched-history', 'watched-movies', 'ratings-movies', 'lists-watchlist', 'collection-movies'] as const;
@@ -239,11 +239,6 @@ function playTime(v: unknown): number | null {
 function localDate(ms: number, fmt: Intl.DateTimeFormat): string {
   const parts = Object.fromEntries(fmt.formatToParts(new Date(ms)).map((p) => [p.type, p.value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
-}
-
-function eraOf(date: string): WatchedEra {
-  const y = Number(date.slice(0, 4));
-  return y < 2010 ? 'long-ago' : y < 2020 ? '2010s' : '2020s';
 }
 
 /** The 10-plays-in-one-second threshold for a bulk log. */
@@ -487,7 +482,13 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       for (const t of a.plays) if (usable(t) && (at === null || t > at)) at = t;
       if (at === null && usable(a.wmLast)) at = a.wmLast;
       const anyKnown = a.wmLast !== null || a.plays.some((t) => t !== null);
-      if (at === null && anyKnown) bulkDated++;
+      if (at === null && anyKnown) {
+        bulkDated++;
+        // An earlier, partial export may have given this movie one of these
+        // dates before the log was big enough to count as bulk: clear it, but
+        // only if Trakt set it (never a date you or another source set).
+        rec.clearWatchedAtIfOwn = true;
+      }
       if (at !== null) {
         const date = localDate(at, fmt);
         rec.watchedAt = date;

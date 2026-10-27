@@ -35,7 +35,7 @@ import {
   type MatchStatus,
 } from '../types.js';
 import { parseApplePaste } from './apple-paste.js';
-import { FORMATS, ImportError, type ImportFormat, type ImportRecord, type ParsedImport } from './common.js';
+import { eraOf, FORMATS, ImportError, type ImportFormat, type ImportRecord, type ParsedImport } from './common.js';
 import { parseCsv } from './csv.js';
 import { isImdbHeader, parseImdb } from './imdb.js';
 import { isJsonV1, parseJsonV1 } from './json-v1.js';
@@ -140,6 +140,8 @@ export interface ImportSummary {
    */
   reviews: ImportReview[];
   backupPath: string | null;
+  /** Present and true when nothing was written (`dryRun`): the counts say what the import would do. */
+  dryRun?: true;
 }
 
 export interface ImportReview {
@@ -160,15 +162,23 @@ function validate(records: ImportRecord[]): void {
     if (r.statusIfNew !== undefined && !(STATUSES as readonly string[]).includes(r.statusIfNew)) {
       fail(`invalid new-item status "${String(r.statusIfNew)}"`);
     }
-    for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'imdbIdExact'] as const) {
+    for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'imdbIdExact', 'clearWatchedAtIfOwn'] as const) {
       if (r[flag] !== undefined && typeof r[flag] !== 'boolean') fail(`${flag} must be true or false`);
+    }
+    if (r.watchedAtSource != null && !(ITEM_SOURCES as readonly string[]).includes(r.watchedAtSource)) {
+      fail(`invalid watched date source "${String(r.watchedAtSource)}"`);
     }
     if (r.externalIds != null) {
       if (typeof r.externalIds !== 'object' || Array.isArray(r.externalIds)) fail('externalIds must be an object');
       for (const [kind, value] of Object.entries(r.externalIds)) {
         if (!(EXTERNAL_ID_KINDS as readonly string[]).includes(kind)) fail(`unknown external id kind "${kind}"`);
         if (value != null && (typeof value !== 'string' || value.length > 1000)) fail(`invalid ${kind} id`);
+        if (kind === 'imdb' && value != null && value.trim() !== '' && !/^tt\d{7,}$/.test(value.trim())) fail(`invalid imdb id "${value}"`);
       }
+      // An exact IMDb id names the record's IMDb title, so a link or hint to another one contradicts it.
+      const exact = r.externalIds.imdb?.trim();
+      const named = (r.tconst ?? r.imdbIdHint)?.trim().toLowerCase();
+      if (exact && named && named !== exact) fail(`its IMDb id ${named} and its imdb external id ${exact} name different titles`);
     }
     if (r.watchedEra != null) {
       if (!(WATCHED_ERAS as readonly string[]).includes(r.watchedEra)) fail(`invalid watched era "${String(r.watchedEra)}"`);
@@ -224,13 +234,16 @@ function targetFor(db: Db, r: ImportRecord): Target {
   }
   // Before `setup` there is nothing to check a hint against. Keep it on the
   // (still unmatched) item so matching can use it once the catalog is built.
-  const hint = r.imdbIdHint?.trim().toLowerCase();
+  // An `imdb` external id is IMDb's own id for exactly this title: it is the
+  // hint, and an exact one.
+  const exactId = r.externalIds?.imdb ?? undefined;
+  const hint = (exactId ?? r.imdbIdHint)?.trim().toLowerCase();
   if (hint && /^tt\d{7,}$/.test(hint) && !catalogReady(db)) {
     return { tconst: hint, matchStatus: 'unmatched', matchScore: null, candidates: [] };
   }
   // The source's own id for exactly this title: the catalog's title when it
   // has it, otherwise nothing (never another title found by name).
-  if (hint && /^tt\d{7,}$/.test(hint) && r.imdbIdExact === true) {
+  if (hint && /^tt\d{7,}$/.test(hint) && (r.imdbIdExact === true || exactId !== undefined)) {
     const known = db.sql.prepare('SELECT 1 FROM titles WHERE tconst = ?').get(hint) !== undefined;
     return known
       ? { tconst: hint, matchStatus: 'matched', matchScore: SCORE.hint, candidates: [] }
@@ -298,8 +311,15 @@ function canonicalIds(ids: ExternalIds | null | undefined): ExternalIds {
 
 const sameIds = (a: ExternalIds, b: ExternalIds): boolean => JSON.stringify(canonicalIds(a)) === JSON.stringify(canonicalIds(b));
 
-/** An item as the import sees it: its row plus its external ids. */
-type PoolItem = LibraryItem & { externalIds: ExternalIds };
+/**
+ * An item as the import sees it: its row plus its external ids and the source
+ * that set its watched date (null: the user, or unknown; see schema V3).
+ */
+type PoolItem = LibraryItem & { externalIds: ExternalIds; watchedAtSource: string | null };
+
+/** The library columns plus watched_at_source, for the import's own reads. */
+const POOL_COLUMNS = `${LIBRARY_COLUMNS}, watched_at_source`;
+type PoolRow = LibraryRow & { watched_at_source: string | null };
 
 function externalIdsOf(db: Db): Map<number, ExternalIds> {
   const rows = db.sql.prepare('SELECT item_id, kind, value FROM item_external_ids ORDER BY item_id, kind').all() as {
@@ -316,14 +336,28 @@ function externalIdsOf(db: Db): Map<number, ExternalIds> {
   return out;
 }
 
-const existing = (db: Db, raw: LibraryItem, ids: ExternalIds | undefined): Existing => {
-  const item: PoolItem = { ...raw, applePersistentId: blankToNull(raw.applePersistentId), externalIds: canonicalIds(ids) };
-  return { item, norm: normalizeTitle(item.sourceTitle), identity: identityOf(db, item) };
+/**
+ * An exact IMDb id (the `imdb` external id) is the item's or record's IMDb
+ * title even while the catalog lacks it, so it stands in as the established
+ * link when there is none: another movie's link then conflicts with it.
+ */
+const withExactId = (identity: Identity, exact: string | null | undefined): Identity =>
+  identity.tconst === null && exact ? { ...identity, tconst: exact } : identity;
+
+const existing = (db: Db, row: PoolRow, ids: ExternalIds | undefined): Existing => {
+  const raw = rowToItem(row);
+  const item: PoolItem = {
+    ...raw,
+    applePersistentId: blankToNull(raw.applePersistentId),
+    externalIds: canonicalIds(ids),
+    watchedAtSource: raw.watchedAt === null ? null : row.watched_at_source,
+  };
+  return { item, norm: normalizeTitle(item.sourceTitle), identity: withExactId(identityOf(db, item), item.externalIds.imdb) };
 };
 
 /** The identity of the item a record would be, its own catalog link included. */
 const recordIdentity = (db: Db, r: ImportRecord, t: Target): Identity =>
-  identityOf(db, {
+  withExactId(identityOf(db, {
     sourceTitle: r.sourceTitle.trim(),
     sourceYear: r.sourceYear ?? null,
     sourceRuntimeMin: r.sourceRuntimeMin ?? null,
@@ -331,7 +365,7 @@ const recordIdentity = (db: Db, r: ImportRecord, t: Target): Identity =>
     editionYear: r.editionYear ?? null,
     tconst: t.tconst,
     matchStatus: t.matchStatus,
-  });
+  }), r.externalIds?.imdb);
 
 /** What the import does with one record. */
 type MergeTarget =
@@ -384,7 +418,7 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
   const recLink = rec.tconst;
   const itemLink = (e: Existing) => e.identity.tconst;
   const sameApple = (e: Existing) => apple !== null && e.item.applePersistentId === apple;
-  const hint = r.imdbIdHint?.trim().toLowerCase() ?? null;
+  const hint = (r.externalIds?.imdb ?? r.imdbIdHint)?.trim().toLowerCase() ?? null;
   const supplied = r.tconst ?? (hint && /^tt\d{7,}$/.test(hint) && !t.hintRefuted ? hint : null);
 
   // A source's own film ids work like the Apple id: the same id of a kind is
@@ -474,11 +508,12 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
   return { kind: 'update', id: first.item.id };
 }
 
-/** Whether two items hold the same data (external ids included), local ids and dates aside. */
+/** Whether two items hold the same data (external ids included), local ids, dates and the watched date's source aside. */
 function sameContent(a: PoolItem, b: PoolItem): boolean {
   const content = (x: PoolItem) => {
     const rest: Partial<PoolItem> = { ...x };
     delete rest.id;
+    delete rest.watchedAtSource;
     delete rest.addedAt;
     delete rest.updatedAt;
     return JSON.stringify(rest);
@@ -520,6 +555,12 @@ const newStatus = (r: ImportRecord) => r.status ?? r.statusIfNew ?? 'queue';
 /** Whether a new item is owned: the record's owned, else its new-item value, else owned. */
 const newOwned = (r: ImportRecord) => r.owned ?? r.ownedIfNew ?? true;
 
+/**
+ * The source recorded for a date this record writes: a JSON v1 record's own
+ * `watchedAtSource` (null when the file gives none), else the record's source.
+ */
+const dateSource = (r: ImportRecord): string | null => (r.watchedAtSource !== undefined ? r.watchedAtSource : r.source);
+
 /** mergeChanges marks an external id the item lacks with this column prefix; it is written to item_external_ids. */
 const EXT_PREFIX = 'ext:';
 
@@ -530,16 +571,19 @@ type Col = [column: string, value: string | number | null];
 
 /**
  * The column changes needed to merge `r` into `cur`. Absent or null fields
- * never clear anything. `ownedIfNew` and `statusIfNew` are never read here
+ * never clear anything, except that `clearWatchedAtIfOwn` clears a watched
+ * date the record's own source set. `ownedIfNew` and `statusIfNew` are never read here
  * (they are for new items only), and with `fillOnly` the descriptive fields
  * only fill blanks. External ids the item lacks come back as `ext:<kind>`.
  */
 function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   const out: Col[] = [];
+  let clearsEra = false;
   const keep = <K extends keyof LibraryItem & keyof ImportRecord>(key: K, column: string, descriptive = false) => {
     const v = r[key];
     if (v === undefined || v === null || v === cur[key]) return;
-    if (descriptive && r.fillOnly === true && cur[key] !== null) return;
+    const have = cur[key];
+    if (descriptive && r.fillOnly === true && have !== null && !(typeof have === 'string' && have.trim() === '')) return;
     out.push([column, typeof v === 'boolean' ? (v ? 1 : 0) : (v as string | number)]);
   };
   keep('sourceYear', 'source_year', true);
@@ -549,20 +593,37 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   keep('collection', 'collection', true);
   keep('owned', 'owned');
   keep('sourceOwnedRaw', 'source_owned_raw');
-  keep('watchedAt', 'watched_at');
+  if (r.watchedAt != null && r.watchedAt !== cur.watchedAt) {
+    out.push(['watched_at', r.watchedAt], ['watched_at_source', dateSource(r)]);
+  } else if (r.watchedAt != null && r.watchedAtSource !== undefined && r.watchedAtSource !== cur.watchedAtSource) {
+    // A JSON v1 record says who set this same date (null: the user, or
+    // unknown); its word replaces the stored one, so a date a file gives
+    // without a source can no longer be cleared by the source that set it.
+    out.push(['watched_at_source', r.watchedAtSource]);
+  } else if (r.watchedAt == null && r.clearWatchedAtIfOwn === true && cur.watchedAt !== null && cur.watchedAtSource === r.source) {
+    // The one clear an import may make: a date this same source set earlier.
+    // The era that date implies goes with it (an era of its own, which the
+    // date does not imply, stays).
+    out.push(['watched_at', null], ['watched_at_source', null]);
+    if (cur.watchedEra !== null && cur.watchedEra === eraOf(cur.watchedAt)) clearsEra = true;
+  }
   keep('myRating', 'my_rating');
   keep('notes', 'notes', true);
   keep('applePersistentId', 'apple_persistent_id');
   for (const [kind, value] of Object.entries(r.externalIds ?? {})) {
-    if (value && cur.externalIds[kind as keyof ExternalIds] === undefined) out.push([`${EXT_PREFIX}${kind}`, value]);
+    if (!value || cur.externalIds[kind as keyof ExternalIds] !== undefined) continue;
+    // A hand link to another title stays the item's identity: an exact IMDb
+    // id that names a different title is not stored on it.
+    if (kind === 'imdb' && cur.matchStatus === 'manual' && cur.tconst !== null && cur.tconst !== value) continue;
+    out.push([`${EXT_PREFIX}${kind}`, value]);
   }
 
   if (r.status !== undefined) {
     if (r.status !== cur.status) out.push(['status', r.status]);
     const era =
-      r.status !== 'watched' ? null : (r.watchedEra ?? (cur.status === 'watched' ? cur.watchedEra : null));
+      r.status !== 'watched' ? null : (r.watchedEra ?? (cur.status === 'watched' && !clearsEra ? cur.watchedEra : null));
     if (era !== cur.watchedEra) out.push(['watched_era', era]);
-  }
+  } else if (clearsEra) out.push(['watched_era', null]);
 
   // A hand link is never moved, and an automatic match is not downgraded here
   // (`screentrackr match` re-runs matching on purpose). Unresolved items take
@@ -570,7 +631,18 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   // A record with nothing to say about the link (no match, no hint) keeps the
   // item's stored one, such as a hint saved before `setup`.
   const silent = t.tconst === null && t.matchStatus === 'unmatched' && cur.tconst !== null;
-  if (cur.matchStatus !== 'manual' && (r.tconst || cur.matchStatus !== 'matched') && !silent) {
+  // An exact IMDb id (the item's, or the record's that this merge adds) fixes
+  // the item's automatic link: only a match to that id is taken, whatever
+  // let the record reach the item (an Apple id, another external id, a title).
+  const addsExact = cur.externalIds.imdb === undefined && out.some(([c]) => c === `${EXT_PREFIX}imdb`);
+  const exact = cur.externalIds.imdb ?? (addsExact ? r.externalIds?.imdb : undefined);
+  if (cur.matchStatus !== 'manual' && exact !== undefined) {
+    if (t.tconst === exact) {
+      if (t.tconst !== cur.tconst) out.push(['tconst', t.tconst]);
+      if (t.matchStatus !== cur.matchStatus) out.push(['match_status', t.matchStatus]);
+      if (t.matchScore !== cur.matchScore) out.push(['match_score', t.matchScore]);
+    }
+  } else if (cur.matchStatus !== 'manual' && (r.tconst || cur.matchStatus !== 'matched') && !silent) {
     if (t.tconst !== cur.tconst) out.push(['tconst', t.tconst]);
     if (t.matchStatus !== cur.matchStatus) out.push(['match_status', t.matchStatus]);
     if (t.matchScore !== cur.matchScore) out.push(['match_score', t.matchScore]);
@@ -578,21 +650,50 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   return out;
 }
 
+/** Thrown inside a dry run's transaction to roll it back, carrying the summary out. */
+class DryRun {
+  constructor(readonly summary: ImportSummary) {}
+}
+
 /**
  * Write records into the library in one transaction. In `replace` mode the
  * current library is first exported to `backups/` and the backup path is
- * returned.
+ * returned. With `dryRun` the import runs as usual inside the transaction and
+ * is then rolled back: nothing is written (no backup either) and the summary
+ * says what it would have done.
  */
-export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merge' | 'replace' }): ImportSummary {
+export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merge' | 'replace'; dryRun?: boolean }): ImportSummary {
   if (opts.mode !== 'merge' && opts.mode !== 'replace') throw new ImportError(`Unknown import mode "${String(opts.mode)}"`);
   validate(records);
   records = records.map(cleanRecord);
+  if (opts.dryRun === true) {
+    try {
+      writeImport(db, records, opts.mode, null, (summary) => {
+        throw new DryRun(summary);
+      });
+    } catch (err) {
+      if (err instanceof DryRun) return { ...err.summary, dryRun: true };
+      throw err;
+    }
+    throw new Error('unreachable: a dry run always rolls back');
+  }
   const backupPath = opts.mode === 'replace' ? writeBackup(db) : null;
+  return writeImport(db, records, opts.mode, backupPath, (summary) => summary);
+}
 
-  const select = db.sql.prepare(`SELECT ${LIBRARY_COLUMNS} FROM library_items WHERE id = ?`);
+function writeImport(
+  db: Db,
+  records: ImportRecord[],
+  mode: 'merge' | 'replace',
+  backupPath: string | null,
+  finish: (summary: ImportSummary) => ImportSummary,
+): ImportSummary {
+  const opts = { mode };
+
+  const select = db.sql.prepare(`SELECT ${POOL_COLUMNS} FROM library_items WHERE id = ?`);
   const insert = db.sql.prepare(
-    `INSERT INTO library_items (tconst, source_title, source_year, source_director, source_runtime_min, source_genre, collection, owned, source_owned_raw, status, watched_era, watched_at, my_rating, notes, match_status, match_score, source, apple_persistent_id, added_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${NOW_SQL}), ${NOW_SQL})`,
+    `INSERT INTO library_items (tconst, source_title, source_year, source_director, source_runtime_min, source_genre, collection, owned, source_owned_raw, status, watched_era, watched_at, watched_at_source, my_rating, notes, match_status, match_score, source, apple_persistent_id, added_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${NOW_SQL}), ${NOW_SQL})`,
   );
   const addExternalId = db.sql.prepare('INSERT OR IGNORE INTO item_external_ids (item_id, kind, value) VALUES (?, ?, ?)');
   const clearCandidates = db.sql.prepare('DELETE FROM match_candidates WHERE item_id = ?');
@@ -606,9 +707,9 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
     if (opts.mode === 'replace') db.sql.exec('DELETE FROM match_candidates; DELETE FROM item_external_ids; DELETE FROM library_items;');
 
     const ids = externalIdsOf(db);
-    const pool: Existing[] = (
-      db.sql.prepare(`SELECT ${LIBRARY_COLUMNS} FROM library_items ORDER BY id`).all() as unknown as LibraryRow[]
-    ).map((row) => existing(db, rowToItem(row), ids.get(row.id)));
+    const pool: Existing[] = (db.sql.prepare(`SELECT ${POOL_COLUMNS} FROM library_items ORDER BY id`).all() as unknown as PoolRow[]).map(
+      (row) => existing(db, row, ids.get(row.id)),
+    );
     // One import claims each existing item for at most one record, and an item
     // it adds is never a candidate for a later record: N records that fit N
     // items claim N distinct items, and a record left with no unclaimed
@@ -665,6 +766,7 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
           status,
           status === 'watched' ? (r.watchedEra ?? null) : null,
           r.watchedAt ?? null,
+          r.watchedAt != null ? dateSource(r) : null,
           r.myRating ?? null,
           r.notes ?? null,
           t.matchStatus,
@@ -694,7 +796,7 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
             ext[c.slice(EXT_PREFIX.length)] = String(v);
           }
           if (changes.some(([c]) => c === 'match_status' || c === 'tconst')) storeCandidates(found.item.id, t);
-          Object.assign(found, existing(db, rowToItem(select.get(found.item.id) as unknown as LibraryRow), ext));
+          Object.assign(found, existing(db, select.get(found.item.id) as unknown as PoolRow, ext));
           summary.updated++;
         } else {
           summary.unchanged++;
@@ -703,6 +805,6 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
       }
       if (final === 'ambiguous' || final === 'unmatched') summary.needsReview++;
     });
-    return summary;
+    return finish(summary);
   });
 }

@@ -75,16 +75,17 @@ function parseImdbFiles(db: Db, files: string[], opts: ImdbOptions): Parsed {
 export const importCmd: Command = {
   name: 'import',
   summary: 'Bring in a library file (merge by default)',
-  usage: 'import <file|apple-tv|imdb <file.csv>...|trakt <export.zip|folder>...> [--format <format>] [--merge | --replace]',
+  usage: 'import <file|apple-tv|imdb <file.csv>...|trakt <export.zip|folder>...> [--format <format>] [--merge | --replace] [--dry-run]',
   details: [
     `Formats: ${FORMATS.join(', ')}. The format is detected when --format is omitted.`,
     "`import apple-tv` (experimental, macOS only) reads the TV app's library directly. Movies with a recorded play date are marked watched; the rest keep their current status.",
     "`import imdb <file.csv>...` reads IMDb CSV exports you downloaded from imdb.com (Your Ratings, your watchlist, check-ins or a list). Rated movies are marked watched with your rating; watchlist movies go in the queue only when they are new; nothing is marked owned. Several files are read together. --as says what a list export is (watchlist by default), --collection names a list's collection, --include-type brings in more than movies (repeatable or comma-separated: " +
       IMDB_INCLUDE_TYPES.join(', ') +
-      '), --checkin-dates uses check-in dates as watched dates.',
+      '), --checkin-dates uses check-in dates as watched dates, --notes-from-description keeps a list row\'s Description as notes.',
     "`import trakt <export.zip|folder>` reads the data export you download from Trakt (Settings > Data > Raw export), or files from it. Only movie history, ratings, watchlist, collection and the export's error list are read. Watched movies are marked watched with the latest play's date, watchlist movies go in the queue only when they are new, and only the collection marks a movie owned. Plays logged in bulk (10 or more at the same second) lose their dates unless --keep-bulk-dates. It only merges (--replace is refused). Nothing is fetched from Trakt.",
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
     '--replace backs up your library to backups/ first, then replaces it.',
+    '--dry-run reports what the import would add, update and leave for review, and changes nothing (no backup either).',
   ].join('\n'),
   options: {
     format: { type: 'string', value: '<format>', description: `One of ${FORMATS.join(', ')}` },
@@ -101,6 +102,8 @@ export const importCmd: Command = {
     },
     'checkin-dates': { type: 'boolean', description: 'imdb --as checkins only: use check-in dates as watched dates' },
     'keep-bulk-dates': { type: 'boolean', description: 'trakt only: keep the dates of plays logged in bulk' },
+    'notes-from-description': { type: 'boolean', description: "imdb only: use a list row's Description as the movie's notes (fills blank notes)" },
+    'dry-run': { type: 'boolean', description: 'Show what the import would do without changing anything' },
   },
   async run(ctx, pos, values) {
     const file = pos[0];
@@ -125,7 +128,8 @@ export const importCmd: Command = {
     const collection = str(values, 'collection');
     const includeRaw = (strs(values, 'include-type') ?? []).flatMap((v) => v.split(',')).map((v) => v.trim()).filter(Boolean);
     const checkinDates = bool(values, 'checkin-dates');
-    const imdbFlags = as !== undefined || collection !== undefined || includeRaw.length > 0 || checkinDates;
+    const notesFromDescription = bool(values, 'notes-from-description');
+    const imdbFlags = as !== undefined || collection !== undefined || includeRaw.length > 0 || checkinDates || notesFromDescription;
     if (as !== undefined && !(IMDB_LIST_KINDS as readonly string[]).includes(as)) {
       throw new UserError(`--as expects ${IMDB_LIST_KINDS.join(', ')} (got "${as}")`);
     }
@@ -142,6 +146,7 @@ export const importCmd: Command = {
       ...(collection ? { collection } : {}),
       includeTypes,
       checkinDates,
+      notesFromDescription,
     };
 
     let timeoutMs: number | undefined;
@@ -162,11 +167,11 @@ export const importCmd: Command = {
 
     let parsed: Parsed;
     if (trakt || format === 'trakt') {
-      if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+      if (imdbFlags) throw new UserError('--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files');
       // The bounded reader checks each name against the allow-list before opening it.
       parsed = parseTraktExport(files, keepBulkDates);
     } else if (appleTv) {
-      if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+      if (imdbFlags) throw new UserError('--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files');
       ctx.log('Reading the TV app library (experimental). macOS may ask to allow access to the TV app.');
       parsed = { format: 'apple-tv', records: await readAppleTvLibrary({ timeoutMs }), warnings: [], notices: [] };
     } else if (imdb) {
@@ -178,7 +183,7 @@ export const importCmd: Command = {
       if (fmt === 'imdb') {
         parsed = parseImdbFiles(ctx.db(), [file], imdbOpts);
       } else {
-        if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+        if (imdbFlags) throw new UserError('--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files');
         parsed = { ...parseImportDetailed(text, fmt, basename(file)), notices: [] };
       }
     }
@@ -194,13 +199,16 @@ export const importCmd: Command = {
     for (const n of parsed.notices) ctx.log(n);
     for (const w of parsed.warnings) ctx.log(`Warning: ${w}`);
     if (!catalogReady(db)) ctx.log('The catalog is not built yet, so movies are left unmatched. Run `screentrackr setup` to match them.');
-    const summary = applyImport(db, parsed.records, { mode: replace ? 'replace' : 'merge' });
+    const dryRun = bool(values, 'dry-run');
+    const summary = applyImport(db, parsed.records, { mode: replace ? 'replace' : 'merge', dryRun });
 
     const extra = { ...(parsed.skippedByType ? { skippedByType: parsed.skippedByType } : {}), ...parsed.extra };
     ctx.emit({ format: parsed.format, records: parsed.records.length, warnings: parsed.warnings, ...extra, ...summary }, () =>
       [
-        `Imported ${parsed.records.length} records (${parsed.format}).`,
-        `Added ${summary.added}, updated ${summary.updated}, unchanged ${summary.unchanged}, needs review ${summary.needsReview}.`,
+        dryRun ? `Dry run: nothing was changed. ${parsed.records.length} records (${parsed.format}).` : `Imported ${parsed.records.length} records (${parsed.format}).`,
+        dryRun
+          ? `Would add ${summary.added}, update ${summary.updated}, leave unchanged ${summary.unchanged}, needs review ${summary.needsReview}.`
+          : `Added ${summary.added}, updated ${summary.updated}, unchanged ${summary.unchanged}, needs review ${summary.needsReview}.`,
         summary.backupPath ? `Backup of the previous library: ${summary.backupPath}` : '',
         summary.reviews.length
           ? [
