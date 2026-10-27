@@ -800,6 +800,9 @@ describe('0.4.0 foundation surface', () => {
     const help = run(['--help']);
     for (const c of ['log', 'history', 'pick', 'where', 'lists', 'list', 'sync', 'config']) {
       expect(help.stdout).toMatch(new RegExp(`^  ${c} `, 'm'));
+    }
+    // lists and list are built (Track E); the rest are stubs until their tracks land.
+    for (const c of ['log', 'history', 'pick', 'where', 'sync', 'config']) {
       const r = run([c], { home });
       expect(r.code, c).toBe(1);
       expect(r.stderr).toContain('not built yet');

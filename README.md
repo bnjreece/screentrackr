@@ -224,16 +224,52 @@ screentrackr config <get|set|unset> <key> [<value>]
 
 ## Lists
 
-<!-- 0.4.0: your own lists of movies. Written with the feature. -->
+Your own lists of movies, such as "Halloween" or "Watch with the kids". A movie can be in any number of lists, and a list holds any number of movies.
 
 ```text
 screentrackr lists
 screentrackr list <create|add|remove|show|rename|delete> <name> [<id|tconst|title>...]
 ```
 
+```sh
+screentrackr list create Halloween --description "October"
+screentrackr list add Halloween 412 "The Glass Harbor (1978)" tt9000001
+screentrackr list add Halloween tt9000030 --add-missing   # not in your library yet: added as a queue item you don't own
+screentrackr list show Halloween --unwatched              # any search filter works
+screentrackr list remove Halloween 412
+screentrackr list rename Halloween "Spooky season"
+screentrackr list delete "Spooky season"                  # deletes the list, never the movies
+screentrackr lists                                        # every list with its count
+```
+
+- Names are any text up to 100 characters, unique ignoring case ("halloween" is "Halloween"). Quote a name or a title with spaces.
+- `list add` and `list remove` take library ids, IMDb ids or titles. A reference that matches more than one item (two editions, or a remake with the same title) changes nothing at all and lists the ids to use, so fix it and run the command again. An IMDb id you don't have is refused unless you pass `--add-missing`.
+- `list show <name>` is `search` limited to that list, with every search filter. `search --list <name>` and `stats --list <name>` work too.
+- Removing a movie from your library takes it out of its lists. Deleting a list says how many movies were in it and keeps every one of them.
+- Lists are not the `collection` field, which is the folder or collection name a source gave the movie.
+- Over MCP: `list_lists`, `create_list`, `delete_list`, `list_add` (ids or IMDb ids, never titles, and `addMissing`) and `list_remove`; `search_movies` takes `lists`.
+
 ## Stats
 
-<!-- 0.4.0: what you watched by year, decade, genre and director. Written with the feature. -->
+```text
+screentrackr stats [--watched] [--year <yyyy>] [--by <year|decade|genre|director|rating>] [-n <n>] [--list <name>]... [--all-lists]
+```
+
+```sh
+screentrackr stats                       # library counts, plus plays this year and last year, and your ratings
+screentrackr stats --watched             # the full report
+screentrackr stats --year 2025           # only what you played in 2025
+screentrackr stats --by director -n 25   # one table in full
+screentrackr stats --list Halloween      # only the movies in a list
+```
+
+`stats --watched` shows how many plays and distinct films you watched in each calendar year (with rewatches), the films you watched by release decade, genre and director (with your average rating), how you rated them from 1 to 10, how many watched films have no known date, and your average rating against IMDb's over the films you rated. `--year` limits every part of the report to films you played that year, `--by` prints one table in full, and `-n` sets how many genres and directors it lists (10 by default).
+
+- A film is every edition of one IMDb title together, so a movie you own twice counts once. A movie not matched to IMDb is its own film.
+- One night recorded by two sources (a Letterboxd diary entry and the same play on Trakt, say) is one play. Plays with no date count, but only in the totals.
+- A film is watched when it has a play or the status `watched`. Its rating is the one you set most recently on any of its editions.
+- Genres and directors come from the IMDb catalog for matched movies and from the movie's own fields otherwise, as in `search`.
+- Over MCP: `watch_stats` (with `year`, `by`, `limit` and `lists`), and `library_stats` now also returns `playsThisYear` and `rated`.
 
 ## Export to Letterboxd and Trakt
 
@@ -307,7 +343,7 @@ screentrackr remove <id>
 screentrackr set <id|tconst|title> [--status <s>] [--era <e>] [--rating <1-10> | --clear-rating] [--watched-at <date> | --clear-watched-at] [--notes <text>]
 screentrackr match [--review] [--all]
 screentrackr link <id> <tconst>
-screentrackr stats
+screentrackr stats [--watched] [--year <yyyy>] [--by <year|decade|genre|director|rating>] [-n <n>] [--list <name>]... [--all-lists]
 screentrackr export [--out <file>]
 screentrackr mcp
 screentrackr doctor
@@ -324,7 +360,7 @@ screentrackr doctor
 | `set` | Changes status, watched era (`long-ago`, `2010s`, `2020s`), your rating, watched date or notes. `--watched-at` records a play on that date (a date earlier than a play the movie already has is refused, since the watched date is the latest play); `--clear-watched-at` removes every play of the movie and says how many. A reference that matches more than one item never writes; it lists the ids to use. References resolve as for `show`, and the MCP `get_movie` and `update_movie` tools do the same. |
 | `match` | Retries matching for items that need it. `--review` lists them with candidates. |
 | `link` | Matches a library item to an IMDb id by hand. Manual links are never changed by later matching. |
-| `stats` | Counts by status, genre, decade and director, and how many items are unmatched. |
+| `stats` | Counts by status, genre, decade and director, how many items are unmatched, and a short block on this year. `--watched` is the full watch report (see [Stats](#stats)). |
 | `export` | Writes ScreenTrackr JSON v1 to stdout or `--out <file>`. |
 | `mcp` | Starts the MCP server on stdio. |
 | `doctor` | Checks Node, the database, the catalog and the library. |
