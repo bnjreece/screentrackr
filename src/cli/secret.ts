@@ -17,20 +17,35 @@ export function readStdinSecret(what: string, flag: string): string {
   return text.replace(/\r?\n$/, '');
 }
 
-/** Ask on the terminal with the typed characters hidden. Only call when stdin is a TTY. */
-export function promptHidden(question: string): Promise<string> {
-  const stdin = process.stdin;
+/** The parts of a TTY stdin promptHidden uses. */
+export interface SecretInput {
+  setRawMode(mode: boolean): unknown;
+  resume(): unknown;
+  pause(): unknown;
+  setEncoding(encoding: BufferEncoding): unknown;
+  on(event: 'data', listener: (chunk: string) => void): unknown;
+  removeListener(event: 'data', listener: (chunk: string) => void): unknown;
+}
+
+/**
+ * Ask on the terminal with the typed characters hidden. Only call when stdin
+ * is a TTY. Echo is turned off before the question is shown, so a password
+ * manager that types as soon as it sees the prompt is never echoed.
+ */
+export function promptHidden(
+  question: string,
+  input: SecretInput = process.stdin as unknown as SecretInput,
+  output: { write(text: string): unknown } = process.stderr,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     let value = '';
-    process.stderr.write(question);
-    stdin.setRawMode(true);
-    stdin.resume();
-    stdin.setEncoding('utf8');
+    input.setRawMode(true);
+    input.setEncoding('utf8');
     const done = (err?: Error) => {
-      stdin.setRawMode(false);
-      stdin.pause();
-      stdin.removeListener('data', onData);
-      process.stderr.write('\n');
+      input.removeListener('data', onData);
+      input.setRawMode(false);
+      input.pause();
+      output.write('\n');
       if (err) reject(err);
       else resolve(value);
     };
@@ -42,6 +57,8 @@ export function promptHidden(question: string): Promise<string> {
         else if (ch >= ' ') value += ch;
       }
     };
-    stdin.on('data', onData);
+    input.on('data', onData);
+    input.resume();
+    output.write(question);
   });
 }

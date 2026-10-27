@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { importCmd } from '../src/cli/commands/import.js';
 import type { Ctx } from '../src/cli/context.js';
+import { promptHidden, type SecretInput } from '../src/cli/secret.js';
 import { buildCatalog } from '../src/core/catalog/build.js';
 import { openDb, type Db } from '../src/core/db.js';
 import { applyImport, ImportError, type ImportRecord } from '../src/core/importers/index.js';
@@ -665,5 +666,37 @@ describe('import jellyfin (command)', () => {
     await expect(run({ url: SERVER, 'user-id': USER_ID, replace: true })).rejects.toThrow(/--replace does not apply/);
     expect(fetch).not.toHaveBeenCalled();
     expect(db.sql.prepare('SELECT status, my_rating FROM library_items').all()).toEqual([{ status: 'watched', my_rating: 9 }]);
+  });
+});
+
+describe('promptHidden', () => {
+  it('turns echo off before showing the question, never writes what is typed, and restores the terminal', async () => {
+    const order: string[] = [];
+    let listener: ((chunk: string) => void) | undefined;
+    const input: SecretInput = {
+      setRawMode: (m: boolean) => order.push(`raw:${m}`),
+      resume: () => order.push('resume'),
+      pause: () => order.push('pause'),
+      setEncoding: () => undefined,
+      on: (_e: 'data', l: (chunk: string) => void) => {
+        listener = l;
+      },
+      removeListener: () => {
+        listener = undefined;
+      },
+    };
+    const written: string[] = [];
+    const output = {
+      write: (t: string) => {
+        order.push(`write:${t}`);
+        written.push(t);
+        // A password manager types as soon as it sees the prompt.
+        if (t.startsWith('Password')) listener?.('hunter\u007f2\r');
+      },
+    };
+    await expect(promptHidden('Password: ', input, output)).resolves.toBe('hunte2');
+    expect(order.indexOf('raw:true')).toBeLessThan(order.indexOf('write:Password: '));
+    expect(order.slice(-3)).toEqual(['raw:false', 'pause', 'write:\n']);
+    expect(written.join('')).not.toContain('hunte');
   });
 });
