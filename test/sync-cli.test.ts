@@ -325,6 +325,7 @@ describe('sync (running the sources)', () => {
       const db = openDb(home);
       try {
         return {
+          master: db.sql.prepare('SELECT type, name, sql FROM sqlite_master ORDER BY name').all(),
           meta: db.sql.prepare('SELECT key, value FROM meta ORDER BY key').all(),
           items: db.sql.prepare('SELECT * FROM library_items ORDER BY id').all(),
           viewings: db.sql.prepare('SELECT * FROM viewings ORDER BY id').all(),
@@ -356,6 +357,35 @@ describe('sync (running the sources)', () => {
     const check = new sqlite.DatabaseSync(dbPath(home), { readOnly: true });
     expect(check.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({ value: '3' });
     check.close();
+  });
+
+  it('--dry-run refuses a current library that opening would still change (journal mode, full-text index)', async () => {
+    const schema = () => {
+      const raw = new sqlite.DatabaseSync(dbPath(home), { readOnly: true });
+      try {
+        return { master: raw.prepare('SELECT type, name, sql FROM sqlite_master ORDER BY name').all(), mode: raw.prepare('PRAGMA journal_mode').get() };
+      } finally {
+        raw.close();
+      }
+    };
+    vi.stubGlobal('fetch', vi.fn());
+    vi.stubEnv('PLEX_TOKEN', PLEX_TOKEN);
+    openDb(home).close();
+    const rollback = new sqlite.DatabaseSync(dbPath(home));
+    rollback.exec('PRAGMA journal_mode = DELETE');
+    rollback.close();
+    let before = schema();
+    await expect(run([], { 'dry-run': true })).rejects.toThrow(/one-time update.*screentrackr doctor/);
+    expect(schema()).toEqual(before);
+
+    openDb(home).close();
+    const noFts = new sqlite.DatabaseSync(dbPath(home));
+    const ftsHere = Boolean(noFts.prepare("SELECT 1 FROM sqlite_master WHERE name = 'titles_fts'").get());
+    noFts.exec('DROP TABLE IF EXISTS titles_fts');
+    noFts.close();
+    before = schema();
+    if (ftsHere) await expect(run([], { 'dry-run': true })).rejects.toThrow(/one-time update/);
+    expect(schema()).toEqual(before);
   });
 
   it('holds the setup lock for the whole sync, so setup cannot start mid-import', async () => {

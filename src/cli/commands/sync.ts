@@ -228,13 +228,33 @@ function resultLine(r: SourceResult, dryRun: boolean): string {
   return `${r.kind}: ${r.records} records. ${counts}${ambiguous}`;
 }
 
-/** The library's schema version, read without changing anything (0 for a file with no meta). */
-function storedSchemaVersion(path: string): number {
+function hasFts5(): boolean {
+  const probe = new sqlite.DatabaseSync(':memory:');
+  try {
+    probe.exec('CREATE VIRTUAL TABLE fts_probe USING fts5(x)');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    probe.close();
+  }
+}
+
+/**
+ * Whether opening the library (openDb) would change it before any import
+ * runs: a migration, setting WAL mode, or creating the full-text index this
+ * runtime supports. Read without changing anything.
+ */
+function openWouldChange(path: string): boolean {
   const raw = new sqlite.DatabaseSync(path, { readOnly: true });
   try {
-    if (!raw.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get()) return 0;
+    const table = (name: string) => Boolean(raw.prepare("SELECT 1 FROM sqlite_master WHERE name = ?").get(name));
+    if (!table('meta')) return true;
     const row = raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
-    return row ? Number(row.value) : 0;
+    if (Number(row?.value ?? 0) < SCHEMA_VERSION) return true;
+    const mode = raw.prepare('PRAGMA journal_mode').get() as { journal_mode?: string } | undefined;
+    if (mode?.journal_mode?.toLowerCase() !== 'wal') return true;
+    return !table('titles_fts') && hasFts5();
   } finally {
     raw.close();
   }
@@ -244,16 +264,16 @@ function storedSchemaVersion(path: string): number {
  * The context a dry run imports through, so it changes nothing: opening the
  * library must not create it or migrate it (both commit before the import's
  * rollback). With no library yet, the dry run runs against an empty one in a
- * temporary folder, removed afterwards. A library from an older screentrackr
- * is refused: it is upgraded the first time it is opened for real.
+ * temporary folder, removed afterwards. A library that opening would change
+ * (an older schema, not in WAL mode, or missing the full-text index) is
+ * refused: it is updated the first time it is opened for real.
  */
 function dryRunContext(ctx: Ctx): { ctx: Ctx; cleanup: () => void } {
   const path = dbPath(ctx.home);
   if (existsSync(path)) {
-    const v = storedSchemaVersion(path);
-    if (v < SCHEMA_VERSION) {
+    if (openWouldChange(path)) {
       throw new UserError(
-        'Your library was made by an older screentrackr and is upgraded the first time it is opened, which a dry run must not do. Run `screentrackr doctor` once (it upgrades the library), then try the dry run again.',
+        'Your library needs a one-time update when it is next opened (it was made by an older screentrackr, or copied, or built where full-text search was missing), and a dry run must not make it. Run `screentrackr doctor` once (it opens and updates the library), then try the dry run again.',
       );
     }
     return { ctx, cleanup: () => {} };
