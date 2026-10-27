@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
 import { catalogReady, type Db } from '../../core/db.js';
 import { readAppleTvLibrary } from '../../core/importers/apple-tv.js';
@@ -11,9 +11,21 @@ import {
   type ImdbListKind,
   type ImdbOptions,
 } from '../../core/importers/imdb.js';
+import {
+  chooseLooseFiles,
+  folderSource,
+  looksLikeZip,
+  parseLetterboxdExport,
+  parseLetterboxdFiles,
+  zipSource,
+  type LetterboxdOptions,
+  type LetterboxdParse,
+} from '../../core/importers/letterboxd.js';
 import { applyImport, detectFormat, FORMATS, parseImportDetailed, type ImportFormat, type ParsedImport } from '../../core/importers/index.js';
 import { bool, str, strs, type Command } from '../command.js';
 import { UserError } from '../context.js';
+
+const IMDB_FLAGS_ONLY = '--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files';
 
 function readBytes(file: string): Buffer {
   try {
@@ -54,16 +66,54 @@ function parseImdbFiles(db: Db, files: string[], opts: ImdbOptions): Parsed {
   };
 }
 
+function isDir(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function fromLetterboxd(res: LetterboxdParse): Parsed {
+  return { format: 'letterboxd', records: res.records, warnings: res.warnings, notices: res.notices };
+}
+
+/**
+ * A Letterboxd export: one ZIP or folder, or loose CSV files from one. Only
+ * the files the import needs are opened (see core/importers/letterboxd.ts).
+ */
+function parseLetterboxdPaths(paths: string[], opts: LetterboxdOptions, detected = false): Parsed {
+  const first = paths[0] as string;
+  const whole = isDir(first) || (!first.toLowerCase().endsWith('.csv') && looksLikeZip(readBytes(first)));
+  if (whole) {
+    if (paths.length > 1) throw new UserError('Pass one Letterboxd export (a ZIP or a folder) at a time, or its CSV files');
+    return fromLetterboxd(parseLetterboxdExport(isDir(first) ? folderSource(first) : zipSource(readBytes(first)), opts));
+  }
+  if (paths.some(isDir)) throw new UserError('Pass one Letterboxd export (a ZIP or a folder) at a time, or its CSV files');
+  // Decide from the paths alone which files to open, so a glob over the
+  // export never opens profile.csv, comments.csv or deleted/ entries.
+  const chosen = chooseLooseFiles(paths, opts, !detected);
+  const warnings = [...chosen.warnings];
+  const files = chosen.open.map((path) => {
+    const decoded = decodeImdbFile(readBytes(path));
+    if (decoded.warning) warnings.push(`${basename(path)}: ${decoded.warning}`);
+    return { name: basename(path), text: decoded.text };
+  });
+  const res = fromLetterboxd(parseLetterboxdFiles(files, opts));
+  return { ...res, warnings: [...warnings, ...res.warnings], notices: [...chosen.notices, ...res.notices] };
+}
+
 export const importCmd: Command = {
   name: 'import',
   summary: 'Bring in a library file (merge by default)',
-  usage: 'import <file|apple-tv|imdb <file.csv>...> [--format <format>] [--merge | --replace] [--dry-run]',
+  usage: 'import <file|apple-tv|imdb <file.csv>...|letterboxd <export.zip|folder|file.csv>...> [--format <format>] [--merge | --replace] [--dry-run]',
   details: [
     `Formats: ${FORMATS.join(', ')}. The format is detected when --format is omitted.`,
     "`import apple-tv` (experimental, macOS only) reads the TV app's library directly. Movies with a recorded play date are marked watched; the rest keep their current status.",
     "`import imdb <file.csv>...` reads IMDb CSV exports you downloaded from imdb.com (Your Ratings, your watchlist, check-ins or a list). Rated movies are marked watched with your rating; watchlist movies go in the queue only when they are new; nothing is marked owned. Several files are read together. --as says what a list export is (watchlist by default), --collection names a list's collection, --include-type brings in more than movies (repeatable or comma-separated: " +
       IMDB_INCLUDE_TYPES.join(', ') +
       '), --checkin-dates uses check-in dates as watched dates, --notes-from-description keeps a list row\'s Description as notes.',
+    "`import letterboxd <export.zip|folder|file.csv>...` reads the export you downloaded from letterboxd.com (Settings, Data). Watched and rated films are marked watched, with half stars stored times two (1 to 10); the watched date comes from your diary; watchlist films go in the queue only when they are new; nothing is marked owned unless you name a list with --owned-list <slug> (repeatable). --with-reviews takes your latest review as notes for movies with none; --no-watchlist leaves the watchlist out.",
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
     '--replace backs up your library to backups/ first, then replaces it.',
     '--dry-run reports what the import would add, update and leave for review, and changes nothing (no backup either).',
@@ -82,6 +132,14 @@ export const importCmd: Command = {
       description: `imdb only: also bring in ${IMDB_INCLUDE_TYPES.join(', ')} (repeatable)`,
     },
     'checkin-dates': { type: 'boolean', description: 'imdb --as checkins only: use check-in dates as watched dates' },
+    'owned-list': {
+      type: 'string',
+      multiple: true,
+      value: '<slug>',
+      description: 'letterboxd only: mark the films of this list (lists/<slug>.csv in the export) owned (repeatable)',
+    },
+    'with-reviews': { type: 'boolean', description: 'letterboxd only: use your latest review as notes for movies with no notes' },
+    'no-watchlist': { type: 'boolean', description: 'letterboxd only: leave the watchlist out' },
     'notes-from-description': { type: 'boolean', description: "imdb only: use a list row's Description as the movie's notes (fills blank notes)" },
     'dry-run': { type: 'boolean', description: 'Show what the import would do without changing anything' },
   },
@@ -89,14 +147,16 @@ export const importCmd: Command = {
     const file = pos[0];
     if (!file) throw new UserError('Usage: screentrackr import <file>');
     const imdb = file === 'imdb';
-    const files = imdb ? pos.slice(1) : [file];
+    const letterboxd = file === 'letterboxd';
+    const files = imdb || letterboxd ? pos.slice(1) : [file];
     if (imdb && !files.length) throw new UserError('Usage: screentrackr import imdb <file.csv>...');
-    if (!imdb && pos.length > 1) throw new UserError(`Unexpected argument "${pos[1]}"`);
+    if (letterboxd && !files.length) throw new UserError('Usage: screentrackr import letterboxd <export.zip|folder|file.csv>...');
+    if (!imdb && !letterboxd && pos.length > 1) throw new UserError(`Unexpected argument "${pos[1]}"`);
     if (bool(values, 'merge') && bool(values, 'replace')) throw new UserError('Use either --merge or --replace, not both');
     const format = str(values, 'format');
     const timeout = str(values, 'timeout');
     const appleTv = file === 'apple-tv';
-    if ((appleTv || imdb) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
+    if ((appleTv || imdb || letterboxd) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
     if (!appleTv && timeout !== undefined) throw new UserError('--timeout only applies to `import apple-tv`');
     if (format !== undefined && !(FORMATS as readonly string[]).includes(format)) {
       throw new UserError(`Unknown format "${format}" (expected ${FORMATS.join(', ')})`);
@@ -127,6 +187,14 @@ export const importCmd: Command = {
       notesFromDescription,
     };
 
+    const ownedLists = strs(values, 'owned-list') ?? [];
+    const lbOpts: LetterboxdOptions = { withReviews: bool(values, 'with-reviews'), watchlist: !bool(values, 'no-watchlist'), ownedLists };
+    const lbFlags = ownedLists.length > 0 || bool(values, 'with-reviews') || bool(values, 'no-watchlist');
+    const noLbFlags = () => {
+      if (lbFlags) throw new UserError('--owned-list, --with-reviews and --no-watchlist only apply to Letterboxd exports');
+    };
+    if (letterboxd && imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
+
     let timeoutMs: number | undefined;
     if (timeout !== undefined) {
       const secs = Number(timeout);
@@ -136,19 +204,33 @@ export const importCmd: Command = {
 
     let parsed: Parsed;
     if (appleTv) {
-      if (imdbFlags) throw new UserError('--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files');
+      if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
+      noLbFlags();
       ctx.log('Reading the TV app library (experimental). macOS may ask to allow access to the TV app.');
       parsed = { format: 'apple-tv', records: await readAppleTvLibrary({ timeoutMs }), warnings: [], notices: [] };
     } else if (imdb) {
+      noLbFlags();
       parsed = parseImdbFiles(ctx.db(), files, imdbOpts);
+    } else if (letterboxd) {
+      parsed = parseLetterboxdPaths(files, lbOpts);
+    } else if (isDir(file) || looksLikeZip(readBytes(file))) {
+      // A folder or ZIP is read only as a Letterboxd export.
+      if (format !== undefined && format !== 'letterboxd') throw new UserError(`${basename(file)} is a folder or ZIP archive, not a ${format} file`);
+      if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
+      parsed = parseLetterboxdPaths([file], lbOpts);
     } else {
       const bytes = readBytes(file);
       const text = bytes.toString('utf8');
       const fmt = (format as ImportFormat | undefined) ?? detectFormat(text, basename(file));
       if (fmt === 'imdb') {
+        noLbFlags();
         parsed = parseImdbFiles(ctx.db(), [file], imdbOpts);
+      } else if (fmt === 'letterboxd') {
+        if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
+        parsed = parseLetterboxdPaths([file], lbOpts, true);
       } else {
-        if (imdbFlags) throw new UserError('--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files');
+        if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
+        noLbFlags();
         parsed = { ...parseImportDetailed(text, fmt, basename(file)), notices: [] };
       }
     }
@@ -157,6 +239,9 @@ export const importCmd: Command = {
     // An empty IMDb export (only a header) is "no rows", never "delete everything".
     if (parsed.format === 'imdb' && replace && parsed.records.length === 0) {
       throw new UserError('Nothing to import from the IMDb file, so --replace would empty your library. Nothing was changed.');
+    }
+    if (parsed.format === 'letterboxd' && replace && parsed.records.length === 0) {
+      throw new UserError('Nothing to import from the Letterboxd export, so --replace would empty your library. Nothing was changed.');
     }
 
     const db = ctx.db();
