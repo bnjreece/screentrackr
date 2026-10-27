@@ -1,0 +1,11 @@
+# Deploy only the site files.
+*
+!index.html
+!404.html
+!style.css
+!favicon.svg
+!og.png
+!robots.txt
+!vercel.json
+!fonts
+!fonts/**
