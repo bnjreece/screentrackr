@@ -163,7 +163,6 @@ export const importCmd: Command = {
     const ownedLists = strs(values, 'owned-list') ?? [];
     const lbOpts: LetterboxdOptions = { withReviews: bool(values, 'with-reviews'), watchlist: !bool(values, 'no-watchlist'), ownedLists };
     const memberLists = strs(values, 'list') ?? [];
-    if (bool(values, 'lists') && memberLists.length) throw new UserError('Use either --lists (every list) or --list <slug>, not both');
     if (memberLists.length) lbOpts.memberLists = memberLists;
     if (bool(values, 'lists')) lbOpts.allLists = true;
     if (bool(values, 'tags-as-lists')) lbOpts.tagsAsLists = true;

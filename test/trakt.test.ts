@@ -771,3 +771,69 @@ describe('history plays (0.4.0)', () => {
     ]);
   });
 });
+
+describe('when the history cannot say it is whole (0.4.0, Astra r1)', () => {
+  const play = (id: number, at: string, m: unknown = GLASS) => ({ id, watched_at: at, action: 'watch', type: 'movie', movie: m });
+  const two = { 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z')], 'watched-history-2.json': [play(2, '2022-02-02T12:00:00.000Z')] };
+  const refs = () => viewingsOf(db, (byTitle('The Glass Harbor')[0] as LibraryItem).id).map((v) => v.sourceRef);
+  beforeEach(() => applyImport(db, parse(two).records, { mode: 'merge' }));
+
+  it('loose files, or a page missing from the run, remove nothing', () => {
+    expect(refs()).toEqual(['2', '1']);
+    const loose = parse({ 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z')] }, { wholeExport: false });
+    expect(loose.records.some((r) => r.viewingsComplete)).toBe(false);
+    expect(loose.notices.join('\n')).toMatch(/may not be whole/);
+    applyImport(db, loose.records, { mode: 'merge' });
+    const gap = parse({ 'watched-history-2.json': [play(2, '2022-02-02T12:00:00.000Z')] });
+    expect(gap.records.some((r) => r.viewingsComplete)).toBe(false);
+    applyImport(db, gap.records, { mode: 'merge' });
+    expect(refs()).toEqual(['2', '1']);
+  });
+
+  it('an unreadable _errors.json, or a history row it could not read, removes nothing', () => {
+    const one = { 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z')] };
+    for (const files of [
+      { ...one, '_errors.json': 'not json' },
+      { 'watched-history.json': [...one['watched-history.json'], { id: 3, watched_at: '2023-01-01T00:00:00.000Z', type: 'movie', movie: { title: '', ids: { trakt: 101 } } }] },
+    ]) {
+      const res = parse(files);
+      expect(res.records.some((r) => r.viewingsComplete)).toBe(false);
+      applyImport(db, res.records, { mode: 'merge' });
+      expect(refs()).toEqual(['2', '1']);
+    }
+  });
+
+  it('a movie still in the export with no play left in a whole history loses its Trakt plays', () => {
+    const res = parse({ 'watched-history.json': [play(5, '2020-01-01T12:00:00.000Z', SALT)], 'ratings-movies.json': [{ rated_at: '2024-01-01T00:00:00.000Z', rating: 7, type: 'movie', movie: GLASS }] });
+    expect(rec(res.records, 101)).toMatchObject({ viewings: [], viewingsComplete: true, myRating: 7 });
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(refs()).toEqual([]);
+    expect(byTitle('The Glass Harbor')[0]).toMatchObject({ status: 'watched', watchedAt: null });
+  });
+
+  it('without a whole history, a bulk-logged play is left out so a date an older release kept is not counted twice', () => {
+    db.sql.exec('DELETE FROM library_items');
+    applyImport(db, [{ sourceTitle: 'Bulk Reel 1', sourceYear: 2001, status: 'watched', source: 'trakt', externalIds: { trakt: '600' } }], { mode: 'merge' });
+    const id = (byTitle('Bulk Reel 1')[0] as LibraryItem).id;
+    addViewing(db, id, { watchedAt: '2019-01-01', source: 'trakt' });
+    const files = { 'watched-history.json': bulkPlays(10, '2019-01-01T00:00:00.000Z'), '_errors.json': [{ endpoint: 'users/someone/history', error: 'HTTP 500' }] };
+    const res = parse(files);
+    expect(res.notices.join('\n')).toMatch(/Left out 10 bulk-logged plays/);
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([['2019-01-01', null]]);
+    // A whole export settles it: the play by its ref, without the fake date.
+    applyImport(db, parse({ 'watched-history.json': bulkPlays(10, '2019-01-01T00:00:00.000Z') }).records, { mode: 'merge' });
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([[null, '20000']]);
+  });
+});
+
+describe('readTraktExport says whether it read a whole export', () => {
+  it('a folder or a ZIP is whole; loose files are not', () => {
+    const dir = folder(exportFiles());
+    expect(readTraktExport([dir]).whole).toBe(true);
+    expect(readTraktExport([join(dir, 'watched-history.json'), join(dir, 'watched-history-2.json')]).whole).toBe(false);
+    const zip = join(tmp, `whole-${++n}.zip`);
+    writeFileSync(zip, makeZip(toBytes(exportFiles())));
+    expect(readTraktExport([zip]).whole).toBe(true);
+  });
+});

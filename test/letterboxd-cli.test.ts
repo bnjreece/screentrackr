@@ -181,8 +181,11 @@ describe('import letterboxd: plays and lists (0.4.0)', () => {
     expect(history.stdout).toMatch(/^2025-01-10 {2}R {2}The Glass Harbor \(1978\) {2}letterboxd {2}rated 7/m);
   });
 
-  it('refuses list flags that do not fit', () => {
-    expect(run(['import', 'letterboxd', zip, '--lists', '--list', 'favourites']).stderr).toMatch(/either --lists/);
+  it('takes --lists with --list, and refuses list flags that do not fit', () => {
+    // --lists with an owned list also named by --list: that one is a list too, and still marks owned.
+    const both = run(['import', 'letterboxd', zip, '--lists', '--owned-list', 'my-blu-rays', '--list', 'my-blu-rays', '--json']);
+    expect(both.code, both.stderr).toBe(0);
+    expect(json<{ listsCreated: string[] }>(both).listsCreated.sort()).toEqual(['Favourites', 'My Blu-rays']);
     const csv = join(tmp, 'plain.csv');
     writeFileSync(csv, 'title,year\nPale Rooftops,1994\n');
     expect(run(['import', csv, '--list', 'favourites']).stderr).toMatch(/only apply to Letterboxd exports/);

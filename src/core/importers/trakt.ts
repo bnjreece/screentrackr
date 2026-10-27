@@ -58,6 +58,13 @@ export interface TraktOptions {
   keepBulkDates?: boolean;
   /** IANA time zone for watch dates. Default: this machine's. */
   timeZone?: string;
+  /**
+   * The files are a whole export (its ZIP or folder), so a full history in
+   * them is each movie's whole Trakt history. Default true; pass false for
+   * loose files, which may be some of its pages only. Either way the history
+   * pages must run 1, 2, 3 and so on with none missing.
+   */
+  wholeExport?: boolean;
 }
 
 export interface TraktParse extends ParsedImport {
@@ -133,6 +140,8 @@ export interface TraktExport {
   files: TraktFile[];
   /** Files (or archive entries) skipped because they are not on the allow-list. */
   skippedFiles: number;
+  /** One ZIP or one folder was read, not loose files (see TraktOptions.wholeExport). */
+  whole: boolean;
 }
 
 const ALLOWED_NAMES = `${TRAKT_KINDS.join(', ')} (.json, also as numbered pages) and _errors.json`;
@@ -217,7 +226,12 @@ export function readTraktExport(paths: string[]): TraktExport {
     }
     if (files.length === before) throw new ImportError(`${path}: no Trakt export files found (expected ${ALLOWED_NAMES})`);
   }
-  return { files, skippedFiles };
+  let whole = false;
+  if (paths.length === 1) {
+    const only = paths[0] as string;
+    whole = statSync(only).isDirectory() || only.toLowerCase().endsWith('.zip');
+  }
+  return { files, skippedFiles, whole };
 }
 
 /** A short, safe description of a value for a warning (never serializes a nested value). */
@@ -313,6 +327,12 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   const warnings: string[] = [];
   const notices: string[] = [];
   const incomplete = new Set<string>();
+  /**
+   * Something the history may be missing that no part of the export names:
+   * an unreadable _errors.json, a history row that could not be read, a
+   * missing page, or loose files. The plays are then added, never removed.
+   */
+  let historyDoubt = opts.wholeExport === false;
   let exportErrors = 0;
   let skippedTv = 0;
 
@@ -330,6 +350,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       }
       if (!Array.isArray(list)) {
         exportErrors++;
+        historyDoubt = true;
         warnings.push(`${name}: could not be read, so your Trakt export may be incomplete. Export it again on app.trakt.tv if movies are missing.`);
         continue;
       }
@@ -368,14 +389,20 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
    * warned). History, ratings and watchlist rows carry a `type`, which must
    * be `movie`; watched-movies and collection rows have none.
    */
+  /** A row skipped with a warning: in the history, it may have been a play of any movie. */
+  let unread = 0;
   const movieOf = (row: unknown, where: string, deleted: { n: number }, typed: boolean): Acc | null => {
     if (!isObj(row)) {
       warnings.push(`${where}: not a Trakt row, skipped`);
+      unread++;
       return null;
     }
     if (typed ? row.type !== 'movie' : row.type !== undefined && row.type !== 'movie') {
       if (row.type === 'episode' || row.type === 'show' || row.type === 'season') skippedTv++;
-      else warnings.push(`${where}: ${row.type === undefined ? 'no row type' : `unknown row type ${describe(row.type)}`}, skipped`);
+      else {
+        warnings.push(`${where}: ${row.type === undefined ? 'no row type' : `unknown row type ${describe(row.type)}`}, skipped`);
+        unread++;
+      }
       return null;
     }
     const m = row.movie;
@@ -389,6 +416,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
     const traktId = ids.trakt;
     if (!title || typeof traktId !== 'number' || !Number.isSafeInteger(traktId) || traktId <= 0) {
       warnings.push(`${where}${title ? ` (${describe(title)})` : ''}: no title or Trakt id, skipped`);
+      unread++;
       return null;
     }
     let acc = accs.get(traktId);
@@ -417,6 +445,9 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
 
   for (const kind of TRAKT_KINDS) {
     const list = (pages.get(kind) ?? []).sort((a, b) => a.page - b.page || a.name.localeCompare(b.name));
+    // History pages must run 1, 2, 3...: a gap is a page the history is missing.
+    if (kind === 'watched-history' && list.some((p, i) => p.page !== i + 1)) historyDoubt = true;
+    const unreadBefore = unread;
     for (const page of list) {
       let rows: unknown;
       try {
@@ -480,6 +511,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
         warnings.push(`${page.name}: ${deleted.n} row${deleted.n === 1 ? '' : 's'} with no movie (a title deleted from Trakt), skipped`);
       }
     }
+    if (kind === 'watched-history' && unread > unreadBefore) historyDoubt = true;
   }
 
   // Bulk logs: 10 or more plays (or last-watched times) at the same second.
@@ -504,9 +536,13 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   }
   const usable = (t: number | null): t is number => t !== null && !bulk.has(Math.floor(t / 1000));
 
-  // The history is each movie's whole Trakt history only when it was read and nothing says it is incomplete.
-  const historyComplete = historyRead && !incomplete.has('watch history');
+  // The history is each movie's whole Trakt history only when it was read and nothing says or suggests it is incomplete.
+  const historyComplete = historyRead && !incomplete.has('watch history') && !historyDoubt;
+  if (historyRead && !historyComplete && !incomplete.has('watch history')) {
+    notices.push('The Trakt history may not be whole (loose files, a missing page, or rows or an error list that could not be read), so its plays were added and none were removed.');
+  }
   let bulkDated = 0;
+  let bulkLeftOut = 0;
   const records: ImportRecord[] = [];
   for (const a of accs.values()) {
     const rec: ImportRecord = { sourceTitle: a.title, source: 'trakt', externalIds: { trakt: String(a.traktId) }, fillOnly: true };
@@ -521,7 +557,13 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
     if (watched) {
       rec.status = 'watched' satisfies Status;
       const day = (t: number | null) => (usable(t) ? localDate(t, fmt) : null);
-      const viewings: ImportViewing[] = a.plays.map((p) => ({ watchedAt: day(p.t), sourceRef: p.ref }));
+      // Without a whole history, a bulk-logged play is left out: an earlier
+      // import may hold it with a date (a release before 0.4.0 kept no
+      // ref), and nothing could tell the two apart, so it would count twice.
+      // A whole history settles it (by ref, and removing the old play).
+      const keep = (p: { t: number | null }) => historyComplete || p.t === null || !bulk.has(Math.floor(p.t / 1000));
+      bulkLeftOut += a.plays.filter((p) => !keep(p)).length;
+      const viewings: ImportViewing[] = a.plays.filter(keep).map((p) => ({ watchedAt: day(p.t), sourceRef: p.ref }));
       if (!historyComplete || !a.plays.length) {
         // No whole history to go by: watched-movies' last play stands in (once
         // per day; the history's play of that day, when it has one, is it).
@@ -532,7 +574,14 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       if (historyComplete && a.plays.length) rec.viewingsComplete = true;
       const anyKnown = a.wmLast !== null || a.plays.some((p) => p.t !== null);
       if (anyKnown && !viewings.some((v) => v.watchedAt !== null)) bulkDated++;
-    } else if (a.watchlist) rec.statusIfNew = 'queue';
+    } else {
+      if (a.watchlist) rec.statusIfNew = 'queue';
+      // In the export but with no play in a whole history: no Trakt play of it is left.
+      if (historyComplete) {
+        rec.viewings = [];
+        rec.viewingsComplete = true;
+      }
+    }
 
     if (a.ratings.length) {
       if (a.ratings.some((r) => r !== a.ratings[0])) {
@@ -547,6 +596,11 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   if (bulkDated) {
     notices.push(
       `${bulkDated} watched movie${bulkDated === 1 ? ' was' : 's were'} logged in bulk on Trakt (${BULK_PLAYS} or more plays at the same second), so ${bulkDated === 1 ? 'its watch date was' : 'their watch dates were'} left out. --keep-bulk-dates keeps them.`,
+    );
+  }
+  if (bulkLeftOut) {
+    notices.push(
+      `Left out ${bulkLeftOut} bulk-logged play${bulkLeftOut === 1 ? '' : 's'}, since the history is not whole; import a complete export to bring ${bulkLeftOut === 1 ? 'it' : 'them'} in.`,
     );
   }
   if (skippedTv) notices.push(`Skipped ${skippedTv} TV row${skippedTv === 1 ? '' : 's'} (only movies are imported).`);
@@ -565,5 +619,6 @@ export function parseTraktFile(text: string, filename?: string, opts: TraktOptio
       `${basename(name) || 'This file'}: looks like a Trakt export file, but only ${ALLOWED_NAMES} are read, under their export names. Use \`screentrackr import trakt <the export ZIP>\`.`,
     );
   }
-  return parseTrakt([{ name, text }], opts);
+  // One file is never a whole export.
+  return parseTrakt([{ name, text }], { ...opts, wholeExport: false });
 }

@@ -394,7 +394,14 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
   }
   if (unplaced) {
     warnings.push(
-      `${unplaced} diary entr${unplaced === 1 ? 'y has' : 'ies have'} no film with the same name and year in watched.csv, ratings.csv or the watchlist, so ${unplaced === 1 ? 'it was' : 'they were'} not used. Import the whole export to include ${unplaced === 1 ? 'it' : 'them'}.`,
+      `${unplaced} diary entr${unplaced === 1 ? 'y has' : 'ies have'} no film with the same name and year in watched.csv, ratings.csv or the watchlist, so ${unplaced === 1 ? 'it was' : 'they were'} not used, and no Letterboxd play was removed (any film could be ${unplaced === 1 ? 'its' : 'theirs'}). Import the whole export to include ${unplaced === 1 ? 'it' : 'them'}.`,
+    );
+  }
+  let noLink = 0;
+  for (const list of entriesOf.values()) noLink += list.filter((e) => e.uri === null).length;
+  if (noLink) {
+    warnings.push(
+      `${noLink} diary entr${noLink === 1 ? 'y has' : 'ies have'} no entry link (Letterboxd URI), so ${noLink === 1 ? 'it is' : 'they are'} told apart by date only: entries of one film on one day without a link count as one play.`,
     );
   }
 
@@ -439,11 +446,13 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
         (e): ImportViewing => ({ watchedAt: e.watchedDate, rewatch: e.rewatch, rating: e.rating ?? null, sourceRef: e.uri }),
       );
     }
-    // The diary was read and every entry that may be this film's was
-    // attached: these are its whole Letterboxd history, so an entry deleted
+    // The diary was read and every entry was attached (none could be
+    // this film's but missed): these are its whole Letterboxd history, so an entry deleted
     // on Letterboxd goes (and with no entry left, every Letterboxd play of
     // the film). Plays you logged and other sources' plays stay.
-    if (inp.diary && !unsure.has(f.uri)) {
+    // An entry that could not be attached anywhere may be this film's
+    // (renamed since), so then no film gets a complete set.
+    if (inp.diary && !unsure.has(f.uri) && unplaced === 0) {
       rec.viewings ??= [];
       rec.viewingsComplete = true;
     }

@@ -90,8 +90,8 @@ type Parsed = ParsedSource;
 
 /** `import trakt`: Trakt's data export ZIP, its folder, or single files from it. Only allow-listed files are read. */
 function parseTraktExport(paths: string[], keepBulkDates: boolean): Parsed {
-  const { files, skippedFiles } = readTraktExport(paths);
-  const res = parseTrakt(files, { keepBulkDates });
+  const { files, skippedFiles, whole } = readTraktExport(paths);
+  const res = parseTrakt(files, { keepBulkDates, wholeExport: whole });
   const notices = [...res.notices];
   if (skippedFiles) notices.push(`Left ${skippedFiles} other file${skippedFiles === 1 ? '' : 's'} in the export unread (only movie history, ratings, watchlist and collection are read).`);
   return {

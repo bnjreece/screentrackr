@@ -590,3 +590,26 @@ describe('diary plays and lists (0.4.0)', () => {
     expect(parseFolder().records.some((r) => r.lists)).toBe(false);
   });
 });
+
+describe('when the diary cannot say it is whole (0.4.0, Astra r1)', () => {
+  const DIARY_HEAD = 'Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date';
+  const watched = (title = 'Quiet Ledger') => ({ name: 'watched.csv', text: `Date,Name,Year,Letterboxd URI\n2024-04-02,${title},1999,https://boxd.it/zZ5e\n` });
+  const diary = (...rows: string[]) => ({ name: 'diary.csv', text: `${DIARY_HEAD}\n${rows.join('\n')}\n` });
+
+  it('an entry no film fits (a film renamed since) removes no play of any film', () => {
+    applyImport(db, parseLetterboxdFiles([watched(), diary('2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,,,,2019-01-01')]).records, { mode: 'merge' });
+    const id = (item('Quiet Ledger')[0] as LibraryItem).id;
+    // The film's own row now has a new title, its diary rows the old one.
+    const renamed = parseLetterboxdFiles([watched('Quiet Ledger (Restored)'), diary('2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,,,,2019-01-01')]);
+    expect(renamed.warnings.join('\n')).toMatch(/no Letterboxd play was removed/);
+    expect(renamed.records.some((r) => r.viewingsComplete)).toBe(false);
+    applyImport(db, renamed.records, { mode: 'merge' });
+    expect(viewingsOf(db, id).map((v) => v.sourceRef)).toEqual(['https://boxd.it/e1']);
+  });
+
+  it('says so when entries have no link, since one film on one day then counts once', () => {
+    const res = parseLetterboxdFiles([watched(), diary('2019-01-02,Quiet Ledger,1999,,3,,,2019-01-01', '2019-01-02,Quiet Ledger,1999,,4,Yes,,2019-01-01')]);
+    expect(res.warnings.join('\n')).toMatch(/2 diary entries have no entry link/);
+    expect(res.records[0]?.viewings).toHaveLength(2);
+  });
+});
