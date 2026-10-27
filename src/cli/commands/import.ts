@@ -1,5 +1,5 @@
-import { readFileSync, statSync } from 'node:fs';
-import { basename } from 'node:path';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { catalogReady, type Db } from '../../core/db.js';
 import { readAppleTvLibrary } from '../../core/importers/apple-tv.js';
 import {
@@ -21,7 +21,9 @@ import {
   type LetterboxdOptions,
   type LetterboxdParse,
 } from '../../core/importers/letterboxd.js';
+import { isExcludedTraktName, parseTrakt, readTraktExport, traktFileOf } from '../../core/importers/trakt.js';
 import { applyImport, detectFormat, FORMATS, parseImportDetailed, type ImportFormat, type ParsedImport } from '../../core/importers/index.js';
+import { listZip } from '../../core/zip.js';
 import { bool, str, strs, type Command } from '../command.js';
 import { UserError } from '../context.js';
 
@@ -45,6 +47,23 @@ interface Parsed extends ParsedImport {
   format: ImportFormat | 'apple-tv';
   notices: string[];
   skippedByType?: Record<string, number>;
+  /** Extra fields for `--json` output. */
+  extra?: Record<string, unknown>;
+}
+
+/** `import trakt`: Trakt's data export ZIP, its folder, or single files from it. Only allow-listed files are read. */
+function parseTraktExport(paths: string[], keepBulkDates: boolean): Parsed {
+  const { files, skippedFiles } = readTraktExport(paths);
+  const res = parseTrakt(files, { keepBulkDates });
+  const notices = [...res.notices];
+  if (skippedFiles) notices.push(`Left ${skippedFiles} other file${skippedFiles === 1 ? '' : 's'} in the export unread (only movie history, ratings, watchlist and collection are read).`);
+  return {
+    format: 'trakt',
+    records: res.records,
+    warnings: res.warnings,
+    notices,
+    extra: { skippedTv: res.skippedTv, skippedFiles, exportErrors: res.exportErrors, incomplete: res.incomplete, bulkDated: res.bulkDated },
+  };
 }
 
 function parseImdbFiles(db: Db, files: string[], opts: ImdbOptions): Parsed {
@@ -72,6 +91,43 @@ function isDir(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * What a ZIP or folder given to a plain `import` holds, told from its entry
+ * names alone (no entry is inflated, no file inside is opened): a Letterboxd
+ * export has a watched.csv, a Trakt export has its allow-listed JSON files.
+ * Returns null for a path that is neither a folder nor a ZIP.
+ */
+function archiveKind(path: string): 'letterboxd' | 'trakt' | null {
+  let names: string[];
+  if (isDir(path)) {
+    names = [];
+    const walk = (dir: string, depth: number) => {
+      if (depth > 4) return;
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        if (d.isDirectory()) walk(join(dir, d.name), depth + 1);
+        else if (d.isFile()) names.push(d.name);
+      }
+    };
+    walk(path, 0);
+  } else {
+    const bytes = readBytes(path);
+    if (!looksLikeZip(bytes) && !/\.zip$/i.test(path)) return null;
+    names = listZip(bytes)
+      .filter((e) => !e.unsafe)
+      .map((e) => basename(e.name.replace(/\\/g, '/')));
+  }
+  const isLetterboxd = names.some((n) => n.toLowerCase() === 'watched.csv');
+  const isTrakt = names.some((n) => traktFileOf(n) !== null);
+  if (isLetterboxd && isTrakt) {
+    throw new UserError(`${basename(path)} holds both a Letterboxd and a Trakt export. Use \`screentrackr import letterboxd\` or \`screentrackr import trakt\` to say which.`);
+  }
+  if (isTrakt) return 'trakt';
+  if (isLetterboxd) return 'letterboxd';
+  throw new UserError(
+    `${basename(path)} is a folder or ZIP archive, but not a Letterboxd export (no watched.csv) or a Trakt export (no watched-history, ratings-movies or other Trakt export file). Nothing was imported.`,
+  );
 }
 
 function fromLetterboxd(res: LetterboxdParse): Parsed {
@@ -106,7 +162,7 @@ function parseLetterboxdPaths(paths: string[], opts: LetterboxdOptions, detected
 export const importCmd: Command = {
   name: 'import',
   summary: 'Bring in a library file (merge by default)',
-  usage: 'import <file|apple-tv|imdb <file.csv>...|letterboxd <export.zip|folder|file.csv>...> [--format <format>] [--merge | --replace] [--dry-run]',
+  usage: 'import <file|apple-tv|imdb <file.csv>...|letterboxd <export.zip|folder|file.csv>...|trakt <export.zip|folder>...> [--format <format>] [--merge | --replace] [--dry-run]',
   details: [
     `Formats: ${FORMATS.join(', ')}. The format is detected when --format is omitted.`,
     "`import apple-tv` (experimental, macOS only) reads the TV app's library directly. Movies with a recorded play date are marked watched; the rest keep their current status.",
@@ -114,6 +170,7 @@ export const importCmd: Command = {
       IMDB_INCLUDE_TYPES.join(', ') +
       '), --checkin-dates uses check-in dates as watched dates, --notes-from-description keeps a list row\'s Description as notes.',
     "`import letterboxd <export.zip|folder|file.csv>...` reads the export you downloaded from letterboxd.com (Settings, Data). Watched and rated films are marked watched, with half stars stored times two (1 to 10); the watched date comes from your diary; watchlist films go in the queue only when they are new; nothing is marked owned unless you name a list with --owned-list <slug> (repeatable). --with-reviews takes your latest review as notes for movies with none; --no-watchlist leaves the watchlist out.",
+    "`import trakt <export.zip|folder>` reads the data export you download from Trakt (Settings > Data > Raw export), or files from it. Only movie history, ratings, watchlist, collection and the export's error list are read. Watched movies are marked watched with the latest play's date, watchlist movies go in the queue only when they are new, and only the collection marks a movie owned. Plays logged in bulk (10 or more at the same second) lose their dates unless --keep-bulk-dates. It only merges (--replace is refused). A plain `import` of the export ZIP or one of those files does the same, and refuses the export's other files without opening them. Nothing is fetched from Trakt.",
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
     '--replace backs up your library to backups/ first, then replaces it.',
     '--dry-run reports what the import would add, update and leave for review, and changes nothing (no backup either).',
@@ -140,6 +197,7 @@ export const importCmd: Command = {
     },
     'with-reviews': { type: 'boolean', description: 'letterboxd only: use your latest review as notes for movies with no notes' },
     'no-watchlist': { type: 'boolean', description: 'letterboxd only: leave the watchlist out' },
+    'keep-bulk-dates': { type: 'boolean', description: 'trakt only: keep the dates of plays logged in bulk' },
     'notes-from-description': { type: 'boolean', description: "imdb only: use a list row's Description as the movie's notes (fills blank notes)" },
     'dry-run': { type: 'boolean', description: 'Show what the import would do without changing anything' },
   },
@@ -148,15 +206,17 @@ export const importCmd: Command = {
     if (!file) throw new UserError('Usage: screentrackr import <file>');
     const imdb = file === 'imdb';
     const letterboxd = file === 'letterboxd';
-    const files = imdb || letterboxd ? pos.slice(1) : [file];
+    const trakt = file === 'trakt';
+    const files = imdb || letterboxd || trakt ? pos.slice(1) : [file];
     if (imdb && !files.length) throw new UserError('Usage: screentrackr import imdb <file.csv>...');
     if (letterboxd && !files.length) throw new UserError('Usage: screentrackr import letterboxd <export.zip|folder|file.csv>...');
-    if (!imdb && !letterboxd && pos.length > 1) throw new UserError(`Unexpected argument "${pos[1]}"`);
+    if (trakt && !files.length) throw new UserError('Usage: screentrackr import trakt <trakt-export.zip | folder | file.json>...');
+    if (!imdb && !letterboxd && !trakt && pos.length > 1) throw new UserError(`Unexpected argument "${pos[1]}"`);
     if (bool(values, 'merge') && bool(values, 'replace')) throw new UserError('Use either --merge or --replace, not both');
     const format = str(values, 'format');
     const timeout = str(values, 'timeout');
     const appleTv = file === 'apple-tv';
-    if ((appleTv || imdb || letterboxd) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
+    if ((appleTv || imdb || letterboxd || trakt) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
     if (!appleTv && timeout !== undefined) throw new UserError('--timeout only applies to `import apple-tv`');
     if (format !== undefined && !(FORMATS as readonly string[]).includes(format)) {
       throw new UserError(`Unknown format "${format}" (expected ${FORMATS.join(', ')})`);
@@ -202,8 +262,35 @@ export const importCmd: Command = {
       timeoutMs = Math.round(secs * 1000);
     }
 
+    const plain = !trakt && !imdb && !letterboxd && !appleTv;
+    // The other files of a Trakt export (account settings, other people,
+    // comments, lists) are refused by name, before they are opened.
+    if (plain && isExcludedTraktName(file)) {
+      throw new UserError(
+        `${basename(file)}: a Trakt export file ScreenTrackr does not read (only movie history, ratings, watchlist and collection are). It was not opened. Use \`screentrackr import trakt <the export ZIP>\`.`,
+      );
+    }
+    // A Trakt export's ZIP, or one of the files it reads, goes to the bounded
+    // Trakt reader, as with `import trakt`.
+    // A plain ZIP or folder goes to the reader its entry names point to.
+    const plainArchive = plain && format === undefined && traktFileOf(file) === null ? archiveKind(file) : null;
+    const traktRoute = trakt || format === 'trakt' || (plain && format === undefined && (traktFileOf(file) !== null || plainArchive === 'trakt'));
+    const keepBulkDates = bool(values, 'keep-bulk-dates');
+    if (keepBulkDates && !traktRoute) throw new UserError('--keep-bulk-dates only applies to `import trakt`');
+    const replace = bool(values, 'replace');
+    // A Trakt export can't show that it is complete (a missing file may mean
+    // "none" or "failed"), so it never replaces a library: it only merges.
+    const traktReplace =
+      'A Trakt import only merges: an export cannot show that it is complete, so --replace could drop movies. Nothing was changed. Run it without --replace.';
+    if (replace && traktRoute) throw new UserError(traktReplace);
+
     let parsed: Parsed;
-    if (appleTv) {
+    if (traktRoute) {
+      if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
+      noLbFlags();
+      // The bounded reader checks each name against the allow-list before opening it.
+      parsed = parseTraktExport(files, keepBulkDates);
+    } else if (appleTv) {
       if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
       noLbFlags();
       ctx.log('Reading the TV app library (experimental). macOS may ask to allow access to the TV app.');
@@ -214,7 +301,7 @@ export const importCmd: Command = {
     } else if (letterboxd) {
       parsed = parseLetterboxdPaths(files, lbOpts);
     } else if (isDir(file) || looksLikeZip(readBytes(file))) {
-      // A folder or ZIP is read only as a Letterboxd export.
+      // Any other folder or ZIP is read only as a Letterboxd export.
       if (format !== undefined && format !== 'letterboxd') throw new UserError(`${basename(file)} is a folder or ZIP archive, not a ${format} file`);
       if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
       parsed = parseLetterboxdPaths([file], lbOpts);
@@ -235,7 +322,6 @@ export const importCmd: Command = {
       }
     }
 
-    const replace = bool(values, 'replace');
     // An empty IMDb export (only a header) is "no rows", never "delete everything".
     if (parsed.format === 'imdb' && replace && parsed.records.length === 0) {
       throw new UserError('Nothing to import from the IMDb file, so --replace would empty your library. Nothing was changed.');
@@ -243,6 +329,8 @@ export const importCmd: Command = {
     if (parsed.format === 'letterboxd' && replace && parsed.records.length === 0) {
       throw new UserError('Nothing to import from the Letterboxd export, so --replace would empty your library. Nothing was changed.');
     }
+    // Detected from the file's contents (it was read to tell its format).
+    if (replace && parsed.format === 'trakt') throw new UserError(traktReplace);
 
     const db = ctx.db();
     for (const n of parsed.notices) ctx.log(n);
@@ -251,7 +339,7 @@ export const importCmd: Command = {
     const dryRun = bool(values, 'dry-run');
     const summary = applyImport(db, parsed.records, { mode: replace ? 'replace' : 'merge', dryRun });
 
-    const extra = parsed.skippedByType ? { skippedByType: parsed.skippedByType } : {};
+    const extra = { ...(parsed.skippedByType ? { skippedByType: parsed.skippedByType } : {}), ...parsed.extra };
     ctx.emit({ format: parsed.format, records: parsed.records.length, warnings: parsed.warnings, ...extra, ...summary }, () =>
       [
         dryRun ? `Dry run: nothing was changed. ${parsed.records.length} records (${parsed.format}).` : `Imported ${parsed.records.length} records (${parsed.format}).`,

@@ -69,8 +69,9 @@ export interface ImportRecord {
    * watched-date source equals `source`). A date the user set, another source
    * set, or a JSON v1 file gave without a source is never cleared. For a
    * source whose earlier, partial export carried dates a later, full export
-   * shows were fake (Trakt's bulk "mark watched" plays). Status, era and
-   * rating are untouched.
+   * shows were fake (Trakt's bulk "mark watched" plays). The watched era goes
+   * with the date only when it is the era that date implies (eraOf); any other
+   * era, the status and the rating are untouched.
    */
   clearWatchedAtIfOwn?: boolean;
   /**
@@ -101,7 +102,7 @@ export interface ImportRecord {
   addedAt?: string;
 }
 
-export const FORMATS = ['json-v1', 'legacy', 'neon-rows', 'apple-paste', 'csv', 'imdb', 'letterboxd'] as const;
+export const FORMATS = ['json-v1', 'legacy', 'neon-rows', 'apple-paste', 'csv', 'imdb', 'letterboxd', 'trakt'] as const;
 export type ImportFormat = (typeof FORMATS)[number];
 
 /** A problem with the import input. The CLI maps it to exit code 1. */
@@ -119,6 +120,12 @@ export interface ParsedImport {
 }
 
 /** Trimmed string, or null when blank or not a string-like value. */
+/** The watched era a watched date falls in. */
+export function eraOf(date: string): WatchedEra {
+  const y = Number(date.slice(0, 4));
+  return y < 2010 ? 'long-ago' : y < 2020 ? '2010s' : '2020s';
+}
+
 export function cleanText(v: unknown): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v !== 'string' && typeof v !== 'number') return null;

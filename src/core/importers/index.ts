@@ -35,13 +35,14 @@ import {
   type MatchStatus,
 } from '../types.js';
 import { parseApplePaste } from './apple-paste.js';
-import { FORMATS, ImportError, type ImportFormat, type ImportRecord, type ParsedImport } from './common.js';
+import { eraOf, FORMATS, ImportError, type ImportFormat, type ImportRecord, type ParsedImport } from './common.js';
 import { parseCsv } from './csv.js';
 import { isImdbHeader, parseImdb } from './imdb.js';
 import { isJsonV1, parseJsonV1 } from './json-v1.js';
 import { isLegacyExport, parseLegacy } from './legacy.js';
 import { isLetterboxdHeader, parseLetterboxdFiles } from './letterboxd.js';
 import { isNeonRows, parseNeonRows } from './neon-legacy-rows.js';
+import { isTraktJson, parseTraktFile, traktFileOf } from './trakt.js';
 
 export { FORMATS, ImportError, type ImportFormat, type ImportRecord, type ParsedImport };
 
@@ -65,8 +66,9 @@ export function detectFormat(text: string, filename?: string): ImportFormat {
     if (isJsonV1(data)) return 'json-v1';
     if (isLegacyExport(data)) return 'legacy';
     if (isNeonRows(data)) return 'neon-rows';
+    if (isTraktJson(data) || (Array.isArray(data) && filename && traktFileOf(filename))) return 'trakt';
     throw new ImportError(
-      'Unrecognized JSON. Expected a ScreenTrackr export, an old web app export (movieList), or old library rows ({ title, metadata }).',
+      'Unrecognized JSON. Expected a ScreenTrackr export, an old web app export (movieList), old library rows ({ title, metadata }), or a page of a Trakt export.',
     );
   }
   const firstLine = t.split(/\r?\n/, 1)[0] ?? '';
@@ -117,6 +119,12 @@ export function parseImportDetailed(
       // One file of an export, recognized by its columns and file name.
       // `screentrackr import letterboxd` also reads a whole export.
       const res = parseLetterboxdFiles([{ name: filename ?? 'file', text: body }], {});
+      parsed = { records: res.records, warnings: [...res.notices, ...res.warnings] };
+      break;
+    }
+    case 'trakt': {
+      // One page of a Trakt export. `screentrackr import trakt` reads the whole ZIP or folder.
+      const res = parseTraktFile(body, filename);
       parsed = { records: res.records, warnings: [...res.notices, ...res.warnings] };
       break;
     }
@@ -579,6 +587,7 @@ type Col = [column: string, value: string | number | null];
  */
 function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   const out: Col[] = [];
+  let clearsEra = false;
   const keep = <K extends keyof LibraryItem & keyof ImportRecord>(key: K, column: string, descriptive = false) => {
     const v = r[key];
     if (v === undefined || v === null || v === cur[key]) return;
@@ -602,7 +611,10 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
     out.push(['watched_at_source', r.watchedAtSource]);
   } else if (r.watchedAt == null && r.clearWatchedAtIfOwn === true && cur.watchedAt !== null && cur.watchedAtSource === r.source) {
     // The one clear an import may make: a date this same source set earlier.
+    // The era that date implies goes with it (an era of its own, which the
+    // date does not imply, stays).
     out.push(['watched_at', null], ['watched_at_source', null]);
+    if (cur.watchedEra !== null && cur.watchedEra === eraOf(cur.watchedAt)) clearsEra = true;
   }
   keep('myRating', 'my_rating');
   keep('notes', 'notes', true);
@@ -618,9 +630,9 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   if (r.status !== undefined) {
     if (r.status !== cur.status) out.push(['status', r.status]);
     const era =
-      r.status !== 'watched' ? null : (r.watchedEra ?? (cur.status === 'watched' ? cur.watchedEra : null));
+      r.status !== 'watched' ? null : (r.watchedEra ?? (cur.status === 'watched' && !clearsEra ? cur.watchedEra : null));
     if (era !== cur.watchedEra) out.push(['watched_era', era]);
-  }
+  } else if (clearsEra) out.push(['watched_era', null]);
 
   // A hand link is never moved, and an automatic match is not downgraded here
   // (`screentrackr match` re-runs matching on purpose). Unresolved items take

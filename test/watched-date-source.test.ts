@@ -89,6 +89,19 @@ describe('clearWatchedAtIfOwn', () => {
     expect(applyImport(db, [trakt({ clearWatchedAtIfOwn: true })], { mode: 'merge' })).toMatchObject({ updated: 0, unchanged: 1 });
   });
 
+  it('clears the era the cleared date implies, and keeps an era the date does not imply', () => {
+    applyImport(db, [trakt({ watchedAt: '2019-04-02', watchedEra: '2010s' })], { mode: 'merge' });
+    // A record without a status clears the era too.
+    applyImport(db, [trakt({ status: undefined, clearWatchedAtIfOwn: true })], { mode: 'merge' });
+    const era = () => (db.sql.prepare('SELECT watched_era AS era FROM library_items').get() as { era: string | null }).era;
+    expect(era()).toBeNull();
+    db.sql.exec('DELETE FROM item_external_ids; DELETE FROM library_items;');
+    applyImport(db, [trakt({ watchedAt: '2019-04-02', watchedEra: 'long-ago' })], { mode: 'merge' });
+    applyImport(db, [trakt({ clearWatchedAtIfOwn: true })], { mode: 'merge' });
+    expect(rows()).toMatchObject([{ at: null }]);
+    expect(era()).toBe('long-ago');
+  });
+
   it('never clears a date the user set', () => {
     applyImport(db, [trakt({ watchedAt: '2019-04-02' })], { mode: 'merge' });
     const id = (rows()[0] as { id: number }).id;

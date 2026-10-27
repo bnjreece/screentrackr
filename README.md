@@ -101,6 +101,25 @@ screentrackr import letterboxd letterboxd-yourname-2026-01-01-00-00-utc.zip
 - The export has no IMDb ids, so films are matched by title and year. Films the movie catalog doesn't have (TV miniseries, for one) stay unmatched and show up in `screentrackr match --review`. Diary entries for films Letterboxd removed (`orphaned/`) and things you deleted (`deleted/`) are skipped and counted. `profile.csv`, `comments.csv` and your likes are never opened.
 - The CSV files work on their own too (`screentrackr import letterboxd watched.csv ratings.csv diary.csv`), and plain `screentrackr import` recognizes the ZIP, the folder and each file. Keep the export's file names: `watched.csv` and `watchlist.csv` have the same columns, and `import letterboxd` decides from the names alone which files to open, so `screentrackr import letterboxd export/*.csv` opens only `watched.csv`, `ratings.csv`, `diary.csv`, `watchlist.csv`, `reviews.csv` (with `--with-reviews`) and the lists you name (from the `lists` folder), never a file in `deleted/`, `orphaned/` or `likes/`.
 
+### Trakt (data export)
+
+Trakt lets you download all your data as one ZIP. Sign in on [app.trakt.tv](https://app.trakt.tv), open Settings, then Data, and click Export now next to Raw export. The browser downloads `trakt-export-<username>.zip`. It needs no VIP account. screentrackr reads the ZIP (or the folder you unzip it to, or single files from it) and never contacts Trakt: there is no Trakt sign-in, app key or API sync in this release.
+
+```sh
+screentrackr import trakt trakt-export-yourname.zip
+```
+
+- Only these files are read: `watched-history`, `watched-movies`, `ratings-movies`, `lists-watchlist` and `collection-movies` (each also split into numbered pages), plus `_errors.json`. Everything else in the export, such as your account settings, the people you follow, comments, lists, paused playback and TV, is never opened. Only movies come in; TV rows are skipped and counted.
+- **Watched:** a movie with any play in your history is marked watched, with the latest play's date (in your local time zone) and its era. Plays Trakt has with no real date (at 1970 or before 1900) are watched with no date. When 10 or more plays share the same second, they were logged in bulk ("I've seen these"), so they keep watched but lose the date; `--keep-bulk-dates` keeps those dates. If an earlier, smaller export gave Trakt dates to plays that a fuller export now shows were logged in bulk, importing the fuller one clears those dates (and the era they set); it never clears a date you set yourself or another source set. A date imported before this release has no record of its source, so it is not cleared.
+- **Watchlist:** movies you don't have yet go in the queue; a movie you already have keeps its status, so a watched movie stays watched. A watched play beats the watchlist. Watchlist notes only fill an empty note.
+- **Ratings:** each movie gets your rating, a whole number from 1 to 10. A rating alone never marks a movie watched, so a new movie that is only rated (or only collected) arrives in the queue, and one you have keeps its status.
+- **Owned:** only your Trakt collection marks a movie owned. Nothing else in the export changes whether a movie is owned, and a new movie that is not in your collection is not owned.
+- All rows for one movie, across every file and page, become one movie. Trakt's movie id is kept, so importing a newer export updates the same movies, and importing the same export again changes nothing. Trakt's IMDb id is a match hint, checked against the catalog; the title and year only fill blanks. No Trakt catalog data (overviews, images, genres) is stored.
+- If the export could not fetch everything, Trakt lists that in `_errors.json`. Every entry is shown as a warning, saying which part (history, ratings, watchlist, collection) is incomplete, and so is a damaged file. Movies missing from it are left as they are.
+- Only movie history, ratings, watchlist, collection and `_errors.json` are read. A plain `screentrackr import` of the export ZIP or one of those files goes through the same reader; the export's other files (account settings, people you follow, comments, lists, TV) are refused by name and never opened.
+- A Trakt import only merges. An export can't show that it is complete (a missing file may mean you have none, or that it failed), so `--replace` is refused.
+- Single files are read only under their export names (such as `ratings-movies.json`), also by plain `screentrackr import`.
+
 ### ScreenTrackr JSON
 
 `screentrackr export` writes your whole library as ScreenTrackr JSON v1, and `screentrackr import` reads it back with nothing lost. Use it for backups and for moving between machines. The format is documented in [docs/library-json-v1.md](docs/library-json-v1.md).
@@ -109,7 +128,7 @@ screentrackr import letterboxd letterboxd-yourname-2026-01-01-00-00-utc.zip
 
 Imports merge by default: new movies are added, and fields the file has are updated. A merge never clears a status or rating that the file doesn't mention (the one thing an import may clear is a watched date that the same kind of source set earlier and now says is wrong; a date you set yourself is never cleared), an IMDb import never changes whether a movie is owned and never moves a movie out of watched, and importing the same file twice changes nothing. A record updates an existing movie only when exactly one item fits it: a different Apple id, a year more than one off (a year in the title counts, also before an edition tag like "(1978) (4K)"), a different runtime, a different director (except in `import apple-tv`, when the TV app's director is confirmed by the IMDb title both already share) or a different IMDb id rules an item out. For `import apple-tv`, the TV app's year is the year of the edition on sale, so it only rules out films made after it and is never stored, and a shared unconfirmed IMDb id is not enough on its own. A movie matched to IMDb that has no year, runtime or director of its own is judged by IMDb's, and how a title is written (an edition tag, the exact spelling) only tells editions of the same movie apart, never a film from its remake. A record that still fits several items (a title with no year, when you have the 1980 film and its 2020 remake) changes nothing and is listed with the candidate item ids; a row that changes nothing on one item but also fits a different one does not settle which one it is, so a later row in the same file still has to fit one on its own. Within one import each item is claimed by at most one record, so a file with two identical rows (two editions in an Apple TV paste) adds two items, a later change to that pair updates both, and importing an export restores every row. The full rules are in [docs/library-json-v1.md](docs/library-json-v1.md#which-item-a-record-updates). `--replace` starts over from the file, after saving a backup of your current library to `backups/` (an IMDb export with no rows is refused instead, so it can never empty your library). Every import prints how many items were added, updated, unchanged, and need review.
 
-The format is detected from the file. Pass `--format` (`json-v1`, `apple-paste`, `csv`, `imdb`, `letterboxd`, `legacy`, `neon-rows`) to choose it yourself. `legacy` and `neon-rows` read exports from the old ScreenTrackr web app.
+The format is detected from the file. Pass `--format` (`json-v1`, `apple-paste`, `csv`, `imdb`, `letterboxd`, `trakt`, `legacy`, `neon-rows`) to choose it yourself. `legacy` and `neon-rows` read exports from the old ScreenTrackr web app.
 
 ## Searching
 
@@ -187,7 +206,7 @@ Every command takes `--home <dir>`, `--json` and `--help`.
 
 ```text
 screentrackr setup [--refresh] [--no-cast] [--include-tv-movies]
-screentrackr import <file|apple-tv|imdb <file.csv>...|letterboxd <export.zip|folder|file.csv>...> [--format <format>] [--merge | --replace] [--dry-run]
+screentrackr import <file|apple-tv|imdb <file.csv>...|letterboxd <export.zip|folder|file.csv>...|trakt <export.zip|folder>...> [--format <format>] [--merge | --replace] [--dry-run]
 screentrackr search [filters]
 screentrackr show <id|tconst|title>
 screentrackr add <tconst|title> [--year <yyyy>] [--status <status>] [--new-edition]
