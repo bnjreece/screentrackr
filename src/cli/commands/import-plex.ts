@@ -66,7 +66,7 @@ function version(): string {
 
 /**
  * One X-Plex-Client-Identifier per install, kept in the database (it is not a
- * secret). A dry run never opens the database, so it uses a one-off id.
+ * secret). A dry run never writes the database, so it uses a one-off id.
  */
 function clientId(ctx: Ctx, dryRun: boolean): string {
   if (dryRun) return randomUUID();
@@ -78,8 +78,7 @@ function clientId(ctx: Ctx, dryRun: boolean): string {
   return id;
 }
 
-function readToken(values: Values): string {
-  const fromStdin = bool(values, 'token-stdin');
+function readToken(fromStdin: boolean): string {
   const env = process.env.PLEX_TOKEN?.trim();
   if (fromStdin && env) throw new UserError('Use either PLEX_TOKEN or --token-stdin, not both');
   let token: string | undefined = env;
@@ -102,21 +101,53 @@ function readToken(values: Values): string {
   return token;
 }
 
-export async function readPlexImport(ctx: Ctx, values: Values): Promise<PlexParsed> {
-  const unwatched = str(values, 'unwatched-status') ?? 'someday';
+/** What `import plex` reads, as typed options (from flags, or from a saved sync source). */
+export interface PlexImportOptions {
+  url?: string;
+  sections?: string[];
+  includeOtherVideos?: boolean;
+  /** Status for new unwatched movies (default someday; skip leaves them out). */
+  unwatchedStatus?: string;
+  /** Read Plex star ratings (default true). */
+  ratings?: boolean;
+  /** Read the token from stdin instead of PLEX_TOKEN. */
+  tokenStdin?: boolean;
+  /** Read a saved listing instead of a server. */
+  fromFile?: string;
+}
+
+/** `import plex` flags as PlexImportOptions. */
+export function plexOptionsFromFlags(values: Values): PlexImportOptions {
+  const sections = strs(values, 'section');
+  return {
+    ...(str(values, 'url') !== undefined ? { url: str(values, 'url') } : {}),
+    ...(sections ? { sections } : {}),
+    includeOtherVideos: bool(values, 'include-other-videos'),
+    ...(str(values, 'unwatched-status') !== undefined ? { unwatchedStatus: str(values, 'unwatched-status') } : {}),
+    ratings: !bool(values, 'no-ratings'),
+    tokenStdin: bool(values, 'token-stdin'),
+    ...(str(values, 'from-file') !== undefined ? { fromFile: str(values, 'from-file') } : {}),
+  };
+}
+
+/**
+ * Read a Plex library (or a saved listing) to records. `dryRun` marks the
+ * result as a dry run and keeps the database untouched (a one-off client id).
+ */
+export async function readPlexImport(ctx: Ctx, opts: PlexImportOptions, dryRun = false): Promise<PlexParsed> {
+  const unwatched = opts.unwatchedStatus ?? 'someday';
   if (!(PLEX_UNWATCHED_STATUSES as readonly string[]).includes(unwatched)) {
     throw new UserError(`--unwatched-status expects ${PLEX_UNWATCHED_STATUSES.join(', ')} (got "${unwatched}")`);
   }
-  const mapOpts = { unwatchedStatus: unwatched as PlexUnwatchedStatus, ratings: !bool(values, 'no-ratings') };
-  const dryRun = bool(values, 'dry-run');
-  const file = str(values, 'from-file');
-  const sections = strs(values, 'section');
-  const url = str(values, 'url');
+  const mapOpts = { unwatchedStatus: unwatched as PlexUnwatchedStatus, ratings: opts.ratings !== false };
+  const file = opts.fromFile;
+  const sections = opts.sections?.length ? opts.sections : undefined;
+  const url = opts.url;
 
   let res: { records: ParsedImport['records']; warnings: string[]; notices: string[]; counts: PlexCounts };
   let complete: boolean;
   if (file !== undefined) {
-    if (url !== undefined || sections || bool(values, 'include-other-videos') || bool(values, 'token-stdin')) {
+    if (url !== undefined || sections || opts.includeOtherVideos === true || opts.tokenStdin === true) {
       throw new UserError('--from-file reads a saved listing, so --url, --section, --include-other-videos and --token-stdin do not apply');
     }
     let text: string;
@@ -132,7 +163,7 @@ export async function readPlexImport(ctx: Ctx, values: Values): Promise<PlexPars
     res = mapPlexItems(dump.movies, mapOpts);
     complete = dump.complete && res.counts.unreadable === 0;
   } else {
-    const token = readToken(values);
+    const token = readToken(opts.tokenStdin === true);
     const read = await readPlexLibrary({
       ...mapOpts,
       url: url ?? PLEX_DEFAULT_URL,
@@ -140,7 +171,7 @@ export async function readPlexImport(ctx: Ctx, values: Values): Promise<PlexPars
       clientId: clientId(ctx, dryRun),
       version: version(),
       ...(sections ? { sections } : {}),
-      includeOtherVideos: bool(values, 'include-other-videos'),
+      includeOtherVideos: opts.includeOtherVideos === true,
     });
     res = read;
     complete = read.complete;
