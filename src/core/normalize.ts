@@ -52,7 +52,9 @@ function splitSuffixes(folded: string): { base: string; groups: string[] } {
 export function stripTitleSuffixes(title: string): string {
   let base = title.trim();
   for (;;) {
-    const m = TRAILING_GROUP.exec(base);
+    // Full-width brackets read as ASCII ones (as NFKD folds them for normalization).
+    // Each is one UTF-16 unit either way, so match indexes still fit `base`.
+    const m = TRAILING_GROUP.exec(base.replace(/[\uff08\uff3b\uff09\uff3d]/g, (c) => ({ '\uff08': '(', '\uff3b': '[', '\uff09': ')', '\uff3d': ']' })[c] as string));
     if (!m || !isStrippableSuffix(fold(m[1] ?? ''))) break;
     const rest = base.slice(0, m.index).trim();
     if (!rest) break;

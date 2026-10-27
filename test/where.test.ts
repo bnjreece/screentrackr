@@ -129,6 +129,9 @@ describe('whereTitle', () => {
   it('never strips the whole title', () => {
     expect(stripTitleSuffixes('(2001)')).toBe('(2001)');
     expect(stripTitleSuffixes('  Échos (Remastered)  ')).toBe('Échos');
+    // Full-width brackets, as normalization folds them.
+    expect(stripTitleSuffixes('Night Ferry\uff082002\uff09\uff084K\uff09')).toBe('Night Ferry');
+    expect(stripTitleSuffixes('Night Ferry \uff3b4K\uff3d')).toBe('Night Ferry');
   });
 });
 
