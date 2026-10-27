@@ -81,7 +81,13 @@ const sameCells = (a: string[] | undefined, b: string[]) => !!a && a.length === 
 export function isLetterboxdHeader(firstLine: string): boolean {
   const line = firstLine.replace(/^\ufeff/, '').trim();
   // Parsed as CSV, so a header with quoted cells ("Date","Name",...) is recognized too.
-  const cells = parseCsvRows(line)[0] ?? [];
+  let cells: string[];
+  try {
+    cells = parseCsvRows(line)[0] ?? [];
+  } catch {
+    // Only a probe: a header whose quoted cell runs onto the next line is not Letterboxd's.
+    return false;
+  }
   if (cells.length === 1 && LIST_PREAMBLE.test((cells[0] ?? '').trim())) return true;
   return [FILM_HEADER, RATINGS_HEADER, DIARY_HEADER, REVIEWS_HEADER].some((h) => sameCells(cells, h));
 }

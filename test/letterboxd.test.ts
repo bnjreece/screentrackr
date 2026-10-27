@@ -349,6 +349,8 @@ describe('loose files and detection', () => {
     expect(res.format).toBe('letterboxd');
     expect(res.records[0]).toMatchObject({ myRating: 8, status: 'watched', ownedIfNew: false, externalIds: { letterboxd: 'https://boxd.it/zZ0n' } });
     expect(detectFormat('"Letterboxd list export v7"\n', 'x.csv')).toBe('letterboxd');
+    // A generic CSV whose header has a quoted cell with a line break still detects as CSV.
+    expect(detectFormat('title,year,"My\nNotes"\nNight Ferry,2002,x\n', 'x.csv')).toBe('csv');
   });
 
   it('matches a loose list file to --owned-list without case', () => {
