@@ -119,7 +119,8 @@ export function isTraktJson(data: unknown): boolean {
 /** Bytes per file, and in all, this reads from an export. Trakt pages are 250 rows, far below either. */
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
-const MAX_ZIP_BYTES = 1024 * 1024 * 1024;
+/** The largest export ZIP read at all; also checked before a plain import lists a ZIP to tell its kind. */
+export const MAX_ZIP_BYTES = 1024 * 1024 * 1024;
 
 export interface TraktExport {
   files: TraktFile[];

@@ -4,7 +4,7 @@
  * flags shared by `import plex` and `import jellyfin` are checked. Every
  * export here is invented.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -79,6 +79,22 @@ describe('plain import of a ZIP or folder', () => {
     const neither = join(tmp, 'neither.zip');
     writeFileSync(neither, makeZip({ 'notes.txt': Buffer.from('hello') }));
     await expect(importCmd.run(ctx, [neither], {})).rejects.toThrow(/not a Letterboxd export .* or a Trakt export/);
+  });
+
+  it('refuses an oversized ZIP before reading it, on every route', async () => {
+    // A sparse file: ZIP magic, then a size past the 1 GiB cap. Reading it
+    // whole would take a gigabyte; the size check stops it first.
+    const big = join(tmp, 'huge-export.zip');
+    writeFileSync(big, Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    truncateSync(big, 1024 * 1024 * 1024 + 1);
+    await expect(importCmd.run(ctx, [big], { 'dry-run': true })).rejects.toThrow(/too large to read/);
+    await expect(importCmd.run(ctx, [big], { format: 'letterboxd' })).rejects.toThrow(/too large to read/);
+    await expect(importCmd.run(ctx, ['letterboxd', big], {})).rejects.toThrow(/too large to read/);
+    await expect(importCmd.run(ctx, ['trakt', big], {})).rejects.toThrow(/too large to read/);
+    const disguised = join(tmp, 'huge-export.dat');
+    writeFileSync(disguised, Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    truncateSync(disguised, 1024 * 1024 * 1024 + 1);
+    await expect(importCmd.run(ctx, [disguised], {})).rejects.toThrow(/too large to read/);
   });
 
   it('checks the flags shared by plex and jellyfin', async () => {

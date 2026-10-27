@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { catalogReady, type Db } from '../../core/db.js';
 import { readAppleTvLibrary } from '../../core/importers/apple-tv.js';
@@ -21,7 +21,7 @@ import {
   type LetterboxdOptions,
   type LetterboxdParse,
 } from '../../core/importers/letterboxd.js';
-import { isExcludedTraktName, parseTrakt, readTraktExport, traktFileOf } from '../../core/importers/trakt.js';
+import { isExcludedTraktName, MAX_ZIP_BYTES, parseTrakt, readTraktExport, traktFileOf } from '../../core/importers/trakt.js';
 import { jellyfinDeviceId, mapJellyfinItems, readJellyfinItems, type JellyfinAuth } from '../../core/importers/jellyfin.js';
 import { applyImport, detectFormat, FORMATS, parseImportDetailed, type ImportFormat, type ParsedImport } from '../../core/importers/index.js';
 import { listZip } from '../../core/zip.js';
@@ -37,6 +37,20 @@ function readBytes(file: string): Buffer {
     return readFileSync(file);
   } catch (err) {
     throw new UserError(`Could not read ${file}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
+  }
+}
+
+/** The first four bytes of a file (fewer when it is shorter). */
+function readHead(file: string): Buffer {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, 'r');
+    const buf = Buffer.alloc(4);
+    return buf.subarray(0, readSync(fd, buf, 0, 4, 0));
+  } catch (err) {
+    throw new UserError(`Could not read ${file}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -118,9 +132,12 @@ function archiveKind(path: string): 'letterboxd' | 'trakt' | null {
     };
     walk(path, 0);
   } else {
-    const bytes = readBytes(path);
-    if (!looksLikeZip(bytes) && !/\.zip$/i.test(path)) return null;
-    names = listZip(bytes)
+    // Only the first bytes are read to tell a ZIP, and its size is checked
+    // before the archive is read to list it.
+    if (!looksLikeZip(readHead(path)) && !/\.zip$/i.test(path)) return null;
+    const size = statSync(path).size;
+    if (size > MAX_ZIP_BYTES) throw new UserError(`${basename(path)}: too large to read (over ${MAX_ZIP_BYTES} bytes). Nothing was imported.`);
+    names = listZip(readBytes(path))
       .filter((e) => !e.unsafe)
       .map((e) => basename(e.name.replace(/\\/g, '/')));
   }
@@ -146,9 +163,12 @@ function fromLetterboxd(res: LetterboxdParse): Parsed {
  */
 function parseLetterboxdPaths(paths: string[], opts: LetterboxdOptions, detected = false): Parsed {
   const first = paths[0] as string;
-  const whole = isDir(first) || (!first.toLowerCase().endsWith('.csv') && looksLikeZip(readBytes(first)));
+  const whole = isDir(first) || (!first.toLowerCase().endsWith('.csv') && looksLikeZip(readHead(first)));
   if (whole) {
     if (paths.length > 1) throw new UserError('Pass one Letterboxd export (a ZIP or a folder) at a time, or its CSV files');
+    if (!isDir(first) && statSync(first).size > MAX_ZIP_BYTES) {
+      throw new UserError(`${basename(first)}: too large to read (over ${MAX_ZIP_BYTES} bytes). Nothing was imported.`);
+    }
     return fromLetterboxd(parseLetterboxdExport(isDir(first) ? folderSource(first) : zipSource(readBytes(first)), opts));
   }
   if (paths.some(isDir)) throw new UserError('Pass one Letterboxd export (a ZIP or a folder) at a time, or its CSV files');
@@ -426,7 +446,7 @@ export const importCmd: Command = {
       parsed = res;
     } else if (letterboxd) {
       parsed = parseLetterboxdPaths(files, lbOpts);
-    } else if (isDir(file) || looksLikeZip(readBytes(file))) {
+    } else if (isDir(file) || looksLikeZip(readHead(file))) {
       // Any other folder or ZIP is read only as a Letterboxd export.
       if (format !== undefined && format !== 'letterboxd') throw new UserError(`${basename(file)} is a folder or ZIP archive, not a ${format} file`);
       if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
