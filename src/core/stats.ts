@@ -134,7 +134,7 @@ export interface WatchStatsOptions {
   year?: number;
   /** The block shown in full: its rows are capped only by an explicit `limit`. */
   by?: WatchStatsBy;
-  /** Rows in the genre and director blocks (default 10), or in the `by` block when given. */
+  /** Rows in the genre and director blocks (default 10), or in the `by` block when given. The rating distribution always has ten rows. */
   limit?: number;
   /** Only films with an edition in these lists (any of them, or all with listMode `all`), as in search. */
   lists?: string[];

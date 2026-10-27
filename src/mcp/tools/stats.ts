@@ -61,13 +61,13 @@ export const register: RegisterTools = (server, { db }) => {
       description: [
         'What you watched: plays and distinct films per calendar year watched (with rewatches), watched films by release decade, genre and director (count and your average rating), your rating distribution 1 to 10, watched films with no known date, and your average against IMDb\'s over films you rated.',
         'A film is every edition of one IMDb title together; one night recorded by two sources (or on two editions) is one play.',
-        'year limits every block to films played in that calendar year. by names the one block to return in full (others are capped); limit caps the genre and director blocks (default 10) or the by block.',
+        'year limits every block to films played in that calendar year. by names the one block to return in full (others are capped); limit caps the genre and director blocks (default 10) or the by block; the rating distribution always has all ten ratings.',
         'lists narrows to films in your lists, by name.',
       ].join(' '),
       inputSchema: {
         year: z.number().int().min(1800).max(2200).optional().describe('Calendar year watched, e.g. 2025.'),
         by: z.enum(WATCH_STATS_BY).optional().describe('The one block to return in full: year, decade, genre, director or rating.'),
-        limit: z.number().int().min(1).max(WATCH_STATS_MAX_LIMIT).optional().describe('Rows in the genre and director blocks (default 10), or in the by block.'),
+        limit: z.number().int().min(1).max(WATCH_STATS_MAX_LIMIT).optional().describe('Rows in the genre and director blocks (default 10), or in the by block (the rating distribution always has all ten ratings).'),
         lists: z.array(listNameSchema).min(1).max(50).optional().describe('Your lists by name (case-insensitive): films in any of them.'),
         listMode: z.enum(LIST_MODES).optional().describe('any (default): in at least one of lists. all: in every one.'),
       },

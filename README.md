@@ -263,7 +263,7 @@ screentrackr stats --by director -n 25   # one table in full
 screentrackr stats --list Halloween      # only the movies in a list
 ```
 
-`stats --watched` shows how many plays and distinct films you watched in each calendar year (with rewatches), the films you watched by release decade, genre and director (with your average rating), how you rated them from 1 to 10, how many watched films have no known date, and your average rating against IMDb's over the films you rated. `--year` limits every part of the report to films you played that year, `--by` prints one table in full, and `-n` sets how many genres and directors it lists (10 by default).
+`stats --watched` shows how many plays and distinct films you watched in each calendar year (with rewatches), the films you watched by release decade, genre and director (with your average rating), how you rated them from 1 to 10, how many watched films have no known date, and your average rating against IMDb's over the films you rated. `--year` limits every part of the report to films you played that year, `--by` prints one table in full, and `-n` sets how many genres and directors it lists (10 by default), or how many rows the `--by` table has (the rating chart always shows 1 to 10).
 
 - A film is every edition of one IMDb title together, so a movie you own twice counts once. A movie not matched to IMDb is its own film.
 - One night recorded by two sources (a Letterboxd diary entry and the same play on Trakt, say) is one play. Plays with no date count, but only in the totals.

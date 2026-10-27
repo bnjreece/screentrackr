@@ -152,7 +152,7 @@ export const stats: Command = {
     watched: { type: 'boolean', description: 'The full watch report' },
     year: { type: 'string', value: '<yyyy>', description: 'Only films you played in this calendar year' },
     by: { type: 'string', value: `<${WATCH_STATS_BY.join('|')}>`, description: 'Print this one table in full' },
-    limit: { type: 'string', short: 'n', value: '<n>', description: 'Rows in the genre and director tables (default 10), or in the --by table' },
+    limit: { type: 'string', short: 'n', value: '<n>', description: 'Rows in the genre and director tables (default 10), or in the --by table (the rating chart always shows 1 to 10)' },
     list: { type: 'string', multiple: true, value: '<name>', description: 'Only films in this list (repeatable; any of them unless --all-lists)' },
     'all-lists': { type: 'boolean', description: 'Require every --list' },
   },
