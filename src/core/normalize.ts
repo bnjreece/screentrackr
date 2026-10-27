@@ -57,6 +57,18 @@ export function titleSuffixYear(title: string): number | null {
   return null;
 }
 
+/**
+ * The edition tags among a title's trailing suffix groups, years left out,
+ * folded and with punctuation collapsed: "director s cut" for
+ * "Title (Director's Cut)", "" for a bare title.
+ */
+export function titleEditionTag(title: string): string {
+  return splitSuffixes(fold(title))
+    .groups.filter((g) => !YEAR_GROUP.test(g))
+    .map((g) => g.replace(/[^\p{L}\p{N}]+/gu, ' ').trim())
+    .join(' | ');
+}
+
 export function normalizeTitle(input: string): string {
   let s = splitSuffixes(fold(input)).base;
 

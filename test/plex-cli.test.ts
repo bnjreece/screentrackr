@@ -4,7 +4,7 @@
  * fails on purpose before a request is made. Titles and tokens are invented.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -94,7 +94,7 @@ describe('import plex', () => {
     const r = run(['--home', home, 'import', 'plex', '--from-file', dump, '--unwatched-status', 'skip', '--dry-run', '--json']);
     expect(r.code, r.stderr).toBe(0);
     expect(JSON.parse(r.stdout)).toMatchObject({ dryRun: true, records: 1, plex: { skippedUnwatched: 1 } });
-    expect(count(home)).toBe(0);
+    expect(existsSync(home)).toBe(false);
   });
 
   it('needs a token from PLEX_TOKEN or stdin, and never echoes one', () => {

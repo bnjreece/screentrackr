@@ -240,6 +240,14 @@ describe('reading the server', () => {
     expect(ignoring.records).toHaveLength(4);
     const noTotal = await read({ sections: SECTIONS.slice(0, 1), movies: { '3': many }, noTotal: true }, { pageSize: 3 });
     expect(noTotal.records).toHaveLength(4);
+    expect(noTotal.complete).toBe(true);
+  });
+
+  it('keeps paging past a short page when the server caps the page size and gives no total', async () => {
+    const many = Array.from({ length: 5 }, (_, i) => ({ ...lanternSeason, ratingKey: `k${i}`, title: `Invented Film ${i}` }));
+    const res = await read({ sections: SECTIONS.slice(0, 1), movies: { '3': many }, serverPageSize: 2, noTotal: true }, { pageSize: 4 });
+    expect(res.records).toHaveLength(5);
+    expect(res.complete).toBe(true);
   });
 
   it('guards against an empty page that claims more movies', async () => {
@@ -258,6 +266,7 @@ describe('reading the server', () => {
     expect(res.records).toHaveLength(0);
     expect(calls.filter((c) => c.url.pathname === '/library/sections/3/all')).toHaveLength(1);
     expect(res.warnings.join('\n')).toMatch(/fewer movies than it reported/);
+    expect(res.complete).toBe(false);
   });
 
   it('falls back when the server ignores includeGuids: fetches details for matched items, warns once', async () => {
@@ -431,6 +440,10 @@ describe('mapping Plex movies', () => {
     expect(res.records.slice(0, 6).every((r) => r.watchedAt === undefined)).toBe(true);
     expect(res.records.slice(6).every((r) => typeof r.watchedAt === 'string')).toBe(true);
     expect(res.warnings.join('\n')).toMatch(/6 movies.*same day/);
+    const three = map(ms.map((m, i) => ({ ...m, lastViewedAt: i < 3 ? day : noon(`2021-0${i}-15`) })));
+    expect(three.records.slice(0, 3).every((r) => r.watchedAt === undefined)).toBe(true);
+    const two = map(ms.map((m, i) => ({ ...m, lastViewedAt: i < 2 ? day : noon(`2021-0${i}-15`) })));
+    expect(two.records.every((r) => typeof r.watchedAt === 'string')).toBe(true);
   });
 
   it('skips non-movie items and items without a title', () => {
@@ -452,6 +465,26 @@ describe('mapping Plex movies', () => {
     ]);
     expect(res.records.map((r) => r.sourceTitle)).toEqual(['The Glass Harbor', 'The Glass Harbor (Extended Edition)']);
     expect(res.records[0]).toMatchObject({ status: 'watched', myRating: 7 });
+  });
+
+  it('never folds records that share an IMDb hint but name different films', () => {
+    const wrong = { ...lanternSeason, Guid: [{ id: 'imdb://tt9000002' }] };
+    const res = map([
+      glassHarbor2009,
+      { ...wrong, ratingKey: 'w1', title: 'Lantern Season', year: 1978 },
+      { ...glassHarbor2009, ratingKey: 'w2', year: 1978 },
+    ]);
+    expect(res.records).toHaveLength(3);
+  });
+
+  it('never folds a missing runtime into known ones, or runtimes more than 3 minutes apart', () => {
+    const res = map([
+      { ...glassHarbor2009, duration: undefined },
+      { ...glassHarbor2009, ratingKey: 'r100', duration: 100 * 60000 },
+      { ...glassHarbor2009, ratingKey: 'r140', duration: 140 * 60000 },
+      { ...glassHarbor2009, ratingKey: 'r102', duration: 102 * 60000 },
+    ]);
+    expect(res.records.map((r) => r.sourceRuntimeMin)).toEqual([null, 100, 140]);
   });
 });
 
@@ -492,6 +525,18 @@ describe('importing into the library', () => {
       ["The Glass Harbor (Director's Cut)", 140],
       ['The Glass Harbor', 128],
     ]);
+  });
+
+  it('keeps editions apart across separate imports, also with equal runtimes', () => {
+    plexImport([{ ...glassHarbor2009, editionTitle: 'Theatrical', viewCount: 0, userRating: undefined }]);
+    plexImport([{ ...glassHarbor2009, ratingKey: '5099', editionTitle: "Director's Cut", userRating: 9 }]);
+    plexImport([{ ...glassHarbor2009, ratingKey: '5100', viewCount: 0, userRating: undefined }]);
+    expect(items().map((i) => [i.sourceTitle, i.status, i.myRating])).toEqual([
+      ['The Glass Harbor (Theatrical)', 'someday', null],
+      ["The Glass Harbor (Director's Cut)", 'watched', 9],
+      ['The Glass Harbor', 'someday', null],
+    ]);
+    expect(plexImport([{ ...glassHarbor2009, ratingKey: '5099', editionTitle: "Director's Cut", userRating: 9 }])).toMatchObject({ added: 0, unchanged: 1 });
   });
 
   it('never downgrades a watched movie, never clears a rating, and marks an existing movie owned', () => {

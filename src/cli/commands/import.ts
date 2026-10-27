@@ -146,6 +146,9 @@ export const importCmd: Command = {
       if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
       const res = await readPlexImport(ctx, values);
       if (res.dryRun) return emitPlexDryRun(ctx, res);
+      if (!res.complete && bool(values, 'replace')) {
+        throw new UserError('Plex returned fewer movies than it reported, so --replace would drop the rest. Nothing was changed.');
+      }
       parsed = res;
     } else {
       const bytes = readBytes(file);

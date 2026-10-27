@@ -45,6 +45,8 @@ export interface PlexParsed extends ParsedImport {
   notices: string[];
   plex: PlexCounts;
   dryRun: boolean;
+  /** False when a library returned fewer movies than it reported. */
+  complete: boolean;
 }
 
 function version(): string {
@@ -55,12 +57,17 @@ function version(): string {
   }
 }
 
-/** One X-Plex-Client-Identifier per install, kept in the database (it is not a secret). A dry run never writes it. */
-function clientId(db: Db, dryRun: boolean): string {
+/**
+ * One X-Plex-Client-Identifier per install, kept in the database (it is not a
+ * secret). A dry run never opens the database, so it uses a one-off id.
+ */
+function clientId(ctx: Ctx, dryRun: boolean): string {
+  if (dryRun) return randomUUID();
+  const db: Db = ctx.db();
   const row = db.sql.prepare("SELECT value FROM meta WHERE key = 'plex_client_id'").get() as { value: string | null } | undefined;
   if (row?.value) return row.value;
   const id = randomUUID();
-  if (!dryRun) db.sql.prepare("INSERT INTO meta (key, value) VALUES ('plex_client_id', ?) ON CONFLICT(key) DO NOTHING").run(id);
+  db.sql.prepare("INSERT INTO meta (key, value) VALUES ('plex_client_id', ?) ON CONFLICT(key) DO NOTHING").run(id);
   return id;
 }
 
@@ -70,6 +77,8 @@ function readToken(values: Values): string {
   if (fromStdin && env) throw new UserError('Use either PLEX_TOKEN or --token-stdin, not both');
   let token: string | undefined = env;
   if (fromStdin) {
+    // Typed or pasted into a terminal, the token would stay on screen and in scrollback.
+    if (process.stdin.isTTY) throw new UserError('--token-stdin reads a piped token, e.g. `op read ... | screentrackr import plex --token-stdin`; it does not read from a terminal');
     try {
       token = readFileSync(0, 'utf8').trim();
     } catch {
@@ -98,6 +107,7 @@ export async function readPlexImport(ctx: Ctx, values: Values): Promise<PlexPars
   const url = str(values, 'url');
 
   let res: { records: ParsedImport['records']; warnings: string[]; notices: string[]; counts: PlexCounts };
+  let complete = true;
   if (file !== undefined) {
     if (url !== undefined || sections || bool(values, 'include-other-videos') || bool(values, 'token-stdin')) {
       throw new UserError('--from-file reads a saved listing, so --url, --section, --include-other-videos and --token-stdin do not apply');
@@ -115,12 +125,13 @@ export async function readPlexImport(ctx: Ctx, values: Values): Promise<PlexPars
       ...mapOpts,
       url: url ?? PLEX_DEFAULT_URL,
       token,
-      clientId: clientId(ctx.db(), dryRun),
+      clientId: clientId(ctx, dryRun),
       version: version(),
       ...(sections ? { sections } : {}),
       includeOtherVideos: bool(values, 'include-other-videos'),
     });
     res = read;
+    complete = read.complete;
     if (read.sections.length) res.notices.unshift(`Reading Plex libraries: ${read.sections.map((s) => `"${s.title}"`).join(', ')}.`);
   }
   const c = res.counts;
@@ -133,7 +144,7 @@ export async function readPlexImport(ctx: Ctx, values: Values): Promise<PlexPars
       (c.skipped ? `, ${c.skipped} other items skipped` : '') +
       '.',
   ];
-  return { format: 'plex', records: res.records, warnings: res.warnings, notices, plex: c, dryRun };
+  return { format: 'plex', records: res.records, warnings: res.warnings, notices, plex: c, dryRun, complete };
 }
 
 /** Print a dry run: what was read, nothing written. */

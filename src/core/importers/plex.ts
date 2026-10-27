@@ -26,6 +26,7 @@
  * - Plex's own ids (ratingKey, plex:// guid) are not stored: a ratingKey is
  *   per server and per file, and a guid changes when the owner fixes a match.
  */
+import { normalizeTitle } from '../normalize.js';
 import { cleanTconst, cleanText, cleanYear, foldRecords, ImportError, type ImportRecord, type ParsedImport } from './common.js';
 
 export interface PlexTag {
@@ -146,7 +147,7 @@ function localDate(epochSeconds: number): string | null {
 }
 
 /** A bulk "mark as watched" stamps every item with one day; such days carry no watch date. */
-const BULK_MIN = 5;
+const BULK_MIN = 3;
 const BULK_SHARE = 0.2;
 
 /** Turn Plex listing items into import records. Pure; no network. */
@@ -193,6 +194,7 @@ export function mapPlexItems(items: PlexMetadata[], opts: PlexMapOptions = {}): 
       owned: true,
       sourceOwnedRaw: 'plex',
       fillOnly: true,
+      editionStrict: true,
       source: 'plex',
     };
 
@@ -242,19 +244,25 @@ export function mapPlexItems(items: PlexMetadata[], opts: PlexMapOptions = {}): 
     }
   }
 
-  // One film in two movie libraries is one item; editions (by name, or a
-  // runtime more than 3 minutes apart) stay separate.
+  // One film in two movie libraries is one item. Records fold only when they
+  // agree on everything that tells films and editions apart: the IMDb hint
+  // (unchecked, so never enough alone), the edition name, the normalized
+  // title, the year (within one) and the runtime (within 3 minutes). A
+  // missing year or runtime only folds with another missing one.
   const groupOf = new Map<ImportRecord, string>();
-  const groups = new Map<string, { runtime: number | null }[]>();
+  const groups = new Map<string, { year: number | null; runtimes: (number | null)[] }[]>();
+  const close = (a: number | null, b: number | null, tol: number) => (a === null || b === null ? a === b : Math.abs(a - b) <= tol);
   for (const o of out) {
-    const base = o.rec.imdbIdHint ? `imdb:${o.rec.imdbIdHint}|${o.edition}` : null;
-    if (!base) continue;
+    if (!o.rec.imdbIdHint) continue;
+    const base = `imdb:${o.rec.imdbIdHint}|${o.edition}|${normalizeTitle(o.rec.sourceTitle)}`;
+    const year = o.rec.sourceYear ?? null;
     const list = groups.get(base) ?? [];
-    let idx = list.findIndex((g) => g.runtime === null || o.runtime === null || Math.abs(g.runtime - o.runtime) <= 3);
+    let idx = list.findIndex((g) => close(g.year, year, 1) && g.runtimes.every((rt) => close(rt, o.runtime, 3)));
     if (idx < 0) {
-      list.push({ runtime: o.runtime });
+      list.push({ year, runtimes: [] });
       idx = list.length - 1;
     }
+    list[idx]?.runtimes.push(o.runtime);
     groups.set(base, list);
     groupOf.set(o.rec, `${base}#${idx}`);
   }
@@ -406,11 +414,17 @@ async function listSections(client: PlexClient, opts: PlexReadOptions, notices: 
   return picked.map((s) => ({ key: s.key, title: s.title }));
 }
 
-async function listMovies(client: PlexClient, section: PlexSection, pageSize: number, warnings: string[]): Promise<PlexMetadata[]> {
+async function listMovies(
+  client: PlexClient,
+  section: PlexSection,
+  pageSize: number,
+  warnings: string[],
+): Promise<{ movies: PlexMetadata[]; complete: boolean }> {
   const out: PlexMetadata[] = [];
   const seen = new Set<string>();
   let start = 0;
-  for (let page = 0; page < MAX_PAGES; page++) {
+  for (let page = 0; ; page++) {
+    if (page >= MAX_PAGES) throw new ImportError(`"${section.title}" kept returning new pages after ${MAX_PAGES} requests; stopped without importing`);
     const { body, headers } = await client.get(
       `/library/sections/${encodeURIComponent(section.key)}/all`,
       { type: '1', includeGuids: '1', excludeFields: EXCLUDE_FIELDS },
@@ -430,17 +444,18 @@ async function listMovies(client: PlexClient, section: PlexSection, pageSize: nu
       fresh++;
     }
     // The server may ignore the requested size or not page at all: advance by
-    // what came back, and stop on an empty page or one with nothing new.
+    // what came back, and stop at the reported total, or (with no total) on
+    // an empty page or one with nothing new, never on a merely short page.
     if (meta.length === 0 || fresh === 0) {
       if (total !== null && out.length < total) {
         warnings.push(`"${section.title}" returned fewer movies than it reported (${out.length} of ${total})`);
+        return { movies: out, complete: false };
       }
-      break;
+      return { movies: out, complete: true };
     }
     start += meta.length;
-    if (total !== null ? start >= total : meta.length < pageSize) break;
+    if (total !== null && start >= total) return { movies: out, complete: true };
   }
-  return out;
 }
 
 /**
@@ -470,7 +485,9 @@ async function fillDetails(client: PlexClient, movies: PlexMetadata[]): Promise<
 }
 
 /** Read the movie libraries of a Plex Media Server and map them to import records. */
-export async function readPlexLibrary(opts: PlexReadOptions): Promise<PlexImport & { sections: PlexSection[] }> {
+export async function readPlexLibrary(
+  opts: PlexReadOptions,
+): Promise<PlexImport & { sections: PlexSection[]; /** False when a library returned fewer movies than it reported. */ complete: boolean }> {
   const base = plexBaseUrl(opts.url);
   if (!opts.token) throw new ImportError('No Plex token. Set PLEX_TOKEN.');
   const client = new PlexClient(base, opts);
@@ -479,7 +496,12 @@ export async function readPlexLibrary(opts: PlexReadOptions): Promise<PlexImport
   const pageSize = Math.max(1, Math.min(opts.pageSize ?? 200, 1000));
   const sections = await listSections(client, opts, notices);
   const movies: PlexMetadata[] = [];
-  for (const s of sections) movies.push(...(await listMovies(client, s, pageSize, warnings)));
+  let complete = true;
+  for (const s of sections) {
+    const listed = await listMovies(client, s, pageSize, warnings);
+    movies.push(...listed.movies);
+    complete &&= listed.complete;
+  }
   const matched = movies.filter((m) => /^plex:\/\//.test(cleanText(m.guid) ?? ''));
   if (matched.length && !matched.some((m) => Array.isArray(m.Guid))) {
     warnings.push(
@@ -488,5 +510,5 @@ export async function readPlexLibrary(opts: PlexReadOptions): Promise<PlexImport
   }
   await fillDetails(client, movies);
   const mapped = mapPlexItems(movies, opts);
-  return { ...mapped, warnings: [...warnings, ...mapped.warnings], notices: [...notices, ...mapped.notices], sections };
+  return { ...mapped, warnings: [...warnings, ...mapped.warnings], notices: [...notices, ...mapped.notices], sections, complete };
 }
