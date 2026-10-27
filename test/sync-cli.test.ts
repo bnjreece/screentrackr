@@ -13,7 +13,10 @@ import { launchdPaths, sync } from '../src/cli/commands/sync.js';
 import { UserError, type Ctx } from '../src/cli/context.js';
 import { configPath, loadConfig, saveConfig } from '../src/core/config.js';
 import { openDb, type Db } from '../src/core/db.js';
-import { acquireSetupLock } from '../src/core/setup.js';
+import { acquireSetupLock, SetupBusyError } from '../src/core/setup.js';
+import { dbPath } from '../src/core/home.js';
+import { MIGRATIONS } from '../src/core/schema.js';
+import { sqlite } from '../src/core/sqlite.js';
 import { acquireSyncLock } from '../src/core/sync.js';
 
 const appleTv = vi.hoisted(() => ({ records: [] as unknown[], fail: null as Error | null }));
@@ -299,18 +302,81 @@ describe('sync (running the sources)', () => {
     await expect(run([], { only: 'trakt' })).rejects.toThrow(/Unknown source "trakt"/);
   });
 
-  it('--dry-run reports what would change and writes nothing', async () => {
+  it('--dry-run reports what would change and writes nothing, not even a new library', async () => {
     vi.stubGlobal('fetch', fakeServers().fetch);
     vi.stubEnv('PLEX_TOKEN', PLEX_TOKEN);
     vi.stubEnv('JELLYFIN_TOKEN', JF_TOKEN);
-    const before = ctx.db().sql.prepare('SELECT key, value FROM meta ORDER BY key').all();
+    expect(existsSync(dbPath(home))).toBe(false);
     await run([], { 'dry-run': true });
     const text = out.join('\n');
     expect(text).toMatch(/plex: 2 records\. Would add 2, update 0, leave unchanged 0/);
+    expect(text).toMatch(/jellyfin: 1 records\. Would add 1/);
     expect(text).toMatch(/Dry run: nothing was changed\./);
-    expect(rows()).toEqual([]);
-    expect(ctx.db().sql.prepare('SELECT key, value FROM meta ORDER BY key').all()).toEqual(before);
-    expect(ctx.db().sql.prepare('SELECT COUNT(*) AS n FROM viewings').get()).toEqual({ n: 0 });
+    expect(existsSync(dbPath(home))).toBe(false);
+  });
+
+  it('--dry-run on an existing library leaves its rows and meta as they were', async () => {
+    vi.stubGlobal('fetch', fakeServers().fetch);
+    vi.stubEnv('PLEX_TOKEN', PLEX_TOKEN);
+    vi.stubEnv('JELLYFIN_TOKEN', JF_TOKEN);
+    await run([], { only: 'jellyfin' });
+    ctx.close();
+    const snapshot = () => {
+      const db = openDb(home);
+      try {
+        return {
+          meta: db.sql.prepare('SELECT key, value FROM meta ORDER BY key').all(),
+          items: db.sql.prepare('SELECT * FROM library_items ORDER BY id').all(),
+          viewings: db.sql.prepare('SELECT * FROM viewings ORDER BY id').all(),
+        };
+      } finally {
+        db.close();
+      }
+    };
+    const before = snapshot();
+    out = [];
+    await run([], { 'dry-run': true });
+    ctx.close();
+    expect(out.join('\n')).toMatch(/plex: 2 records\. Would add 2/);
+    expect(out.join('\n')).toMatch(/jellyfin: 1 records\. Would add 0, update 0, leave unchanged 1/);
+    expect(snapshot()).toEqual(before);
+  });
+
+  it('--dry-run refuses a library an older screentrackr made, leaving it unmigrated', async () => {
+    mkdirSync(home, { recursive: true });
+    const raw = new sqlite.DatabaseSync(dbPath(home));
+    for (let v = 0; v < 3; v++) raw.exec(MIGRATIONS[v] as string);
+    raw.exec("INSERT INTO meta (key, value) VALUES ('schema_version', '3')");
+    raw.close();
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    vi.stubEnv('PLEX_TOKEN', PLEX_TOKEN);
+    await expect(run([], { 'dry-run': true })).rejects.toThrow(/older screentrackr.*screentrackr doctor/);
+    expect(fetch).not.toHaveBeenCalled();
+    const check = new sqlite.DatabaseSync(dbPath(home), { readOnly: true });
+    expect(check.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({ value: '3' });
+    check.close();
+  });
+
+  it('holds the setup lock for the whole sync, so setup cannot start mid-import', async () => {
+    const servers = fakeServers();
+    let setupDuring: unknown = 'not tried';
+    vi.stubGlobal('fetch', (async (input: string | URL | Request, init?: RequestInit) => {
+      if (setupDuring === 'not tried') {
+        try {
+          acquireSetupLock(home)();
+          setupDuring = 'acquired';
+        } catch (err) {
+          setupDuring = err;
+        }
+      }
+      return servers.fetch(input, init);
+    }) as typeof fetch);
+    vi.stubEnv('PLEX_TOKEN', PLEX_TOKEN);
+    vi.stubEnv('JELLYFIN_TOKEN', JF_TOKEN);
+    await run([]);
+    expect(setupDuring).toBeInstanceOf(SetupBusyError);
+    acquireSetupLock(home)();
   });
 
   it('records each source run for sync status (not for a dry run)', async () => {
@@ -346,6 +412,7 @@ describe('sync (running the sources)', () => {
     out = [];
     await expect(run([])).rejects.toThrow(/1 of 2 sources failed: apple-tv/);
     expect(out.join('\n')).toMatch(/apple-tv: failed unexpectedly: The TV app did not answer in time/);
+    await expect(run([])).rejects.toThrow(/apple-tv: The TV app did not answer in time/);
   });
 
   it('exits 1 while another sync holds the lock, and while setup runs', async () => {

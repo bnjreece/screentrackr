@@ -5,8 +5,8 @@
  * failing never stops the others. Tokens come from the environment only and
  * are never saved, printed or put in the launchd plist.
  */
-import { mkdirSync, realpathSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -25,7 +25,11 @@ import {
 import { serverBase } from '../../core/importers/jellyfin.js';
 import { PLEX_DEFAULT_URL, PLEX_UNWATCHED_STATUSES, plexBaseUrl, type PlexUnwatchedStatus } from '../../core/importers/plex.js';
 import { DEFAULT_EVERY, isNpxPath, launchdPlan, parseEvery, shellQuote } from '../../core/launchd.js';
-import { setupRunning } from '../../core/setup.js';
+import { openDb, type Db } from '../../core/db.js';
+import { dbPath } from '../../core/home.js';
+import { SCHEMA_VERSION } from '../../core/schema.js';
+import { acquireSetupLock, SetupBusyError } from '../../core/setup.js';
+import { sqlite } from '../../core/sqlite.js';
 import {
   acquireSyncLock,
   readSyncStatus,
@@ -224,6 +228,53 @@ function resultLine(r: SourceResult, dryRun: boolean): string {
   return `${r.kind}: ${r.records} records. ${counts}${ambiguous}`;
 }
 
+/** The library's schema version, read without changing anything (0 for a file with no meta). */
+function storedSchemaVersion(path: string): number {
+  const raw = new sqlite.DatabaseSync(path, { readOnly: true });
+  try {
+    if (!raw.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get()) return 0;
+    const row = raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
+    return row ? Number(row.value) : 0;
+  } finally {
+    raw.close();
+  }
+}
+
+/**
+ * The context a dry run imports through, so it changes nothing: opening the
+ * library must not create it or migrate it (both commit before the import's
+ * rollback). With no library yet, the dry run runs against an empty one in a
+ * temporary folder, removed afterwards. A library from an older screentrackr
+ * is refused: it is upgraded the first time it is opened for real.
+ */
+function dryRunContext(ctx: Ctx): { ctx: Ctx; cleanup: () => void } {
+  const path = dbPath(ctx.home);
+  if (existsSync(path)) {
+    const v = storedSchemaVersion(path);
+    if (v < SCHEMA_VERSION) {
+      throw new UserError(
+        'Your library was made by an older screentrackr and is upgraded the first time it is opened, which a dry run must not do. Run `screentrackr doctor` once (it upgrades the library), then try the dry run again.',
+      );
+    }
+    return { ctx, cleanup: () => {} };
+  }
+  const tmp = mkdtempSync(join(tmpdir(), 'screentrackr-dry-run-'));
+  let db: Db | undefined;
+  const dry: Ctx = {
+    ...ctx,
+    json: ctx.json,
+    db: () => (db ??= openDb(tmp)),
+    close: () => ctx.close(),
+  };
+  return {
+    ctx: dry,
+    cleanup: () => {
+      db?.close();
+      rmSync(tmp, { recursive: true, force: true });
+    },
+  };
+}
+
 async function runAll(ctx: Ctx, values: Values): Promise<void> {
   onlyFlags(values, SUB_FLAGS.run as readonly string[], '`sync`');
   const config = loadConfig(ctx.home);
@@ -240,9 +291,21 @@ async function runAll(ctx: Ctx, values: Values): Promise<void> {
 
   mkdirSync(ctx.home, { recursive: true, mode: 0o700 });
   const release = acquireSyncLock(ctx.home);
+  let releaseSetup: (() => void) | undefined;
+  let cleanup = () => {};
   try {
-    if (setupRunning(ctx.home) !== undefined) throw new UserError('Setup is running; try again when it finishes.');
-    const results = await runSyncSources(sources, (s) => runSource(ctx, s, dryRun), {
+    // Held for the whole sync, so a setup can't start swapping the catalog
+    // while an import is matching against it.
+    try {
+      releaseSetup = acquireSetupLock(ctx.home);
+    } catch (err) {
+      if (err instanceof SetupBusyError) throw new UserError('Setup is running; try again when it finishes.');
+      throw err;
+    }
+    const dry = dryRun ? dryRunContext(ctx) : { ctx, cleanup };
+    cleanup = dry.cleanup;
+    const runCtx = dry.ctx;
+    const results = await runSyncSources(sources, (s) => runSource(runCtx, s, dryRun), {
       before: (s) => {
         if (!ctx.json) ctx.out(`== ${s.kind} ==`);
       },
@@ -273,10 +336,14 @@ async function runAll(ctx: Ctx, values: Values): Promise<void> {
     }
     if (!ctx.json) ctx.out(text);
     const message = `${failed.length} of ${results.length} sources failed: ${failed.map((r) => r.kind).join(', ')}`;
-    // A bug in one source (not a server or setup problem) is an unexpected error (exit 2).
-    if (failed.some((r) => r.unexpected)) throw new Error(message);
+    // A bug in one source (not a server or setup problem) is an unexpected
+    // error (exit 2). Only a UserError carries details, so the reasons go in
+    // the message.
+    if (failed.some((r) => r.unexpected)) throw new Error(`${message} (${failed.map((r) => `${r.kind}: ${r.error ?? 'unknown error'}`).join('; ')})`);
     throw new UserError(message, { sync: result });
   } finally {
+    cleanup();
+    releaseSetup?.();
     release();
   }
 }
