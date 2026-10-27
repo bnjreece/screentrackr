@@ -75,7 +75,7 @@ afterEach(async () => {
 });
 
 describe('tools/list', () => {
-  it('returns the 8 tools with their annotations', async () => {
+  it('returns the 10 tools with their annotations', async () => {
     const { tools } = await client.listTools();
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
     expect(Object.keys(byName).sort()).toEqual(
@@ -84,10 +84,12 @@ describe('tools/list', () => {
         'catalog_status',
         'get_movie',
         'library_stats',
+        'pick_movie',
         'remove_from_library',
         'search_movies',
         'setup_catalog',
         'update_movie',
+        'where_to_watch',
       ].sort(),
     );
     expect(byName.catalog_status!.annotations).toMatchObject({ readOnlyHint: true });
@@ -99,6 +101,9 @@ describe('tools/list', () => {
     expect(byName.update_movie!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: true });
     expect(byName.add_to_library!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
     expect(byName.remove_from_library!.annotations).toMatchObject({ destructiveHint: true });
+    expect(byName.pick_movie!.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: false });
+    // The tool only builds a link; it makes no request of its own.
+    expect(byName.where_to_watch!.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: false });
   });
 
   it('search_movies teaches the filter semantics', async () => {
@@ -339,7 +344,7 @@ describe('stdio session (Review Focus #1)', () => {
     for (const m of msgs) expect(m.jsonrpc).toBe('2.0');
     expect(msgs.map((m) => m.id)).toEqual([1, 2, 3]);
     expect((msgs[0]!.result as { serverInfo: { name: string } }).serverInfo.name).toBe('screentrackr');
-    expect((msgs[1]!.result as { tools: unknown[] }).tools).toHaveLength(8);
+    expect((msgs[1]!.result as { tools: unknown[] }).tools).toHaveLength(10);
     expect((msgs[2]!.result as { isError?: boolean }).isError).toBeFalsy();
   }, 30_000);
 });

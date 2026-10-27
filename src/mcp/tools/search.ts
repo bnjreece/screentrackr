@@ -3,7 +3,7 @@ import { ALL_SCOPE_MIN_VOTES, FilterShape } from '../../core/filters.js';
 import { searchMovies, type MovieResult } from '../../core/search.js';
 import { handler, MAX_TEXT_LINES, ok, yearPart, type RegisterTools } from './common.js';
 
-function resultLine(r: MovieResult): string {
+export function resultLine(r: MovieResult): string {
   const parts = [`${r.title}${yearPart(r.year)}`];
   if (r.rating !== null) parts.push(`IMDb ${r.rating.toFixed(1)}`);
   if (r.runtimeMin !== null) parts.push(`${r.runtimeMin} min`);
