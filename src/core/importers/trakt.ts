@@ -328,8 +328,9 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       warnings.push(`${where}: not a Trakt row, skipped`);
       return null;
     }
-    if (typeof row.type === 'string' && row.type !== 'movie') {
-      skippedTv++;
+    if (row.type !== undefined && row.type !== 'movie') {
+      if (row.type === 'episode' || row.type === 'show' || row.type === 'season') skippedTv++;
+      else warnings.push(`${where}: unknown row type ${JSON.stringify(row.type)}, skipped`);
       return null;
     }
     const m = row.movie;
@@ -389,14 +390,16 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       rows.forEach((row, i) => {
         const where = `${page.name} row ${i + 1}`;
         if (kind === 'watched-history') {
+          // The movie first, so even a repeated row can fill a year or IMDb id.
+          const acc = movieOf(row, where, deleted);
+          if (!acc) return;
           // A repeated play (the export can fetch past the last page) counts once.
-          const id = isObj(row) ? row.id : undefined;
+          const id = (row as Row).id;
           if (typeof id === 'number' && Number.isSafeInteger(id)) {
             if (seenPlays.has(id)) return;
             seenPlays.add(id);
           }
-          const acc = movieOf(row, where, deleted);
-          if (acc) acc.plays.push(playTime((row as Row).watched_at));
+          acc.plays.push(playTime((row as Row).watched_at));
         } else if (kind === 'watched-movies') {
           const plays = isObj(row) ? row.plays : undefined;
           if (typeof plays !== 'number' || !(plays > 0)) return;
@@ -435,15 +438,16 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   // Bulk logs: 10 or more plays (or last-watched times) at the same second.
   const bulk = new Set<number>();
   if (!opts.keepBulkDates) {
-    const count = (times: number[]) => {
-      const n = new Map<number, number>();
-      for (const t of times) n.set(Math.floor(t / 1000), (n.get(Math.floor(t / 1000)) ?? 0) + 1);
-      for (const [s, c] of n) if (c >= BULK_PLAYS) bulk.add(s);
-    };
-    const all = [...accs.values()];
-    count(all.flatMap((a) => a.plays.filter((t): t is number => t !== null)));
-    count(all.map((a) => a.wmLast).filter((t): t is number => t !== null));
+    // Each movie counts once per second, whether the time is a history play
+    // or watched-movies' last play (the same play often appears in both).
+    const n = new Map<number, number>();
+    for (const a of accs.values()) {
+      const secs = new Set([...a.plays, a.wmLast].filter((t): t is number => t !== null).map((t) => Math.floor(t / 1000)));
+      for (const sec of secs) n.set(sec, (n.get(sec) ?? 0) + 1);
+    }
+    for (const [sec, c] of n) if (c >= BULK_PLAYS) bulk.add(sec);
   }
+  const usable = (t: number | null): t is number => t !== null && !bulk.has(Math.floor(t / 1000));
 
   let bulkDated = 0;
   const records: ImportRecord[] = [];
@@ -459,11 +463,14 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
     const watched = a.plays.length > 0 || a.wmPlays > 0;
     if (watched) {
       rec.status = 'watched' satisfies Status;
-      const known = [...a.plays, a.wmLast].filter((t): t is number => t !== null);
-      const usable = known.filter((t) => !bulk.has(Math.floor(t / 1000)));
-      if (known.length && !usable.length) bulkDated++;
-      if (usable.length) {
-        const date = localDate(Math.max(...usable), fmt);
+      // The latest history play; watched-movies' last play only when the history has none to use.
+      let at: number | null = null;
+      for (const t of a.plays) if (usable(t) && (at === null || t > at)) at = t;
+      if (at === null && usable(a.wmLast)) at = a.wmLast;
+      const anyKnown = a.wmLast !== null || a.plays.some((t) => t !== null);
+      if (at === null && anyKnown) bulkDated++;
+      if (at !== null) {
+        const date = localDate(at, fmt);
         rec.watchedAt = date;
         rec.watchedEra = eraOf(date);
       }

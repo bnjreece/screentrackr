@@ -53,7 +53,8 @@ export function listZip(buf: Buffer): ZipEntry[] {
   const cdOffset = buf.readUInt32LE(end + 16);
   if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) fail('ZIP64 archives are not supported');
   if (count > MAX_ENTRIES) fail(`the ZIP has too many entries (${count})`);
-  if (cdOffset + cdSize > end) fail('not a ZIP archive (or a damaged one)');
+  // The directory must end where the end record starts: nothing hides in a gap.
+  if (cdOffset + cdSize !== end) fail('not a ZIP archive this can read (or a damaged one)');
 
   const entries: ZipEntry[] = [];
   let p = cdOffset;

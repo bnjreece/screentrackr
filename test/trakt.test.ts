@@ -204,6 +204,18 @@ describe('the ZIP reader', () => {
     expect(() => entry?.read(100)).toThrow(/names disagree/);
   });
 
+  it('refuses a directory that ends before the end record (entries hidden in a gap)', () => {
+    const zip = makeZip({ 'ratings-movies.json': Buffer.from('[]'), '_errors.json': Buffer.from('[{"endpoint":"x"}]') });
+    const end = zip.length - 22;
+    const cdOffset = zip.readUInt32LE(end + 16);
+    const firstLen = 46 + 'ratings-movies.json'.length;
+    zip.writeUInt16LE(1, end + 8);
+    zip.writeUInt16LE(1, end + 10);
+    zip.writeUInt32LE(firstLen, end + 12);
+    expect(cdOffset + firstLen).toBeLessThan(end);
+    expect(() => listZip(zip)).toThrow(/damaged/);
+  });
+
   it('rejects a corrupted entry', () => {
     const zip = makeZip({ 'ratings-movies.json': Buffer.from('[1,2,3]') }, { store: true });
     zip[30 + 'ratings-movies.json'.length] = 0x7b; // change the first data byte
@@ -386,6 +398,67 @@ describe('parsing', () => {
     });
     expect(res.records).toHaveLength(1);
     expect(res.records[0]).toMatchObject({ sourceYear: 2020, imdbIdHint: 'tt9000777', status: 'watched', myRating: 7 });
+  });
+
+  it('a repeated history row still fills a year, and a skipped row does not use up its id', () => {
+    const bare = { title: 'Harbor Lights', year: null, ids: { trakt: 702, imdb: null } };
+    const full = { title: 'Harbor Lights', year: 2020, ids: { trakt: 702, imdb: null } };
+    const res = parse({
+      'watched-history.json': [
+        { id: 1, watched_at: '2023-01-01T12:00:00.000Z', action: 'watch', type: 'movie', movie: bare },
+        { id: 1, watched_at: '2023-01-01T12:00:00.000Z', action: 'watch', type: 'movie', movie: full },
+        { id: 2, watched_at: '2022-01-01T12:00:00.000Z', action: 'watch', type: 'movie', movie: null },
+        { id: 2, watched_at: '2022-01-01T12:00:00.000Z', action: 'watch', type: 'movie', movie: SALT },
+      ],
+    });
+    expect(rec(res.records, 702)).toMatchObject({ sourceYear: 2020, status: 'watched' });
+    expect(rec(res.records, 102)).toMatchObject({ status: 'watched', watchedAt: '2022-01-01' });
+  });
+
+  it('the history decides the date; watched-movies is only the fallback', () => {
+    const res = parse({
+      'watched-history.json': [{ id: 1, watched_at: '2020-05-05T12:00:00.000Z', action: 'watch', type: 'movie', movie: GLASS }],
+      'watched-movies.json': [{ plays: 3, last_watched_at: '2025-01-01T12:00:00.000Z', movie: GLASS }],
+    });
+    expect(rec(res.records, 101)).toMatchObject({ watchedAt: '2020-05-05' });
+  });
+
+  it('bulk detection counts history and watched-movies times together, each movie once', () => {
+    const at = '2018-03-03T03:03:03.000Z';
+    const plays = bulkPlays(5, at) as { movie: unknown }[];
+    const others = (bulkPlays(5, at, 30_000) as { movie: { ids: { trakt: number } } }[]).map((p, i) => ({
+      plays: 1,
+      last_watched_at: at,
+      movie: { ...p.movie, title: `Other Reel ${i + 1}`, ids: { ...p.movie.ids, trakt: 800 + i } },
+    }));
+    // The history movies also appear in watched-movies at the same second: still one each.
+    const again = plays.map((p) => ({ plays: 1, last_watched_at: at, movie: p.movie }));
+    const res = parse({ 'watched-history.json': plays, 'watched-movies.json': [...others, ...again] });
+    expect(res.bulkDated).toBe(10);
+    expect(res.records.every((r) => r.watchedAt === undefined)).toBe(true);
+    const nine = parse({ 'watched-history.json': plays, 'watched-movies.json': [...others.slice(0, 4), ...again] });
+    expect(nine.bulkDated).toBe(0);
+  });
+
+  it('a row with an unexpected type is skipped with a warning, not imported and not counted as TV', () => {
+    const res = parse({
+      'ratings-movies.json': [{ rated_at: '2023-01-01T00:00:00.000Z', rating: 6, type: null, movie: GLASS }],
+    });
+    expect(res.records).toEqual([]);
+    expect(res.skippedTv).toBe(0);
+    expect(res.warnings.join('\n')).toMatch(/unknown row type/);
+  });
+
+  it('handles a very long history for one film', () => {
+    const plays = Array.from({ length: 150_000 }, (_, i) => ({
+      id: i + 1,
+      watched_at: new Date(Date.UTC(2000, 0, 1) + i * 3_600_000).toISOString(),
+      action: 'watch',
+      type: 'movie',
+      movie: GLASS,
+    }));
+    const res = parse({ 'watched-history.json': plays });
+    expect(rec(res.records, 101)).toMatchObject({ watchedAt: plays[plays.length - 1]?.watched_at.slice(0, 10) });
   });
 
   it('ignores a malformed IMDb id but keeps the movie', () => {
