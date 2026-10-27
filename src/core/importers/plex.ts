@@ -117,6 +117,14 @@ const num = (v: unknown): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
+/** A count the server reports (a size or total): absent is null, anything but a whole number from 0 up is an error. */
+const count = (v: unknown, what: string): number | null => {
+  if (v === undefined || v === null || v === '') return null;
+  const n = num(v);
+  if (n === null || !Number.isSafeInteger(n) || n < 0) throw new ImportError(`${what} reported an impossible count (${String(v).slice(0, 20)}); stopped without importing`);
+  return n;
+};
+
 const tags = (v: unknown): string[] =>
   Array.isArray(v) ? v.map((t) => cleanText((t as PlexTag | null)?.tag)).filter((s): s is string => s !== null) : [];
 
@@ -333,7 +341,12 @@ export function parsePlexDump(text: string): PlexDump {
     let complete = true;
     containers.forEach((mc, i) => {
       const key = cleanText(mc.librarySectionID) ?? cleanText(mc.librarySectionUUID) ?? `#${i}`;
-      const total = num(mc.totalSize);
+      const what = 'A saved Plex listing';
+      const total = count(mc.totalSize, what);
+      const size = count(mc.size, what);
+      if (size !== null && size !== (mc.Metadata as unknown[]).length) {
+        throw new ImportError(`A saved Plex listing says it holds ${size} movies but holds ${(mc.Metadata as unknown[]).length}; nothing was imported`);
+      }
       if (total === null) complete = false;
       else totals.set(key, Math.max(totals.get(key) ?? 0, total));
       const keys = seen.get(key) ?? new Set<string>();
@@ -346,7 +359,8 @@ export function parsePlexDump(text: string): PlexDump {
       });
       seen.set(key, keys);
     });
-    for (const [key, total] of totals) if ((seen.get(key)?.size ?? 0) < total) complete = false;
+    // Fewer movies than the total left some out; more means the total is wrong.
+    for (const [key, total] of totals) if ((seen.get(key)?.size ?? 0) !== total) complete = false;
     // Overlapping saved pages list some movies twice: keep each once per library.
     const kept = new Set<string>();
     const movies = containers.flatMap((mc, i) => {
@@ -463,7 +477,8 @@ async function listSections(client: PlexClient, opts: PlexReadOptions, notices: 
   // A list shorter than its own size or total left libraries out, and their
   // movies would look deleted to --replace.
   const got = Array.isArray(dirs) ? dirs.length : 0;
-  for (const said of [num(container(body).size), num(container(body).totalSize), num(headers.get('X-Plex-Container-Total-Size'))]) {
+  const what = 'The Plex server';
+  for (const said of [count(container(body).size, what), count(container(body).totalSize, what), count(headers.get('X-Plex-Container-Total-Size'), what)]) {
     if (said !== null && said !== got) {
       throw new ImportError(`The Plex server said it has ${said} libraries but listed ${got}; stopped without importing`);
     }
@@ -472,6 +487,10 @@ async function listSections(client: PlexClient, opts: PlexReadOptions, notices: 
     const x = d as Record<string, unknown>;
     return { key: cleanText(x.key) ?? '', title: cleanText(x.title) ?? '', type: cleanText(x.type), agent: cleanText(x.agent) };
   });
+  // A movie library without a key can't be read, and leaving it out would make
+  // its movies look deleted to --replace.
+  const keyless = all.find((s) => s.type === 'movie' && !s.key);
+  if (keyless) throw new ImportError(`The Plex server listed the movie library "${keyless.title || 'untitled'}" without a key; stopped without importing`);
   const movies = all.filter((s) => s.type === 'movie' && s.key);
   if (opts.sections?.length) {
     const chosen = opts.sections.map((want) => {
@@ -527,7 +546,7 @@ async function listMovies(
     }
     // Plex leaves the list out of an empty page and says `size: 0`. An empty
     // page that says nothing about its size can't prove the list ended.
-    const size = num(mc.size);
+    const size = count(mc.size, `"${section.title}"`);
     const meta = (mc.Metadata ?? []) as PlexMetadata[];
     // `size` is the number of items on this page: one that disagrees with the
     // list means a page lost movies (or the answer is not what it says).
@@ -537,7 +556,7 @@ async function listMovies(
     if (meta.length === 0 && size === null) irregular = true;
     // The largest total any page reported, in the body or the header: a later
     // or smaller one can't lower it.
-    for (const t of [num(mc.totalSize), num(headers.get('X-Plex-Container-Total-Size'))]) {
+    for (const t of [count(mc.totalSize, `"${section.title}"`), count(headers.get('X-Plex-Container-Total-Size'), `"${section.title}"`)]) {
       if (t !== null) total = Math.max(total ?? 0, t);
     }
     const offset = num(mc.offset);
@@ -556,15 +575,18 @@ async function listMovies(
     // The server may ignore the requested size or not page at all: advance by
     // what came back, and stop at the reported total, on an empty page, or on
     // a page with nothing new, never on a merely short page. The read is
-    // complete only when the distinct movies reach the largest reported total
+    // complete only when the distinct movies equal the largest reported total
     // (overlapping pages can reach it by position while missing movies), or,
     // with no total at all, when it ended on an empty page after pages that
     // neither overlapped nor started somewhere other than asked.
     const done = (endedEmpty: boolean): { movies: PlexMetadata[]; complete: boolean } => {
-      if (!unkeyed && (total !== null ? out.length >= total : endedEmpty && !irregular)) return { movies: out, complete: true };
+      // More movies than the total means the total is wrong, so it proves nothing.
+      if (!unkeyed && (total !== null ? out.length === total : endedEmpty && !irregular)) return { movies: out, complete: true };
       warnings.push(
         unkeyed
           ? `"${section.title}" listed movies without a Plex id, so the list can't be checked for repeats and may be incomplete`
+          : total !== null && out.length > total
+          ? `"${section.title}" returned more movies than it reported (${out.length} of ${total}), so the list may be incomplete`
           : total !== null
           ? `"${section.title}" returned fewer movies than it reported (${out.length} of ${total})`
           : `"${section.title}" paged irregularly without saying how many movies it has, so the list may be incomplete`,

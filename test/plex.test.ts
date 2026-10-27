@@ -323,6 +323,22 @@ describe('reading the server', () => {
     expect(res.warnings.join('\n')).toMatch(/without a Plex id/);
   });
 
+  it('does not trust a total smaller than what came back, and refuses impossible counts', async () => {
+    const zero = scripted([{ body: { MediaContainer: { size: 1, totalSize: 0, Metadata: [film('a')] } } }]);
+    const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: zero.fetch, pageSize: 1 });
+    expect(res.complete).toBe(false);
+    expect(res.warnings.join('\n')).toMatch(/more movies than it reported/);
+    for (const bad of [{ totalSize: -1 }, { totalSize: 1.5 }, { size: 'many' }]) {
+      const s = scripted([{ body: { MediaContainer: { size: 1, ...bad, Metadata: [film('a')] } } }]);
+      await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: s.fetch, pageSize: 1 })).rejects.toThrow(/impossible count/);
+    }
+  });
+
+  it('refuses a movie library listed without a key', async () => {
+    const { fetch } = fakeFetch({ sections: [...SECTIONS.slice(0, 1), { type: 'movie', title: 'Invented Lost Library' } as never], movies: { '3': [film('a')] } });
+    await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch })).rejects.toThrow(/without a key/);
+  });
+
   it('trusts an empty page only when it says size 0', async () => {
     const first = { body: { MediaContainer: { size: 1, Metadata: [film('a')] } } };
     const claims = scripted([first, { body: { MediaContainer: { size: 200 } } }]);
@@ -720,6 +736,14 @@ describe('mapping Plex movies', () => {
 });
 
 describe('a saved listing (--from-file)', () => {
+  it('checks saved sizes and totals', () => {
+    const lib = { librarySectionID: 3 };
+    expect(() => parsePlexDump(JSON.stringify({ MediaContainer: { ...lib, size: 200, totalSize: 1, Metadata: [glassHarbor2009] } }))).toThrow(/holds 200 movies but holds 1/);
+    expect(parsePlexDump(JSON.stringify({ MediaContainer: { ...lib, size: 1, totalSize: 0, Metadata: [glassHarbor2009] } })).complete).toBe(false);
+    expect(() => parsePlexDump(JSON.stringify({ MediaContainer: { ...lib, size: 1, totalSize: -3, Metadata: [glassHarbor2009] } }))).toThrow(/impossible count/);
+    expect(parsePlexDump(JSON.stringify({ MediaContainer: { ...lib, size: 1, totalSize: 1, Metadata: [glassHarbor2009] } })).complete).toBe(true);
+  });
+
   it('does not count saved movies without a ratingKey toward the total', () => {
     const bare = { ...lanternSeason, ratingKey: undefined };
     const page = { MediaContainer: { librarySectionID: 3, totalSize: 2, size: 1, Metadata: [bare] } };
