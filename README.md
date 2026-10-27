@@ -84,6 +84,23 @@ screentrackr import imdb imdb-ratings.csv imdb-watchlist.csv
 - Several files are read together, so a movie that is both rated and on your watchlist becomes one movie, watched. A rating overwrites the rating a movie had, so importing a newer export updates your ratings; importing the same files again changes nothing.
 - A ratings or list export passed to plain `screentrackr import` is recognized too (a list is then read as a watchlist). Files saved again in a spreadsheet are read as well: semicolons, Windows-1252 text and day-first or month-first dates. The pre-2018 export format is refused with a message.
 
+### Letterboxd (export ZIP)
+
+Letterboxd lets every member download their own data. Sign in on letterboxd.com, open Settings, then Data, and choose Export your data. You get a ZIP of CSV files. screentrackr only reads that ZIP (or the folder it unzips to). It never signs in to Letterboxd, never uses its API and never fetches anything from letterboxd.com.
+
+```sh
+screentrackr import letterboxd letterboxd-yourname-2026-01-01-00-00-utc.zip
+```
+
+- Films in `watched.csv` or `ratings.csv`, or with a diary entry, are marked watched. Watchlist films go in the queue only when they are new, so a movie you already have keeps its status and a watched movie stays watched. `--no-watchlist` leaves the watchlist out.
+- Ratings are half stars from 0.5 to 5, stored times two as 1 to 10 (Letterboxd's own 10-point scale), so 3.5 stars is a 7. `ratings.csv` wins; a film with no rating there takes its latest diary rating. A rating overwrites the rating a movie had, so importing a newer export updates your ratings.
+- The watched date (and the era) is the latest Watched Date in your diary, and it replaces the watched date a movie had. The date a film was added to `watched.csv` is when you logged it, so it is not used.
+- The export doesn't say what you own, so a new movie from Letterboxd is not marked owned and a movie you already have keeps its owned flag. If you keep a list of the films you own, name it: `--owned-list my-blu-rays` (the list's file name in the export's `lists` folder, repeatable) marks its films owned. No other list is read.
+- `--with-reviews` takes your latest review of each film, as plain text, as its notes, only for movies with no notes yet. Reviews are matched to diary entries by the entry's own link.
+- Each film's Letterboxd link (`https://boxd.it/...`) is kept as its `letterboxd` id, so importing the same export again changes nothing. Title and year only fill fields a movie you already have left blank.
+- The export has no IMDb ids, so films are matched by title and year. Films the movie catalog doesn't have (TV miniseries, for one) stay unmatched and show up in `screentrackr match --review`. Diary entries for films Letterboxd removed (`orphaned/`) and things you deleted (`deleted/`) are skipped and counted. `profile.csv`, `comments.csv` and your likes are never opened.
+- The CSV files work on their own too (`screentrackr import letterboxd watched.csv ratings.csv diary.csv`), and plain `screentrackr import` recognizes the ZIP, the folder and each file. Keep the export's file names: `watched.csv` and `watchlist.csv` have the same columns.
+
 ### ScreenTrackr JSON
 
 `screentrackr export` writes your whole library as ScreenTrackr JSON v1, and `screentrackr import` reads it back with nothing lost. Use it for backups and for moving between machines. The format is documented in [docs/library-json-v1.md](docs/library-json-v1.md).
@@ -92,7 +109,7 @@ screentrackr import imdb imdb-ratings.csv imdb-watchlist.csv
 
 Imports merge by default: new movies are added, and fields the file has are updated. A merge never clears a status or rating that the file doesn't mention, an IMDb import never changes whether a movie is owned and never moves a movie out of watched, and importing the same file twice changes nothing. A record updates an existing movie only when exactly one item fits it: a different Apple id, a year more than one off (a year in the title counts, also before an edition tag like "(1978) (4K)"), a different runtime, a different director (except in `import apple-tv`, when the TV app's director is confirmed by the IMDb title both already share) or a different IMDb id rules an item out. For `import apple-tv`, the TV app's year is the year of the edition on sale, so it only rules out films made after it and is never stored, and a shared unconfirmed IMDb id is not enough on its own. A movie matched to IMDb that has no year, runtime or director of its own is judged by IMDb's, and how a title is written (an edition tag, the exact spelling) only tells editions of the same movie apart, never a film from its remake. A record that still fits several items (a title with no year, when you have the 1980 film and its 2020 remake) changes nothing and is listed with the candidate item ids; a row that changes nothing on one item but also fits a different one does not settle which one it is, so a later row in the same file still has to fit one on its own. Within one import each item is claimed by at most one record, so a file with two identical rows (two editions in an Apple TV paste) adds two items, a later change to that pair updates both, and importing an export restores every row. The full rules are in [docs/library-json-v1.md](docs/library-json-v1.md#which-item-a-record-updates). `--replace` starts over from the file, after saving a backup of your current library to `backups/` (an IMDb export with no rows is refused instead, so it can never empty your library). Every import prints how many items were added, updated, unchanged, and need review.
 
-The format is detected from the file. Pass `--format` (`json-v1`, `apple-paste`, `csv`, `imdb`, `legacy`, `neon-rows`) to choose it yourself. `legacy` and `neon-rows` read exports from the old ScreenTrackr web app.
+The format is detected from the file. Pass `--format` (`json-v1`, `apple-paste`, `csv`, `imdb`, `letterboxd`, `legacy`, `neon-rows`) to choose it yourself. `legacy` and `neon-rows` read exports from the old ScreenTrackr web app.
 
 ## Searching
 
@@ -170,7 +187,7 @@ Every command takes `--home <dir>`, `--json` and `--help`.
 
 ```text
 screentrackr setup [--refresh] [--no-cast] [--include-tv-movies]
-screentrackr import <file|apple-tv|imdb <file.csv>...> [--format <format>] [--merge | --replace]
+screentrackr import <file|apple-tv|imdb <file.csv>...|letterboxd <export.zip|folder|file.csv>...> [--format <format>] [--merge | --replace]
 screentrackr search [filters]
 screentrackr show <id|tconst|title>
 screentrackr add <tconst|title> [--year <yyyy>] [--status <status>] [--new-edition]

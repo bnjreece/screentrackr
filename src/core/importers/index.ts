@@ -40,6 +40,7 @@ import { parseCsv } from './csv.js';
 import { isImdbHeader, parseImdb } from './imdb.js';
 import { isJsonV1, parseJsonV1 } from './json-v1.js';
 import { isLegacyExport, parseLegacy } from './legacy.js';
+import { isLetterboxdHeader, parseLetterboxdFiles } from './letterboxd.js';
 import { isNeonRows, parseNeonRows } from './neon-legacy-rows.js';
 
 export { FORMATS, ImportError, type ImportFormat, type ImportRecord, type ParsedImport };
@@ -70,6 +71,7 @@ export function detectFormat(text: string, filename?: string): ImportFormat {
   }
   const firstLine = t.split(/\r?\n/, 1)[0] ?? '';
   if (isImdbHeader(firstLine)) return 'imdb';
+  if (isLetterboxdHeader(firstLine)) return 'letterboxd';
   if (filename?.toLowerCase().endsWith('.csv')) return 'csv';
   if (firstLine.includes('\t')) return 'apple-paste';
   if (firstLine.includes(',') && /(^|,)\s*"?(title|name)"?\s*(,|$)/i.test(firstLine)) return 'csv';
@@ -109,6 +111,13 @@ export function parseImportDetailed(
       // and only Movie rows come in. `screentrackr import imdb` takes options.
       const res = parseImdb([{ name: filename ?? 'file', text: body }], {});
       parsed = { records: res.records, warnings: [...res.notices, ...res.warnings, ...res.skippedSummary] };
+      break;
+    }
+    case 'letterboxd': {
+      // One file of an export, recognized by its columns and file name.
+      // `screentrackr import letterboxd` also reads a whole export.
+      const res = parseLetterboxdFiles([{ name: filename ?? 'file', text: body }], {});
+      parsed = { records: res.records, warnings: [...res.notices, ...res.warnings] };
       break;
     }
   }
