@@ -517,16 +517,22 @@ export function planViewingSync(
       else if (!dayTaken(day)) insert(v);
     }
     // Dateless plays carry nothing to tell them apart but their flag and
-    // rating, so each first takes a stored one that equals it, and only the
-    // rest are paired (and updated) in order. A repeat of the same set then
-    // changes nothing whatever order either side lists them in.
-    const dateless = inc.filter((x) => x.sourceRef == null && x.watchedAt === null);
-    const same = (s: Viewing, v: NewViewing) => s.rewatch === (v.rewatch ?? null) && s.rating === (v.rating ?? null);
-    const left: NewViewing[] = [];
-    for (const v of dateless) {
-      const hit = free((s) => s.watchedAt === null && s.sourceRef === null && same(s, v)) ?? (exact ? undefined : free((s) => s.watchedAt === null && same(s, v)));
-      if (hit) update(hit, v, 'day');
-      else left.push(v);
+    // rating, so they pair in passes: first with a stored play equal in both
+    // (an omitted field counting as none), then with one that agrees on every
+    // field the import gives, and only then in order (updated with what it
+    // gives). A repeat of the same set then changes nothing whatever order
+    // either side lists them in.
+    const equal = (s: Viewing, v: NewViewing) => s.rewatch === (v.rewatch ?? null) && s.rating === (v.rating ?? null);
+    const agrees = (s: Viewing, v: NewViewing) => (v.rewatch == null || s.rewatch === v.rewatch) && (v.rating == null || s.rating === v.rating);
+    let left = inc.filter((x) => x.sourceRef == null && x.watchedAt === null);
+    for (const match of [equal, agrees]) {
+      const rest: NewViewing[] = [];
+      for (const v of left) {
+        const hit = free((s) => s.watchedAt === null && s.sourceRef === null && match(s, v)) ?? (exact ? undefined : free((s) => s.watchedAt === null && match(s, v)));
+        if (hit) update(hit, v, 'day');
+        else rest.push(v);
+      }
+      left = rest;
     }
     for (const v of left) {
       const hit = free((s) => s.watchedAt === null && s.sourceRef === null) ?? (exact ? undefined : free((s) => s.watchedAt === null));

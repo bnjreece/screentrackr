@@ -55,6 +55,12 @@ const FOLD: Record<string, string> = {
   '\ufb04': 'ffl',
   '\ufb05': 'st',
   '\ufb06': 'st',
+  '\u0587': '\u0565\u0582', // Armenian ligatures
+  '\ufb13': '\u0574\u0576',
+  '\ufb14': '\u0574\u0565',
+  '\ufb15': '\u0574\u056b',
+  '\ufb16': '\u057e\u0576',
+  '\ufb17': '\u0574\u056d',
 };
 const FOLD_RE = new RegExp(`[${Object.keys(FOLD).join('')}]`, 'gu');
 

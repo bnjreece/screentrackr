@@ -54,6 +54,8 @@ describe('lists', () => {
     expect(normListName('\u0131')).not.toBe(normListName('i'));
     expect(normListName('I')).toBe(normListName('i'));
     expect(normListName('\u017Fun')).toBe(normListName('Sun'));
+    expect(normListName('\uFB13')).toBe(normListName('\u0574\u0576'));
+    expect(normListName('\u0587')).toBe(normListName('\u0565\u0582'));
   });
 
   it('creates, finds case-insensitively, and refuses a duplicate', () => {

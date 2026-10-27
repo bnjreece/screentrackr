@@ -324,6 +324,16 @@ describe('planViewingSync', () => {
     expect(planViewingSync(stored, incoming, new Set(['trakt']), { exact: true })).toEqual({ inserts: [], updates: [], deletes: [] });
   });
 
+  it('keeps dateless plays stable when an import gives only some fields', () => {
+    let stored: Viewing[] = [v(1, null, 'trakt', { rewatch: false, rating: 5 }), v(2, null, 'trakt', { rating: 7 })];
+    const incoming = [true, false, true].map((rewatch) => ({ watchedAt: null, source: 'trakt' as const, rewatch }));
+    const first = planViewingSync(stored, incoming, new Set());
+    // Apply the plan by hand, then the same import again must change nothing.
+    stored = stored.map((s) => ({ ...s, ...Object.fromEntries(Object.entries(first.updates.find((u) => u.id === s.id) ?? {}).filter(([k]) => k !== 'id')) }));
+    first.inserts.forEach((ins, k) => stored.push(v(10 + k, null, 'trakt', { rewatch: ins.rewatch ?? null, rating: ins.rating ?? null })));
+    expect(planViewingSync(stored, incoming, new Set())).toEqual({ inserts: [], updates: [], deletes: [] });
+  });
+
   it('folds a ref-less play into a play with a ref that day without changing it', () => {
     const stored = [v(1, '2020-05-05', 'letterboxd', { sourceRef: 'a', rating: 7 }), v(2, '2020-05-05', 'letterboxd', { sourceRef: 'b', rating: 9 })];
     expect(planViewingSync(stored, [{ watchedAt: '2020-05-05', source: 'letterboxd', rating: 9 }], new Set())).toEqual({ inserts: [], updates: [], deletes: [] });
@@ -355,6 +365,45 @@ describe('planViewingSync', () => {
       for (const exact of [false, true]) {
         expect(planViewingSync(stored, incoming, new Set(sources), { exact }), `round ${round} exact ${exact}`).toEqual({ inserts: [], updates: [], deletes: [] });
       }
+    }
+  });
+
+  it('converges: the same import planned again after its plan is applied changes nothing (property style)', () => {
+    let seed = 29;
+    const rand = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    const pick = <T,>(xs: readonly T[]) => xs[rand(xs.length)] as T;
+    const days = [null, null, '2020-01-01', '2020-01-02', '2020-01-02T21:00:00Z', '2020-01-03'];
+    const apply = (stored: Viewing[], plan: ReturnType<typeof planViewingSync>, next: { id: number }) => {
+      let out = stored.filter((x) => !plan.deletes.includes(x.id));
+      out = out.map((x) => {
+        const u = plan.updates.find((y) => y.id === x.id);
+        if (!u) return x;
+        const rest: Partial<Viewing> = { ...u };
+        delete rest.id;
+        return { ...x, ...rest } as Viewing;
+      });
+      for (const ins of plan.inserts) out.push(v(next.id++, ins.watchedAt, ins.source, { sourceRef: ins.sourceRef ?? null, rewatch: ins.rewatch ?? null, rating: ins.rating ?? null }));
+      return out;
+    };
+    for (let round = 0; round < 400; round++) {
+      const next = { id: 1000 };
+      const exact = rand(2) === 0;
+      const complete = new Set(rand(2) === 0 ? ['trakt'] : []);
+      const incoming = Array.from({ length: 1 + rand(5) }, (_, k) => ({
+        watchedAt: pick(days),
+        source: pick(['trakt', 'letterboxd'] as const),
+        sourceRef: rand(3) === 0 ? `r${k % 3}` : null,
+        ...(rand(2) === 0 ? { rewatch: rand(2) === 0 } : {}),
+        ...(rand(2) === 0 ? { rating: 1 + rand(3) } : {}),
+      }));
+      // A stored set the planner itself could have made, from an earlier import.
+      const earlier = Array.from({ length: rand(5) }, () => ({ watchedAt: pick(days), source: pick(['trakt', 'letterboxd'] as const), ...(rand(2) === 0 ? { rating: 1 + rand(3) } : {}) }));
+      let stored = apply([], planViewingSync([], earlier, new Set()), next);
+      stored = apply(stored, planViewingSync(stored, incoming, complete, { exact }), next);
+      expect(planViewingSync(stored, incoming, complete, { exact }), `round ${round}`).toEqual({ inserts: [], updates: [], deletes: [] });
     }
   });
 
