@@ -11,6 +11,7 @@ import {
   type ImdbListKind,
   type ImdbOptions,
 } from '../../core/importers/imdb.js';
+import { parseTrakt, readTraktExport } from '../../core/importers/trakt.js';
 import { applyImport, detectFormat, FORMATS, parseImportDetailed, type ImportFormat, type ParsedImport } from '../../core/importers/index.js';
 import { bool, str, strs, type Command } from '../command.js';
 import { UserError } from '../context.js';
@@ -33,6 +34,23 @@ interface Parsed extends ParsedImport {
   format: ImportFormat | 'apple-tv';
   notices: string[];
   skippedByType?: Record<string, number>;
+  /** Extra fields for `--json` output. */
+  extra?: Record<string, unknown>;
+}
+
+/** `import trakt`: Trakt's data export ZIP, its folder, or single files from it. Only allow-listed files are read. */
+function parseTraktExport(paths: string[], keepBulkDates: boolean): Parsed {
+  const { files, skippedFiles } = readTraktExport(paths);
+  const res = parseTrakt(files, { keepBulkDates });
+  const notices = [...res.notices];
+  if (skippedFiles) notices.push(`Left ${skippedFiles} other file${skippedFiles === 1 ? '' : 's'} in the export unread (only movie history, ratings, watchlist and collection are read).`);
+  return {
+    format: 'trakt',
+    records: res.records,
+    warnings: res.warnings,
+    notices,
+    extra: { skippedTv: res.skippedTv, skippedFiles, exportErrors: res.exportErrors, incomplete: res.incomplete, bulkDated: res.bulkDated },
+  };
 }
 
 function parseImdbFiles(db: Db, files: string[], opts: ImdbOptions): Parsed {
@@ -57,13 +75,14 @@ function parseImdbFiles(db: Db, files: string[], opts: ImdbOptions): Parsed {
 export const importCmd: Command = {
   name: 'import',
   summary: 'Bring in a library file (merge by default)',
-  usage: 'import <file|apple-tv|imdb <file.csv>...> [--format <format>] [--merge | --replace]',
+  usage: 'import <file|apple-tv|imdb <file.csv>...|trakt <export.zip|folder>...> [--format <format>] [--merge | --replace]',
   details: [
     `Formats: ${FORMATS.join(', ')}. The format is detected when --format is omitted.`,
     "`import apple-tv` (experimental, macOS only) reads the TV app's library directly. Movies with a recorded play date are marked watched; the rest keep their current status.",
     "`import imdb <file.csv>...` reads IMDb CSV exports you downloaded from imdb.com (Your Ratings, your watchlist, check-ins or a list). Rated movies are marked watched with your rating; watchlist movies go in the queue only when they are new; nothing is marked owned. Several files are read together. --as says what a list export is (watchlist by default), --collection names a list's collection, --include-type brings in more than movies (repeatable or comma-separated: " +
       IMDB_INCLUDE_TYPES.join(', ') +
       '), --checkin-dates uses check-in dates as watched dates.',
+    "`import trakt <export.zip|folder>` reads the data export you download from Trakt (Settings > Data > Raw export), or files from it. Only movie history, ratings, watchlist, collection and the export's error list are read. Watched movies are marked watched with the latest play's date, watchlist movies go in the queue only when they are new, and only the collection marks a movie owned. Plays logged in bulk (10 or more at the same second) lose their dates unless --keep-bulk-dates. Nothing is fetched from Trakt.",
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
     '--replace backs up your library to backups/ first, then replaces it.',
   ].join('\n'),
@@ -81,19 +100,22 @@ export const importCmd: Command = {
       description: `imdb only: also bring in ${IMDB_INCLUDE_TYPES.join(', ')} (repeatable)`,
     },
     'checkin-dates': { type: 'boolean', description: 'imdb --as checkins only: use check-in dates as watched dates' },
+    'keep-bulk-dates': { type: 'boolean', description: 'trakt only: keep the dates of plays logged in bulk' },
   },
   async run(ctx, pos, values) {
     const file = pos[0];
     if (!file) throw new UserError('Usage: screentrackr import <file>');
     const imdb = file === 'imdb';
-    const files = imdb ? pos.slice(1) : [file];
+    const trakt = file === 'trakt';
+    const files = imdb || trakt ? pos.slice(1) : [file];
     if (imdb && !files.length) throw new UserError('Usage: screentrackr import imdb <file.csv>...');
-    if (!imdb && pos.length > 1) throw new UserError(`Unexpected argument "${pos[1]}"`);
+    if (trakt && !files.length) throw new UserError('Usage: screentrackr import trakt <trakt-export.zip | folder | file.json>...');
+    if (!imdb && !trakt && pos.length > 1) throw new UserError(`Unexpected argument "${pos[1]}"`);
     if (bool(values, 'merge') && bool(values, 'replace')) throw new UserError('Use either --merge or --replace, not both');
     const format = str(values, 'format');
     const timeout = str(values, 'timeout');
     const appleTv = file === 'apple-tv';
-    if ((appleTv || imdb) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
+    if ((appleTv || imdb || trakt) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
     if (!appleTv && timeout !== undefined) throw new UserError('--timeout only applies to `import apple-tv`');
     if (format !== undefined && !(FORMATS as readonly string[]).includes(format)) {
       throw new UserError(`Unknown format "${format}" (expected ${FORMATS.join(', ')})`);
@@ -129,8 +151,14 @@ export const importCmd: Command = {
       timeoutMs = Math.round(secs * 1000);
     }
 
+    const keepBulkDates = bool(values, 'keep-bulk-dates');
+    if (keepBulkDates && !trakt) throw new UserError('--keep-bulk-dates only applies to `import trakt`');
+
     let parsed: Parsed;
-    if (appleTv) {
+    if (trakt) {
+      if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+      parsed = parseTraktExport(files, keepBulkDates);
+    } else if (appleTv) {
       if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
       ctx.log('Reading the TV app library (experimental). macOS may ask to allow access to the TV app.');
       parsed = { format: 'apple-tv', records: await readAppleTvLibrary({ timeoutMs }), warnings: [], notices: [] };
@@ -153,6 +181,14 @@ export const importCmd: Command = {
     if (parsed.format === 'imdb' && replace && parsed.records.length === 0) {
       throw new UserError('Nothing to import from the IMDb file, so --replace would empty your library. Nothing was changed.');
     }
+    // A partial Trakt export would drop the movies Trakt failed to export.
+    if (trakt && replace && (parsed.records.length === 0 || Number(parsed.extra?.exportErrors ?? 0) > 0)) {
+      throw new UserError(
+        parsed.records.length === 0
+          ? 'Nothing to import from the Trakt export, so --replace would empty your library. Nothing was changed.'
+          : `The Trakt export is incomplete (${(parsed.extra?.incomplete as string[] | undefined)?.join(', ') || 'see its _errors.json'}), so --replace could drop movies. Nothing was changed. Merge it instead, or export again on Trakt.`,
+      );
+    }
 
     const db = ctx.db();
     for (const n of parsed.notices) ctx.log(n);
@@ -160,7 +196,7 @@ export const importCmd: Command = {
     if (!catalogReady(db)) ctx.log('The catalog is not built yet, so movies are left unmatched. Run `screentrackr setup` to match them.');
     const summary = applyImport(db, parsed.records, { mode: replace ? 'replace' : 'merge' });
 
-    const extra = parsed.skippedByType ? { skippedByType: parsed.skippedByType } : {};
+    const extra = { ...(parsed.skippedByType ? { skippedByType: parsed.skippedByType } : {}), ...parsed.extra };
     ctx.emit({ format: parsed.format, records: parsed.records.length, warnings: parsed.warnings, ...extra, ...summary }, () =>
       [
         `Imported ${parsed.records.length} records (${parsed.format}).`,

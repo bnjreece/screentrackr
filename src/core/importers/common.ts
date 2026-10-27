@@ -84,7 +84,7 @@ export interface ImportRecord {
   addedAt?: string;
 }
 
-export const FORMATS = ['json-v1', 'legacy', 'neon-rows', 'apple-paste', 'csv', 'imdb'] as const;
+export const FORMATS = ['json-v1', 'legacy', 'neon-rows', 'apple-paste', 'csv', 'imdb', 'trakt'] as const;
 export type ImportFormat = (typeof FORMATS)[number];
 
 /** A problem with the import input. The CLI maps it to exit code 1. */

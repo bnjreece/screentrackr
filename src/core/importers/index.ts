@@ -41,6 +41,7 @@ import { isImdbHeader, parseImdb } from './imdb.js';
 import { isJsonV1, parseJsonV1 } from './json-v1.js';
 import { isLegacyExport, parseLegacy } from './legacy.js';
 import { isNeonRows, parseNeonRows } from './neon-legacy-rows.js';
+import { isTraktJson, parseTraktFile } from './trakt.js';
 
 export { FORMATS, ImportError, type ImportFormat, type ImportRecord, type ParsedImport };
 
@@ -64,8 +65,9 @@ export function detectFormat(text: string, filename?: string): ImportFormat {
     if (isJsonV1(data)) return 'json-v1';
     if (isLegacyExport(data)) return 'legacy';
     if (isNeonRows(data)) return 'neon-rows';
+    if (isTraktJson(data)) return 'trakt';
     throw new ImportError(
-      'Unrecognized JSON. Expected a ScreenTrackr export, an old web app export (movieList), or old library rows ({ title, metadata }).',
+      'Unrecognized JSON. Expected a ScreenTrackr export, an old web app export (movieList), old library rows ({ title, metadata }), or a page of a Trakt export.',
     );
   }
   const firstLine = t.split(/\r?\n/, 1)[0] ?? '';
@@ -109,6 +111,12 @@ export function parseImportDetailed(
       // and only Movie rows come in. `screentrackr import imdb` takes options.
       const res = parseImdb([{ name: filename ?? 'file', text: body }], {});
       parsed = { records: res.records, warnings: [...res.notices, ...res.warnings, ...res.skippedSummary] };
+      break;
+    }
+    case 'trakt': {
+      // One page of a Trakt export. `screentrackr import trakt` reads the whole ZIP or folder.
+      const res = parseTraktFile(body, filename);
+      parsed = { records: res.records, warnings: [...res.notices, ...res.warnings] };
       break;
     }
   }
