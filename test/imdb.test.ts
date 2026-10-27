@@ -11,7 +11,9 @@ import { buildCatalog } from '../src/core/catalog/build.js';
 import { openDb, type Db } from '../src/core/db.js';
 import { decodeImdbFile, parseImdb, type ImdbOptions } from '../src/core/importers/imdb.js';
 import { applyImport, detectFormat, ImportError, parseImportDetailed, type ImportRecord } from '../src/core/importers/index.js';
-import { LIBRARY_COLUMNS, rowToItem, type LibraryRow } from '../src/core/library.js';
+import { exportLibrary } from '../src/core/export.js';
+import { LIBRARY_COLUMNS, linkItem, rowToItem, type LibraryRow } from '../src/core/library.js';
+import { rematch } from '../src/core/match.js';
 import type { LibraryItem } from '../src/core/types.js';
 
 const IMDB = join(import.meta.dirname, 'fixtures', 'imdb');
@@ -79,6 +81,7 @@ describe('parsing the ratings export', () => {
       sourceGenre: 'Drama, Mystery',
       imdbIdHint: 'tt9000001',
       imdbIdExact: true,
+      externalIds: { imdb: 'tt9000001' },
       status: 'watched',
       myRating: 8,
       source: 'imdb',
@@ -295,6 +298,44 @@ describe('importing into the library', () => {
     expect(importFiles([{ name: 'f.csv', text: feature }])).toMatchObject({ added: 1 });
     expect(byConst('tt9000010')).toHaveLength(1);
     expect(items()).toHaveLength(2);
+  });
+
+  it('the Const stays the item\'s identity through setup, match and a JSON v1 restore', () => {
+    // A short missing from the catalog with the same title, year and director as a feature in it.
+    const text = `${RATINGS_HEADER}\ntt9400002,7,2024-01-01,"Night Ferry","Night Ferry",u,Short,6.0,12,2002,"Short",10,"2002","Dana Fincher"\n`;
+    importFiles([{ name: 'r.csv', text }], { includeTypes: ['short'] });
+    const short = { sourceTitle: 'Night Ferry', tconst: 'tt9400002', matchStatus: 'unmatched', matchScore: null };
+    expect(items()).toMatchObject([short]);
+    expect(db.sql.prepare('SELECT kind, value FROM item_external_ids').all()).toEqual([{ kind: 'imdb', value: 'tt9400002' }]);
+    for (const onlyUnresolved of [true, false]) {
+      rematch(db, { onlyUnresolved });
+      expect(items()).toMatchObject([short]);
+    }
+    const exported = exportLibrary(db);
+    expect(exported.items[0]?.externalIds).toEqual({ imdb: 'tt9400002' });
+    applyImport(db, parseImportDetailed(JSON.stringify(exported)).records, { mode: 'replace' });
+    expect(items()).toMatchObject([short]);
+    rematch(db);
+    expect(items()).toMatchObject([short]);
+    // A Const the catalog has is linked by rematch as well, never swapped for a rival.
+    db.sql.exec('DELETE FROM library_items');
+    importFiles([file('ratings.csv')]);
+    rematch(db);
+    expect(byConst('tt9000001')[0]).toMatchObject({ matchStatus: 'matched', matchScore: 100 });
+  });
+
+  it('an exact IMDb id never lands on an item hand-linked to another title', () => {
+    applyImport(db, [{ sourceTitle: 'Night Ferry', sourceYear: 2002, source: 'paste' }], { mode: 'merge' });
+    const id = items()[0]?.id as number;
+    linkItem(db, id, 'tt9000010');
+    const text = `${RATINGS_HEADER}\ntt9400002,7,2024-01-01,"Night Ferry","Night Ferry",u,Short,6.0,12,2002,"Short",10,"2002","Dana Fincher"\n`;
+    importFiles([{ name: 'r.csv', text }], { includeTypes: ['short'] });
+    expect(db.sql.prepare('SELECT item_id, kind, value FROM item_external_ids WHERE item_id = ?').all(id)).toEqual([]);
+    expect(items().find((i) => i.id === id)).toMatchObject({ tconst: 'tt9000010', matchStatus: 'manual' });
+  });
+
+  it('rejects an imdb external id that is not an IMDb id', () => {
+    expect(() => applyImport(db, [{ sourceTitle: 'X', source: 'json', externalIds: { imdb: 'nope' } }], { mode: 'merge' })).toThrow(/invalid imdb id/);
   });
 
   it('a Const in the catalog is taken as is, even when the export year is further off', () => {

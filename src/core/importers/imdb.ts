@@ -12,9 +12,11 @@
  *   columns, then Your Rating and Date Rated.
  *
  * Rules (each one keeps an IMDb import from damaging a library it merges into):
- * - The Const is an exact `imdbIdHint` (`imdbIdExact`): the catalog's title
- *   when the catalog has it, otherwise an unmatched item that keeps the id,
- *   never another title found by name. It is never a JSON v1 style link.
+ * - The Const is an exact `imdbIdHint` (`imdbIdExact`), stored as the item's
+ *   `imdb` external id so later matching (`setup`, `match`, a JSON v1
+ *   restore) keeps to it: the catalog's title when the catalog has it,
+ *   otherwise an unmatched item that keeps the id, never another title found
+ *   by name. It is never a JSON v1 style link.
  * - Only Movie rows (plus TV Movie, or other types, when asked) come in; the
  *   rest are counted by type and skipped.
  * - A rating means watched, with that rating. Date Rated is not a watch date.
@@ -251,7 +253,15 @@ function parseFile(file: ImdbFile, opts: ImdbOptions, out: { records: ImportReco
       return;
     }
 
-    const rec: ImportRecord = { sourceTitle, imdbIdHint: tconst, imdbIdExact: true, source: 'imdb', ownedIfNew: false, fillOnly: true };
+    const rec: ImportRecord = {
+      sourceTitle,
+      imdbIdHint: tconst,
+      imdbIdExact: true,
+      externalIds: { imdb: tconst },
+      source: 'imdb',
+      ownedIfNew: false,
+      fillOnly: true,
+    };
     const year = cleanYear(at(cells, 'year'));
     if (year !== null) rec.sourceYear = year;
     const directors = (at(cells, 'directors') ?? '')

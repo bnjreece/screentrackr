@@ -163,6 +163,7 @@ function validate(records: ImportRecord[]): void {
       for (const [kind, value] of Object.entries(r.externalIds)) {
         if (!(EXTERNAL_ID_KINDS as readonly string[]).includes(kind)) fail(`unknown external id kind "${kind}"`);
         if (value != null && (typeof value !== 'string' || value.length > 1000)) fail(`invalid ${kind} id`);
+        if (kind === 'imdb' && value != null && value.trim() !== '' && !/^tt\d{7,}$/.test(value.trim())) fail(`invalid imdb id "${value}"`);
       }
     }
     if (r.watchedEra != null) {
@@ -219,13 +220,16 @@ function targetFor(db: Db, r: ImportRecord): Target {
   }
   // Before `setup` there is nothing to check a hint against. Keep it on the
   // (still unmatched) item so matching can use it once the catalog is built.
-  const hint = r.imdbIdHint?.trim().toLowerCase();
+  // An `imdb` external id is IMDb's own id for exactly this title: it is the
+  // hint, and an exact one.
+  const exactId = r.externalIds?.imdb ?? undefined;
+  const hint = (exactId ?? r.imdbIdHint)?.trim().toLowerCase();
   if (hint && /^tt\d{7,}$/.test(hint) && !catalogReady(db)) {
     return { tconst: hint, matchStatus: 'unmatched', matchScore: null, candidates: [] };
   }
   // The source's own id for exactly this title: the catalog's title when it
   // has it, otherwise nothing (never another title found by name).
-  if (hint && /^tt\d{7,}$/.test(hint) && r.imdbIdExact === true) {
+  if (hint && /^tt\d{7,}$/.test(hint) && (r.imdbIdExact === true || exactId !== undefined)) {
     const known = db.sql.prepare('SELECT 1 FROM titles WHERE tconst = ?').get(hint) !== undefined;
     return known
       ? { tconst: hint, matchStatus: 'matched', matchScore: SCORE.hint, candidates: [] }
@@ -392,7 +396,7 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
   const recLink = rec.tconst;
   const itemLink = (e: Existing) => e.identity.tconst;
   const sameApple = (e: Existing) => apple !== null && e.item.applePersistentId === apple;
-  const hint = r.imdbIdHint?.trim().toLowerCase() ?? null;
+  const hint = (r.externalIds?.imdb ?? r.imdbIdHint)?.trim().toLowerCase() ?? null;
   const supplied = r.tconst ?? (hint && /^tt\d{7,}$/.test(hint) && !t.hintRefuted ? hint : null);
 
   // A source's own film ids work like the Apple id: the same id of a kind is
@@ -575,7 +579,11 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   keep('notes', 'notes', true);
   keep('applePersistentId', 'apple_persistent_id');
   for (const [kind, value] of Object.entries(r.externalIds ?? {})) {
-    if (value && cur.externalIds[kind as keyof ExternalIds] === undefined) out.push([`${EXT_PREFIX}${kind}`, value]);
+    if (!value || cur.externalIds[kind as keyof ExternalIds] !== undefined) continue;
+    // A hand link to another title stays the item's identity: an exact IMDb
+    // id that names a different title is not stored on it.
+    if (kind === 'imdb' && cur.matchStatus === 'manual' && cur.tconst !== null && cur.tconst !== value) continue;
+    out.push([`${EXT_PREFIX}${kind}`, value]);
   }
 
   if (r.status !== undefined) {

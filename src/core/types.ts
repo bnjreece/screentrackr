@@ -21,10 +21,14 @@ export type ItemSource = (typeof ITEM_SOURCES)[number];
 /**
  * Kinds of a source's own stable per-film id (ImportRecord.externalIds). Each
  * value must name one film for good in that source (a Letterboxd film URI, a
- * Trakt movie id), never a per-server or per-file id that changes. Adding a
+ * Trakt movie id), never a per-server or per-file id that changes. `imdb` is
+ * IMDb's own Const for the row (`import imdb`), an exact id: the item is that
+ * IMDb title and no other, so matching (import, `setup`, `match`) links it to
+ * that title when the catalog has it and otherwise leaves it unmatched with
+ * the id kept, never linking it to another title by name. Adding a
  * kind needs no migration: the database stores any kind, the code validates.
  */
-export const EXTERNAL_ID_KINDS = ['letterboxd', 'trakt', 'plex', 'jellyfin'] as const;
+export const EXTERNAL_ID_KINDS = ['imdb', 'letterboxd', 'trakt', 'plex', 'jellyfin'] as const;
 export type ExternalIdKind = (typeof EXTERNAL_ID_KINDS)[number];
 export type ExternalIds = Partial<Record<ExternalIdKind, string>>;
 
