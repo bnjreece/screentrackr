@@ -215,7 +215,8 @@ function parseFile(file: ImdbFile, opts: ImdbOptions, out: { records: ImportReco
 
   let order: DateOrder = 'same';
   if (kind === 'checkins' && opts.checkinDates) {
-    order = slashOrder(body.map((c) => at(c, 'created') ?? ''));
+    // One file has one date order, so any date column can decide it.
+    order = slashOrder(body.flatMap((c) => ['created', 'modified', 'date rated', 'release date'].map((name) => at(c, name) ?? '')));
     if (order === null && body.some((c) => SLASH_DATE.test((at(c, 'created') ?? '').trim()))) {
       out.warnings.push(`${file.name}: could not tell whether its dates are day-first or month-first, so they were left out`);
     }

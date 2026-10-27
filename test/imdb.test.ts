@@ -193,6 +193,14 @@ describe('files saved again in a spreadsheet', () => {
     expect(res.records[1]).toMatchObject({ status: 'watched', myRating: 7 });
   });
 
+  it('lets any date column of the file decide the order of an ambiguous check-in date', () => {
+    const text = `${LIST_HEADER}\n1,tt9000004,03/04/2025,13/04/2025,,"Seven Lanterns","Seven Lanterns",u,Movie,8.4,117,1995,"Crime",1,1995,"Dana Fincher",,\n`;
+    const res = parse([{ name: 'l.csv', text }], { as: 'checkins', checkinDates: true });
+    expect(res.records[0]?.watchedAt).toBe('2025-04-03');
+    const rated = `${LIST_HEADER}\n1,tt9000004,03/04/2025,03/04/2025,,"Seven Lanterns","Seven Lanterns",u,Movie,8.4,117,1995,"Crime",1,1995,"Dana Fincher",8,04/25/2025\n`;
+    expect(parse([{ name: 'l.csv', text: rated }], { as: 'checkins', checkinDates: true }).records[0]?.watchedAt).toBe('2025-03-04');
+  });
+
   it('drops dates it cannot read as day-first or month-first, with a warning', () => {
     const text = `${LIST_HEADER}\n1,tt9000004,03/04/2025,03/04/2025,,"Seven Lanterns","Seven Lanterns",u,Movie,8.4,117,1995,"Crime",1,1995,"Dana Fincher",,\n`;
     const res = parse([{ name: 'l.csv', text }], { as: 'checkins', checkinDates: true });
@@ -397,6 +405,34 @@ describe('importing into the library', () => {
     expect(JSON.stringify(exportLibrary(db).items)).toBe(before);
     expect(readdirSync(backups)).toHaveLength(backupsBefore);
     expect(applyImport(db, records, { mode: 'merge' }).dryRun).toBeUndefined();
+  });
+
+  it('an exact IMDb id keeps its link when a record reaches the item another way', async () => {
+    // Before setup: an Apple TV item, then the IMDb row of the short it is.
+    const bare = openDb(join(tmp, `exact-${Date.now()}`));
+    try {
+      const apple: ImportRecord = { sourceTitle: 'Night Ferry', applePersistentId: 'A7', source: 'apple-tv', owned: true };
+      const lb: ImportRecord = { sourceTitle: 'Night Ferry', externalIds: { letterboxd: 'https://boxd.it/x7' }, source: 'letterboxd', fillOnly: true, ownedIfNew: false };
+      applyImport(bare, [apple], { mode: 'merge' });
+      const text = `${RATINGS_HEADER}\ntt9400002,7,2024-01-01,"Night Ferry","Night Ferry",u,Short,6.0,12,2002,"Short",10,"2002","Dana Fincher"\n`;
+      applyImport(bare, parse([{ name: 'r.csv', text }], { includeTypes: ['short'] }).records, { mode: 'merge' });
+      applyImport(bare, [lb], { mode: 'merge' });
+      const all = () => (bare.sql.prepare(`SELECT ${LIBRARY_COLUMNS} FROM library_items ORDER BY id`).all() as unknown as LibraryRow[]).map(rowToItem);
+      const short = { sourceTitle: 'Night Ferry', applePersistentId: 'A7', tconst: 'tt9400002', matchStatus: 'unmatched', myRating: 7 };
+      expect(all()).toMatchObject([short]);
+      expect(bare.sql.prepare('SELECT kind FROM item_external_ids ORDER BY kind').all()).toEqual([{ kind: 'imdb' }, { kind: 'letterboxd' }]);
+      // The catalog has a feature of that title, which these rows alone would match.
+      await buildCatalog(bare, { cacheDir: IMDB });
+      for (const r of [apple, lb, { sourceTitle: 'Night Ferry', source: 'csv' } as ImportRecord]) {
+        applyImport(bare, [r], { mode: 'merge' });
+        expect(all()).toMatchObject([short]);
+      }
+      const exported = exportLibrary(bare);
+      applyImport(bare, parseImportDetailed(JSON.stringify(exported)).records, { mode: 'replace' });
+      expect(all()).toMatchObject([short]);
+    } finally {
+      bare.close();
+    }
   });
 
   it('rejects an imdb external id that is not an IMDb id', () => {

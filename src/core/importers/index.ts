@@ -614,7 +614,18 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   // A record with nothing to say about the link (no match, no hint) keeps the
   // item's stored one, such as a hint saved before `setup`.
   const silent = t.tconst === null && t.matchStatus === 'unmatched' && cur.tconst !== null;
-  if (cur.matchStatus !== 'manual' && (r.tconst || cur.matchStatus !== 'matched') && !silent) {
+  // An exact IMDb id (the item's, or the record's that this merge adds) fixes
+  // the item's automatic link: only a match to that id is taken, whatever
+  // let the record reach the item (an Apple id, another external id, a title).
+  const addsExact = cur.externalIds.imdb === undefined && out.some(([c]) => c === `${EXT_PREFIX}imdb`);
+  const exact = cur.externalIds.imdb ?? (addsExact ? r.externalIds?.imdb : undefined);
+  if (cur.matchStatus !== 'manual' && exact !== undefined) {
+    if (t.tconst === exact) {
+      if (t.tconst !== cur.tconst) out.push(['tconst', t.tconst]);
+      if (t.matchStatus !== cur.matchStatus) out.push(['match_status', t.matchStatus]);
+      if (t.matchScore !== cur.matchScore) out.push(['match_score', t.matchScore]);
+    }
+  } else if (cur.matchStatus !== 'manual' && (r.tconst || cur.matchStatus !== 'matched') && !silent) {
     if (t.tconst !== cur.tconst) out.push(['tconst', t.tconst]);
     if (t.matchStatus !== cur.matchStatus) out.push(['match_status', t.matchStatus]);
     if (t.matchScore !== cur.matchScore) out.push(['match_score', t.matchScore]);
