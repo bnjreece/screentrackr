@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "screentrackr",
   "display_name": "ScreenTrackr",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Ask your movie library real questions: what you own, what you've watched, your ratings, next to a local IMDb catalog.",
   "long_description": "ScreenTrackr keeps your movie library (what you own, what you've watched, your ratings) next to a full movie catalog that it builds on your computer from IMDb's public datasets. Ask in plain words, for example \"Which Villeneuve movies do I own that I haven't watched?\" or \"What highly rated thrillers under two hours should I rent?\"\n\nFirst run: ask Claude to set up the catalog. It downloads about 1 GB from datasets.imdbws.com once and takes several minutes. Everything stays on your computer in ~/.screentrackr, the same folder the screentrackr command line tool uses. No account, no API key, no telemetry.\n\nInformation courtesy of IMDb (https://www.imdb.com). Used with permission. Not affiliated with IMDb or Apple.",
   "author": {

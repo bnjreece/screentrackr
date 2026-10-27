@@ -116,7 +116,7 @@ Then ask in plain words: "Which Villeneuve movies do I own that I haven't watche
 
 ### One-click extension
 
-ScreenTrackr comes as a Claude Desktop extension, a single `screentrackr-<version>.mcpb` file. Open it (double-click it, or drag it onto Claude Desktop's Extensions settings) and confirm the install. You don't need Node.js or a terminal: the extension runs on the Node.js that Claude Desktop ships with.
+ScreenTrackr comes as a Claude Desktop extension, a single `.mcpb` file. [Download screentrackr.mcpb](https://github.com/bnjreece/screentrackr/releases/latest/download/screentrackr.mcpb) from the latest GitHub release, then open it (double-click it, or drag it onto Claude Desktop's Extensions settings) and confirm the install. You don't need Node.js or a terminal: the extension runs on the Node.js that Claude Desktop ships with.
 
 Then, in a chat, ask Claude to set up ScreenTrackr's movie catalog. That calls the `setup_catalog` tool, which downloads IMDb's dataset files (about 1 GB, once) and builds the catalog in the background. It takes several minutes; Claude follows along with `catalog_status`, and you can keep chatting meanwhile. If it's interrupted (you quit Claude Desktop, say), ask again: files that finished downloading are reused. Once it's done, ask away: "Which Villeneuve movies do I own that I haven't watched?"
 
