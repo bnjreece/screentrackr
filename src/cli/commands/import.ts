@@ -35,6 +35,8 @@ interface Parsed extends ParsedImport {
   format: ImportFormat | 'apple-tv' | 'jellyfin';
   notices: string[];
   skippedByType?: Record<string, number>;
+  /** Warnings already printed (still reported in --json output). */
+  logged?: string[];
 }
 
 function parseImdbFiles(db: Db, files: string[], opts: ImdbOptions): Parsed {
@@ -100,6 +102,8 @@ async function readJellyfin(ctx: Ctx, f: JellyfinFlags): Promise<Parsed> {
     else throw new UserError('No password: pipe it in with --password-stdin, or set JELLYFIN_TOKEN.');
     auth = { userName: f.user, password };
   }
+  // Open the library first, so a library problem stops the import before any request.
+  ctx.db();
   ctx.log('Reading your movies from the Jellyfin server (read only).');
   const read = await readJellyfinItems({
     url: f.url,
@@ -108,6 +112,9 @@ async function readJellyfin(ctx: Ctx, f: JellyfinFlags): Promise<Parsed> {
     deviceId: jellyfinDeviceId(ctx.home),
     ...(f.timeoutMs !== undefined ? { timeoutMs: f.timeoutMs } : {}),
   });
+  // The read's warnings (a session that could not be signed out) are printed
+  // now, so a later failure (mapping, the import itself) never hides them.
+  for (const w of read.warnings) ctx.log(`Warning: ${w}`);
   const res = mapJellyfinItems(read.items, { ratings: f.ratings, strictPlayed: f.strictPlayed });
   return {
     format: 'jellyfin',
@@ -115,6 +122,7 @@ async function readJellyfin(ctx: Ctx, f: JellyfinFlags): Promise<Parsed> {
     warnings: [...read.warnings, ...res.warnings, ...res.skippedSummary],
     notices: [`Read ${read.items.length} items for ${read.userName}.`, ...res.notices],
     skippedByType: res.skippedByType,
+    logged: read.warnings,
   };
 }
 
@@ -258,7 +266,8 @@ export const importCmd: Command = {
 
     const db = ctx.db();
     for (const n of parsed.notices) ctx.log(n);
-    for (const w of parsed.warnings) ctx.log(`Warning: ${w}`);
+    const logged = new Set(parsed.logged);
+    for (const w of parsed.warnings) if (!logged.has(w)) ctx.log(`Warning: ${w}`);
     if (!catalogReady(db)) ctx.log('The catalog is not built yet, so movies are left unmatched. Run `screentrackr setup` to match them.');
     const dryRun = bool(values, 'dry-run');
     const summary = applyImport(db, parsed.records, { mode: replace ? 'replace' : 'merge', dryRun });

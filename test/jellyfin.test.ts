@@ -10,13 +10,19 @@ import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { importCmd } from '../src/cli/commands/import.js';
 import type { Ctx } from '../src/cli/context.js';
-import { promptHidden, type SecretInput } from '../src/cli/secret.js';
+import { promptHidden, readStdinSecret, type SecretInput } from '../src/cli/secret.js';
 import { buildCatalog } from '../src/core/catalog/build.js';
 import { openDb, type Db } from '../src/core/db.js';
 import { applyImport, ImportError, type ImportRecord } from '../src/core/importers/index.js';
 import { jellyfinDeviceId, mapJellyfinItems, readJellyfinItems, serverBase, type JellyfinReadOptions } from '../src/core/importers/jellyfin.js';
 import { LIBRARY_COLUMNS, rowToItem, type LibraryRow } from '../src/core/library.js';
 import type { LibraryItem } from '../src/core/types.js';
+
+// readStdinSecret keeps its real behavior unless a test feeds it a password.
+vi.mock('../src/cli/secret.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/cli/secret.js')>();
+  return { ...real, readStdinSecret: vi.fn(real.readStdinSecret) };
+});
 
 const IMDB = join(import.meta.dirname, 'fixtures', 'imdb');
 const FIX = join(import.meta.dirname, 'fixtures', 'jellyfin');
@@ -639,6 +645,20 @@ describe('import jellyfin (command)', () => {
     expect(all).toMatch(/Read 10 items for orrin/);
     expect(ctx.db().sql.prepare("SELECT my_rating FROM library_items WHERE source_title = 'Quiet Ledger'").get()).toEqual({ my_rating: 8 });
     expect(server.calls.every((c) => c.url.hostname === 'jellyfin.example.test')).toBe(true);
+  });
+
+  it('prints a failed sign-out at once, so a later failure never hides it', async () => {
+    const server = fakeServer({
+      'POST /Users/AuthenticateByName': () => jsonRes({ AccessToken: SESSION, User: { Id: USER_ID, Name: 'orrin' } }),
+      'GET /Items': () => jsonRes({ Items: [{ ...movie(), UserData: undefined }], TotalRecordCount: 1 }),
+      'POST /Sessions/Logout': () => new Response('', { status: 500 }),
+    });
+    vi.stubGlobal('fetch', server.fetch);
+    vi.stubEnv('JELLYFIN_TOKEN', '');
+    vi.mocked(readStdinSecret).mockReturnValueOnce('an invented password');
+    await expect(run({ url: SERVER, user: 'orrin', 'password-stdin': true })).rejects.toThrow(/UserData/);
+    expect(log.filter((l) => /Could not sign out/.test(l))).toHaveLength(1);
+    expect([...out, ...log].join('\n')).not.toContain(SESSION);
   });
 
   it('checks its flags before any request', async () => {
