@@ -505,11 +505,11 @@ async function listMovies(
     // that claims movies but sends none is an error; one that says nothing
     // about its size can't prove the list ended.
     const size = num(mc.size);
-    if (mc.Metadata === undefined) {
-      if (size !== null && size > 0) throw new ImportError(`"${section.title}" said it sent ${size} movies but sent none; stopped without importing`);
-      if (size === null) irregular = true;
-    }
     const meta = (mc.Metadata ?? []) as PlexMetadata[];
+    if (meta.length === 0 && size !== null && size > 0) {
+      throw new ImportError(`"${section.title}" said it sent ${size} movies but sent none; stopped without importing`);
+    }
+    if (mc.Metadata === undefined && size === null) irregular = true;
     // The largest total any page reported, in the body or the header: a later
     // or smaller one can't lower it.
     for (const t of [num(mc.totalSize), num(headers.get('X-Plex-Container-Total-Size'))]) {

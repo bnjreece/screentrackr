@@ -31,10 +31,9 @@ export const PLEX_OPTIONS: Record<string, OptionSpec> = {
   'no-ratings': { type: 'boolean', description: 'plex only: do not read Plex star ratings' },
   'token-stdin': { type: 'boolean', description: 'plex only: read the token from stdin instead of PLEX_TOKEN' },
   'from-file': { type: 'string', value: '<file.json>', description: 'plex only: read saved listing JSON instead of a server' },
-  'dry-run': { type: 'boolean', description: 'plex only: show what would be imported, write nothing' },
 };
 
-/** Throws when a Plex-only flag is used with another import. */
+/** Throws when a Plex-only flag is used with another import. (--dry-run is shared by every import and defined in import.ts.) */
 export function rejectPlexFlags(values: Values): void {
   const used = Object.keys(PLEX_OPTIONS).filter((k) => values[k] !== undefined && values[k] !== false);
   if (used.length) throw new UserError(`${used.map((k) => `--${k}`).join(', ')} only appl${used.length === 1 ? 'ies' : 'y'} to \`import plex\``);

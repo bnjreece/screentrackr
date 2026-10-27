@@ -70,6 +70,23 @@ export interface ImportRecord {
   /** Absent means the source has no rating; merge keeps the existing one. */
   myRating?: number | null;
   watchedAt?: string | null;
+  /**
+   * Imports never clear a field, with this one exception. When the record has
+   * no `watchedAt` and this is true, the item's watched date is cleared, but
+   * only if this record's `source` set that date (the item's stored
+   * watched-date source equals `source`). A date the user set, another source
+   * set, or a JSON v1 file gave without a source is never cleared. For a
+   * source whose earlier, partial export carried dates a later, full export
+   * shows were fake (Trakt's bulk "mark watched" plays). Status, era and
+   * rating are untouched.
+   */
+  clearWatchedAtIfOwn?: boolean;
+  /**
+   * ScreenTrackr JSON v1 only: which source set `watchedAt`, as the export
+   * wrote it (null: the user, or unknown). Every other importer leaves it out,
+   * and the record's `source` is recorded as the date's source.
+   */
+  watchedAtSource?: ItemSource | null;
   /** An authoritative link (ScreenTrackr JSON v1 only). Kept as is, without rematching. */
   tconst?: string | null;
   /** A strong match hint, checked against the catalog. */
@@ -184,7 +201,10 @@ export function cleanTconst(v: unknown): string | null {
  *   only when no record has an explicit status, and then the first one wins.
  * - myRating: kept when every record that has one agrees; otherwise left out,
  *   with a warning, so the merge keeps whatever the library has.
- * - watchedAt: the latest date. watchedEra: the first one given.
+ * - watchedAt: the latest date, with that record's watchedAtSource.
+ *   watchedEra: the first one given.
+ * - clearWatchedAtIfOwn: true when any record asks (it only applies when the
+ *   folded record has no watchedAt).
  * - owned, ownedIfNew and the other flags: true when any record says true,
  *   else false when any says false.
  * - externalIds: merged by kind; a kind with two different values keeps the
@@ -262,9 +282,16 @@ function foldGroup(group: ImportRecord[], warn: (message: string) => void): Impo
   } else set('myRating', ratings[0]);
 
   const dates = group.map((r) => r.watchedAt).filter((d): d is string => typeof d === 'string' && d !== '');
-  set('watchedAt', dates.length ? dates.reduce((a, b) => (b > a ? b : a)) : undefined);
+  // Compared as instants (an offset can make the later string the earlier time); the chosen string is kept as is.
+  const time = (d: string) => {
+    const t = Date.parse(d);
+    return Number.isNaN(t) ? -Infinity : t;
+  };
+  const latest = dates.length ? dates.reduce((a, b) => (time(b) > time(a) ? b : a)) : undefined;
+  set('watchedAt', latest);
+  set('watchedAtSource', latest === undefined ? undefined : group.find((r) => r.watchedAt === latest)?.watchedAtSource);
 
-  for (const key of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'fromTvApp', 'imdbIdExact'] as const) {
+  for (const key of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'fromTvApp', 'imdbIdExact', 'clearWatchedAtIfOwn'] as const) {
     const vs = group.map((r) => r[key]).filter((v): v is boolean => typeof v === 'boolean');
     set(key, vs.length ? vs.includes(true) : undefined);
   }

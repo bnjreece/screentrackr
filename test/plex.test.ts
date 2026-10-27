@@ -295,6 +295,10 @@ describe('reading the server', () => {
     await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: claims.fetch, pageSize: 1 })).rejects.toThrow(
       /said it sent 200 movies/,
     );
+    const emptyList = scripted([first, { body: { MediaContainer: { size: 200, Metadata: [] } } }]);
+    await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: emptyList.fetch, pageSize: 1 })).rejects.toThrow(
+      /said it sent 200 movies/,
+    );
     const silent = scripted([first, { body: { MediaContainer: {} } }]);
     const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: silent.fetch, pageSize: 1 });
     expect(res.complete).toBe(false);

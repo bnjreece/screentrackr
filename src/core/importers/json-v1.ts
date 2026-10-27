@@ -23,6 +23,7 @@ const ItemSchema = z.object({
   status: z.enum(STATUSES).nullish(),
   watchedEra: nullable(z.enum(WATCHED_ERAS)),
   watchedAt: nullable(z.string()),
+  watchedAtSource: nullable(z.enum(ITEM_SOURCES)),
   myRating: nullable(z.number().int().min(1).max(10)),
   notes: nullable(z.string()),
   matchStatus: z.enum(MATCH_STATUSES).nullish(),
@@ -67,6 +68,9 @@ export function parseJsonV1(data: unknown): ParsedImport {
       sourceOwnedRaw: it.sourceOwnedRaw,
       watchedEra: it.status === 'watched' ? it.watchedEra : null,
       watchedAt: it.watchedAt,
+      // Which source set the date, as exported; a file without one gives a
+      // date no import may clear later.
+      watchedAtSource: it.watchedAt !== null ? it.watchedAtSource : null,
       myRating: it.myRating,
       notes: it.notes,
       tconst: hintOnly ? null : it.tconst,
