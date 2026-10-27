@@ -435,6 +435,38 @@ describe('importing into the library', () => {
     }
   });
 
+  it('rejects a JSON v1 item whose link and imdb external id name different titles, before writing anything', () => {
+    importFiles([file('ratings.csv')]);
+    const before = JSON.stringify(exportLibrary(db).items);
+    for (const extra of [
+      { tconst: 'tt9000001', matchStatus: 'matched' },
+      { tconst: 'tt9000001', matchStatus: 'manual' },
+      { tconst: 'tt9000001', matchStatus: 'unmatched' },
+    ]) {
+      const text = JSON.stringify({ format: 'screentrackr-library', version: 1, items: [{ sourceTitle: 'Night Ferry', externalIds: { imdb: 'tt9000002' }, ...extra }] });
+      for (const mode of ['merge', 'replace'] as const) {
+        expect(() => applyImport(db, parseImportDetailed(text).records, { mode })).toThrow(/name different titles/);
+      }
+    }
+    expect(JSON.stringify(exportLibrary(db).items)).toBe(before);
+  });
+
+  it('fill-only fields fill a blank string as well as null', () => {
+    applyImport(
+      db,
+      [
+        { sourceTitle: 'Seven Lanterns', sourceYear: 1995, collection: '', status: 'priority', source: 'json' },
+        { sourceTitle: 'Salt & Signal', sourceYear: 2004, notes: '  ', sourceGenre: '', owned: true, source: 'json' },
+      ],
+      { mode: 'merge' },
+    );
+    const ids = items().map((i) => i.id);
+    importFiles([file('watchlist.csv')], { as: 'list', collection: 'Shelf', notesFromDescription: true });
+    const [lanterns, salt] = items().filter((i) => ids.includes(i.id));
+    expect(lanterns).toMatchObject({ collection: 'Shelf', status: 'priority' });
+    expect(salt).toMatchObject({ notes: 'for movie night', sourceGenre: 'Adventure, Comedy', owned: true });
+  });
+
   it('rejects an imdb external id that is not an IMDb id', () => {
     expect(() => applyImport(db, [{ sourceTitle: 'X', source: 'json', externalIds: { imdb: 'nope' } }], { mode: 'merge' })).toThrow(/invalid imdb id/);
   });

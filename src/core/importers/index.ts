@@ -167,6 +167,10 @@ function validate(records: ImportRecord[]): void {
         if (value != null && (typeof value !== 'string' || value.length > 1000)) fail(`invalid ${kind} id`);
         if (kind === 'imdb' && value != null && value.trim() !== '' && !/^tt\d{7,}$/.test(value.trim())) fail(`invalid imdb id "${value}"`);
       }
+      // An exact IMDb id names the record's IMDb title, so a link or hint to another one contradicts it.
+      const exact = r.externalIds.imdb?.trim();
+      const named = (r.tconst ?? r.imdbIdHint)?.trim().toLowerCase();
+      if (exact && named && named !== exact) fail(`its IMDb id ${named} and its imdb external id ${exact} name different titles`);
     }
     if (r.watchedEra != null) {
       if (!(WATCHED_ERAS as readonly string[]).includes(r.watchedEra)) fail(`invalid watched era "${String(r.watchedEra)}"`);
@@ -569,7 +573,8 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   const keep = <K extends keyof LibraryItem & keyof ImportRecord>(key: K, column: string, descriptive = false) => {
     const v = r[key];
     if (v === undefined || v === null || v === cur[key]) return;
-    if (descriptive && r.fillOnly === true && cur[key] !== null) return;
+    const have = cur[key];
+    if (descriptive && r.fillOnly === true && have !== null && !(typeof have === 'string' && have.trim() === '')) return;
     out.push([column, typeof v === 'boolean' ? (v ? 1 : 0) : (v as string | number)]);
   };
   keep('sourceYear', 'source_year', true);
