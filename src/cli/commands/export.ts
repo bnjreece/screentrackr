@@ -78,8 +78,13 @@ function exportLetterboxd(ctx: Ctx, values: Values): void {
   const dir = resolve(outDir);
   const notices: string[] = [];
   if (res.skipped) notices.push(`${res.skipped} movie${res.skipped === 1 ? '' : 's'} with no title or id left out.`);
+  if (res.unrepresentable.length) {
+    notices.push(
+      `Left out item${res.unrepresentable.length === 1 ? '' : 's'} ${res.unrepresentable.join(', ')}: a backslash right before a quote can't be written in Letterboxd's CSV quoting. Add ${res.unrepresentable.length === 1 ? 'it' : 'them'} on letterboxd.com by hand.`,
+    );
+  }
   if (!res.files.length) {
-    ctx.emit({ format: 'letterboxd', what, dir, files: [], rows: 0, skipped: res.skipped, notices }, () => [`Nothing to export: no movies for --what ${what}${list ? ` (list "${list}")` : ''}. No file written.`, ...notices].join('\n'));
+    ctx.emit({ format: 'letterboxd', what, dir, files: [], rows: 0, skipped: res.skipped, unrepresentable: res.unrepresentable, notices }, () => [`Nothing to export: no movies for --what ${what}${list ? ` (list "${list}")` : ''}. No file written.`, ...notices].join('\n'));
     return;
   }
   try {
@@ -93,7 +98,7 @@ function exportLetterboxd(ctx: Ctx, values: Values): void {
   if (existsSync(stale)) notices.push(`${basename(stale)} in ${dir} is from an earlier export and was not replaced; don't upload it with these.`);
   if (tags) notices.push('Tags are written on dated diary rows only: Letterboxd keeps tags only on diary entries.');
   ctx.emit(
-    { format: 'letterboxd', what, dir, files: files.map((f) => ({ path: f.path, rows: f.rows, bytes: Buffer.byteLength(f.content, 'utf8') })), rows: res.rows, skipped: res.skipped, notices },
+    { format: 'letterboxd', what, dir, files: files.map((f) => ({ path: f.path, rows: f.rows, bytes: Buffer.byteLength(f.content, 'utf8') })), rows: res.rows, skipped: res.skipped, unrepresentable: res.unrepresentable, notices },
     () =>
       [
         `Wrote ${res.rows} row${res.rows === 1 ? '' : 's'} to ${files.length} file${files.length === 1 ? '' : 's'} in ${dir}:`,

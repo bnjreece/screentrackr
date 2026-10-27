@@ -91,9 +91,14 @@ export function filmWatched(f: Film): boolean {
   return f.items.some((s) => s.item.status === 'watched' || s.viewings.length > 0);
 }
 
-/** A film is on the watchlist when an edition is unwatched (queue, priority, someday) and the film was never watched. */
+/**
+ * A film is on the watchlist when an edition is unwatched (queue, priority,
+ * someday) and no edition is `watched`. Status decides, not plays: a film
+ * queued again after it was watched is on it; a film you watched with a new
+ * edition still in the queue is not.
+ */
 export function filmOnWatchlist(f: Film): boolean {
-  return !filmWatched(f) && f.items.some((s) => isUnwatchedStatus(s.item.status));
+  return f.items.some((s) => isUnwatchedStatus(s.item.status)) && !f.items.some((s) => s.item.status === 'watched');
 }
 
 /** Every library item with what the writers need, in id order. Read-only. */

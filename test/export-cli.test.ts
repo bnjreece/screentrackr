@@ -129,6 +129,17 @@ describe('export --format letterboxd', () => {
     expect(readdirSync(dir)).toEqual(['letterboxd-watched-1.csv']);
   });
 
+  it('names a movie whose title Letterboxd quoting cannot hold, and leaves it out', () => {
+    const db = openDb(home);
+    const id = Number(db.sql.prepare("INSERT INTO library_items (source_title, match_status, source, status) VALUES (?, 'unmatched', 'paste', 'watched')").run('Ends, in a slash\\').lastInsertRowid);
+    db.close();
+    const dir = join(tmp, `lbu-${n}`);
+    const r = run(['export', '--format', 'letterboxd', '--out-dir', dir]);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`Left out item ${id}:`);
+    expect(readFileSync(join(dir, 'letterboxd-watched-1.csv'), 'utf8')).not.toContain('slash');
+  });
+
   it('refuses options that do not fit the format', () => {
     expect(run(['export', '--format', 'letterboxd']).stderr).toMatch(/--out-dir/);
     expect(run(['export', '--format', 'letterboxd', '--out', 'x.csv']).stderr).toMatch(/--out-dir/);

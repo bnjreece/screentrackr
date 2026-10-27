@@ -109,6 +109,19 @@ describe('letterboxd field quoting', () => {
     expect(letterboxdField('Say "Hi"')).toBe('"Say \\"Hi\\""');
     expect(letterboxdField('two\r\nlines')).toBe('two lines');
     expect(letterboxdField('')).toBe('');
+    // A backslash is literal unless the quoted field would put it right before a quote.
+    expect(letterboxdField('AC\\DC')).toBe('AC\\DC');
+    expect(letterboxdField('a,b\\c')).toBe('"a,b\\c"');
+    expect(letterboxdField('a,b\\')).toBeNull();
+    expect(letterboxdField('say \\"x"')).toBeNull();
+  });
+
+  it('a row with a field Letterboxd\'s quoting cannot hold is left out and named', () => {
+    const lib = [src({ id: 9, sourceTitle: 'Ends, in a slash\\', status: 'watched' }), src({ id: 10, sourceTitle: 'Fine', status: 'watched' })];
+    const r = letterboxdCsv(lib, { what: 'watched' });
+    expect(r.rows).toBe(1);
+    expect(r.unrepresentable).toEqual([9]);
+    expect(r.files[0]?.content).not.toContain('slash');
   });
 });
 
@@ -157,6 +170,15 @@ describe('letterboxdCsv', () => {
     lib.push(src({ id: 8, sourceTitle: 'The Glass Harbor (Director\'s Cut)', tconst: 'tt9000001', matchStatus: 'matched', status: 'queue' }));
     const r = letterboxdCsv(lib, { what: 'watchlist' });
     expect(r.files[0]?.content).not.toContain('tt9000001');
+  });
+
+  it('a film queued again after it was watched is on the watchlist; status decides, not plays', () => {
+    vid = 200;
+    const lib = [src({ id: 1, sourceTitle: 'Again Soon', sourceYear: 1985, status: 'priority' }, { viewings: [play(1, '2015-06-06', 'manual')] })];
+    expect(letterboxdCsv(lib, { what: 'watchlist' }).rows).toBe(1);
+    expect(traktCsv(lib, { what: 'watchlist' }).rows.watchlist).toBe(1);
+    // Its old play is still history.
+    expect(letterboxdCsv(lib, { what: 'watched' }).rows).toBe(1);
   });
 
   it('an empty selection writes no file', () => {
@@ -220,8 +242,8 @@ describe('traktCsv', () => {
     const r = traktCsv(fixture(), { what: 'all' });
     expect(r.content).toBe(golden('trakt-all.csv'));
     expect(r.rows).toEqual({ history: 4, ratings: 2, watchlist: 2 });
-    // Film 6 (no id, no year) is dropped from the watchlist and counted.
-    expect(r.skipped).toBe(1);
+    // Films 5 (watched) and 6 (someday) have no id and no year: dropped and counted.
+    expect(r.skipped).toBe(2);
     expect(r.dateless).toBe(1);
   });
 
@@ -239,8 +261,20 @@ describe('traktCsv', () => {
     expect(r.content).not.toMatch(/tt9000003|Wrong Film|Catalog Harbor/);
   });
 
+  it('a watched film with no plays still marks it watched, as one dateless play', () => {
+    const r = traktCsv([src({ id: 1, sourceTitle: 'Seen Long Ago', sourceYear: 1990, status: 'watched' })], { what: 'history' });
+    expect(r.content).toBe('type,action,title,year,imdb,trakt,watched_at,rating,rated_at,listed_at\nmovie,history,Seen Long Ago,1990,,,unknown,,,\n');
+    expect(r.dateless).toBe(1);
+  });
+
+  it('counts skipped movies, not rows', () => {
+    vid = 100;
+    const lib = [src({ id: 1, sourceTitle: 'No Year', status: 'watched', myRating: 5 }, { viewings: [play(1, '2020-01-01', 'manual'), play(1, '2021-01-01', 'manual')] })];
+    expect(traktCsv(lib, { what: 'all' }).skipped).toBe(1);
+  });
+
   it('an empty selection has no rows', () => {
-    const r = traktCsv([src({ id: 1, sourceTitle: 'Nothing', status: 'watched' })], { what: 'history' });
+    const r = traktCsv([src({ id: 1, sourceTitle: 'Nothing', sourceYear: 2000, status: 'queue' })], { what: 'history' });
     expect(r.rows).toEqual({ history: 0, ratings: 0, watchlist: 0 });
   });
 });

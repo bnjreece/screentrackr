@@ -34,17 +34,26 @@ export interface LetterboxdOptions {
 export interface LetterboxdResult {
   files: CsvFile[];
   rows: number;
-  /** Rows dropped for having nothing Letterboxd can match on (no id, no link, a blank title). */
+  /** Movies left out for having nothing Letterboxd can match on (no id, no link, a blank title). */
   skipped: number;
+  /** Item ids of movies left out because a value can't be written in Letterboxd's quoting (a backslash before a quote). */
+  unrepresentable: number[];
 }
 
 const IDENTITY = ['imdbID', 'Title', 'Year', 'Directors', 'LetterboxdURI'] as const;
 const DIARY = ['WatchedDate', 'Rewatch', 'Rating10', 'Tags'] as const;
 
-/** One field: line breaks flattened; quoted when it holds a comma or a quote, inner quotes backslash-escaped. */
-export function letterboxdField(v: string): string {
+/**
+ * One field: line breaks flattened; quoted when it holds a comma or a quote,
+ * inner quotes backslash-escaped. Letterboxd's quoting has no way to write a
+ * backslash right before a quote inside a quoted field (before an inner
+ * quote, or at the end), so such a value is null: it can't be written.
+ */
+export function letterboxdField(v: string): string | null {
   const s = oneLine(v);
-  return /[",]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s;
+  if (!/[",]/.test(s)) return s;
+  if (/\\(?="|$)/.test(s)) return null;
+  return `"${s.replace(/"/g, '\\"')}"`;
 }
 
 /** A comma list with no space after each comma; an entry's own commas become spaces. */
@@ -170,10 +179,22 @@ export function letterboxdCsv(sources: readonly ExportSource[], opts: Letterboxd
     }
     rows = chosen.map((f) => ({ ...identity(f), sortDate: null }));
   }
-  const before = rows.length;
-  rows = rows.filter((r) => r.cells.imdbID || r.cells.LetterboxdURI || r.cells.Title);
+  const skipped = new Set<number>();
+  const unrepresentable = new Set<number>();
+  const lines: { itemId: number; line: string }[] = [];
+  for (const r of rows) {
+    if (!(r.cells.imdbID || r.cells.LetterboxdURI || r.cells.Title)) {
+      skipped.add(r.itemId);
+      continue;
+    }
+    const cells = columns.map((c) => letterboxdField(r.cells[c] ?? ''));
+    if (cells.some((c) => c === null)) {
+      unrepresentable.add(r.itemId);
+      continue;
+    }
+    lines.push({ itemId: r.itemId, line: `${cells.join(',')}\n` });
+  }
   const header = columns.join(',');
-  const lines = rows.map((r) => ({ itemId: r.itemId, line: `${columns.map((c) => letterboxdField(r.cells[c] ?? '')).join(',')}\n` }));
   const files = split(`letterboxd-${opts.what}`, header, lines, opts.maxBytes ?? LETTERBOXD_MAX_BYTES);
-  return { files, rows: lines.length, skipped: before - rows.length };
+  return { files, rows: lines.length, skipped: skipped.size, unrepresentable: [...unrepresentable] };
 }
