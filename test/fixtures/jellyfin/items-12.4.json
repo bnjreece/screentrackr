@@ -1,0 +1,111 @@
+{
+  "Items": [
+    {
+      "Id": "0b6e00000000000000000000000000a1",
+      "Name": "The Glass Harbor",
+      "OriginalTitle": "The Glass Harbor",
+      "ProductionYear": 1978,
+      "PremiereDate": "1978-05-02T00:00:00.0000000Z",
+      "RunTimeTicks": 67200000000,
+      "Type": "Movie",
+      "LocationType": "FileSystem",
+      "MediaSourceCount": 2,
+      "Genres": ["Drama", "Mystery"],
+      "People": [
+        { "Name": "Orrin Vale", "Id": "p1", "Type": "Director" },
+        { "Name": "Ash Marlow", "Id": "p2", "Type": "Actor", "Role": "Keeper" }
+      ],
+      "ProviderIds": { "Imdb": "tt9000001", "Tmdb": "900001" },
+      "UserData": {
+        "Played": true,
+        "PlayCount": 2,
+        "LastPlayedDate": "2025-03-14T12:07:33.0000000Z",
+        "IsFavorite": true,
+        "Likes": true,
+        "Rating": 10,
+        "PlaybackPositionTicks": 0,
+        "Key": "900001"
+      }
+    },
+    {
+      "Id": "7c1d00000000000000000000000000a2",
+      "Name": "Example Heist",
+      "ProductionYear": 2011,
+      "RunTimeTicks": null,
+      "Type": "Movie",
+      "LocationType": "FileSystem",
+      "ProviderIds": {},
+      "UserData": { "Played": false, "PlayCount": 1, "PlaybackPositionTicks": 12000000000, "IsFavorite": false, "Key": "7c1d00000000000000000000000000a2" }
+    },
+    {
+      "Id": "1a2b00000000000000000000000000a3",
+      "Name": "Quiet Ledger",
+      "ProductionYear": 1999,
+      "RunTimeTicks": 83400000000,
+      "Type": "Movie",
+      "LocationType": "FileSystem",
+      "Genres": ["Crime", "Drama", "Thriller"],
+      "People": [{ "Name": "Dana Fincher", "Type": "Director" }],
+      "ProviderIds": { "imdb": "tt9000003" },
+      "UserData": { "Played": false, "PlayCount": 0, "PlaybackPositionTicks": 0, "IsFavorite": false, "Rating": 7.5, "Key": "tt9000003" }
+    },
+    {
+      "Id": "2b3c00000000000000000000000000a4",
+      "Name": "Collected Lanterns",
+      "Type": "BoxSet",
+      "LocationType": "FileSystem",
+      "UserData": { "Played": false, "PlayCount": 0, "IsFavorite": false }
+    },
+    {
+      "Id": "3c4d00000000000000000000000000a5",
+      "Name": "Pilot",
+      "Type": "Episode",
+      "LocationType": "FileSystem",
+      "UserData": { "Played": true, "PlayCount": 1, "IsFavorite": false }
+    },
+    {
+      "Id": "4d5e00000000000000000000000000a6",
+      "Name": "Birthday Party Tape",
+      "Type": "Video",
+      "LocationType": "FileSystem",
+      "UserData": { "Played": true, "PlayCount": 1, "IsFavorite": false }
+    },
+    {
+      "Id": "5e6f00000000000000000000000000a7",
+      "Name": "Salt & Signal",
+      "ProductionYear": 2004,
+      "Type": "Movie",
+      "LocationType": "Virtual",
+      "ProviderIds": { "Imdb": "tt9000005" },
+      "UserData": { "Played": false, "PlayCount": 0, "IsFavorite": false }
+    },
+    {
+      "Id": "6f7000000000000000000000000000a8",
+      "Name": "Dune Static: Behind the Scenes",
+      "Type": "Movie",
+      "ExtraType": "BehindTheScenes",
+      "LocationType": "FileSystem",
+      "UserData": { "Played": false, "PlayCount": 0, "IsFavorite": false }
+    },
+    {
+      "Id": "708100000000000000000000000000a9",
+      "Name": "Border Choir",
+      "Type": "Movie",
+      "IsPlaceHolder": true,
+      "LocationType": "FileSystem",
+      "UserData": { "Played": false, "PlayCount": 0, "IsFavorite": false }
+    },
+    {
+      "Id": "8192000000000000000000000000000a",
+      "Name": "Night Ferry",
+      "ProductionYear": 2002,
+      "RunTimeTicks": 67080000000,
+      "Type": "Movie",
+      "LocationType": "FileSystem",
+      "ProviderIds": { "Imdb": "tt9000010" },
+      "UserData": { "Played": true, "PlayCount": 1, "LastPlayedDate": "2024-11-02T12:30:00.0000000Z", "IsFavorite": false, "Rating": 0 }
+    }
+  ],
+  "TotalRecordCount": 10,
+  "StartIndex": 0
+}

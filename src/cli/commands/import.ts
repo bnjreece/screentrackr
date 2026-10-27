@@ -11,9 +11,11 @@ import {
   type ImdbListKind,
   type ImdbOptions,
 } from '../../core/importers/imdb.js';
+import { jellyfinDeviceId, mapJellyfinItems, readJellyfinItems, type JellyfinAuth } from '../../core/importers/jellyfin.js';
 import { applyImport, detectFormat, FORMATS, parseImportDetailed, type ImportFormat, type ParsedImport } from '../../core/importers/index.js';
 import { bool, str, strs, type Command } from '../command.js';
-import { UserError } from '../context.js';
+import { UserError, type Ctx } from '../context.js';
+import { promptHidden, readStdinSecret } from '../secret.js';
 
 function readBytes(file: string): Buffer {
   try {
@@ -30,7 +32,7 @@ function catalogHasTvMovies(db: Db): boolean {
 }
 
 interface Parsed extends ParsedImport {
-  format: ImportFormat | 'apple-tv';
+  format: ImportFormat | 'apple-tv' | 'jellyfin';
   notices: string[];
   skippedByType?: Record<string, number>;
 }
@@ -54,6 +56,68 @@ function parseImdbFiles(db: Db, files: string[], opts: ImdbOptions): Parsed {
   };
 }
 
+function packageVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')) as { version?: unknown };
+    return typeof pkg.version === 'string' ? pkg.version : '0';
+  } catch {
+    return '0';
+  }
+}
+
+interface JellyfinFlags {
+  url: string | undefined;
+  user: string | undefined;
+  userId: string | undefined;
+  tokenStdin: boolean;
+  passwordStdin: boolean;
+  ratings: boolean;
+  strictPlayed: boolean;
+  timeoutMs: number | undefined;
+}
+
+/**
+ * `import jellyfin`: the token comes from JELLYFIN_TOKEN or stdin, else the
+ * user logs in with a password from stdin or a hidden prompt. Neither is ever
+ * stored, printed or passed anywhere but the server's Authorization header.
+ */
+async function readJellyfin(ctx: Ctx, f: JellyfinFlags): Promise<Parsed> {
+  if (!f.url) throw new UserError('Usage: screentrackr import jellyfin --url <server> --user <name>');
+  if (f.tokenStdin && f.passwordStdin) throw new UserError('Use either --token-stdin or --password-stdin, not both');
+  const envToken = process.env.JELLYFIN_TOKEN;
+  if (f.passwordStdin && envToken) throw new UserError('JELLYFIN_TOKEN is set, so --password-stdin is not used. Unset JELLYFIN_TOKEN to sign in with a password.');
+  let auth: JellyfinAuth;
+  if (f.tokenStdin || envToken) {
+    const token = f.tokenStdin ? readStdinSecret('token') : (envToken as string);
+    if (!token.trim()) throw new UserError(f.tokenStdin ? 'No token on stdin.' : 'JELLYFIN_TOKEN is empty.');
+    auth = { token, ...(f.userId ? { userId: f.userId } : {}), ...(f.user ? { userName: f.user } : {}) };
+  } else {
+    if (f.userId) throw new UserError('--user-id only applies with a token (JELLYFIN_TOKEN or --token-stdin)');
+    if (!f.user) throw new UserError('Pass --user <name> to sign in, or set JELLYFIN_TOKEN.');
+    let password: string;
+    if (f.passwordStdin) password = readStdinSecret('password');
+    else if (process.stdin.isTTY) password = await promptHidden(`Jellyfin password for ${f.user}: `);
+    else throw new UserError('No password: pass it on stdin with --password-stdin, or set JELLYFIN_TOKEN.');
+    auth = { userName: f.user, password };
+  }
+  ctx.log('Reading your movies from the Jellyfin server (read only).');
+  const read = await readJellyfinItems({
+    url: f.url,
+    auth,
+    version: packageVersion(),
+    deviceId: jellyfinDeviceId(ctx.home),
+    ...(f.timeoutMs !== undefined ? { timeoutMs: f.timeoutMs } : {}),
+  });
+  const res = mapJellyfinItems(read.items, { ratings: f.ratings, strictPlayed: f.strictPlayed });
+  return {
+    format: 'jellyfin',
+    records: res.records,
+    warnings: [...read.warnings, ...res.warnings, ...res.skippedSummary],
+    notices: [`Read ${read.items.length} items for ${read.userName}.`, ...res.notices],
+    skippedByType: res.skippedByType,
+  };
+}
+
 export const importCmd: Command = {
   name: 'import',
   summary: 'Bring in a library file (merge by default)',
@@ -64,6 +128,7 @@ export const importCmd: Command = {
     "`import imdb <file.csv>...` reads IMDb CSV exports you downloaded from imdb.com (Your Ratings, your watchlist, check-ins or a list). Rated movies are marked watched with your rating; watchlist movies go in the queue only when they are new; nothing is marked owned. Several files are read together. --as says what a list export is (watchlist by default), --collection names a list's collection, --include-type brings in more than movies (repeatable or comma-separated: " +
       IMDB_INCLUDE_TYPES.join(', ') +
       '), --checkin-dates uses check-in dates as watched dates.',
+    '`import jellyfin --url <server> --user <name>` reads your movies from your own Jellyfin server, read only. The token comes from JELLYFIN_TOKEN (or --token-stdin); without one you sign in with your password (prompted, or --password-stdin) and the session is signed out afterwards. Nothing is stored. Played movies are marked watched; the rest keep their status (a new one goes in the queue). --ratings brings in your Jellyfin ratings.',
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
     '--replace backs up your library to backups/ first, then replaces it.',
   ].join('\n'),
@@ -71,7 +136,11 @@ export const importCmd: Command = {
     format: { type: 'string', value: '<format>', description: `One of ${FORMATS.join(', ')}` },
     merge: { type: 'boolean', description: 'Merge into the library (the default)' },
     replace: { type: 'boolean', description: 'Replace the library, after a backup' },
-    timeout: { type: 'string', value: '<seconds>', description: 'apple-tv only: how long to wait for the TV app (default 120)' },
+    timeout: {
+      type: 'string',
+      value: '<seconds>',
+      description: 'apple-tv: how long to wait for the TV app (default 120); jellyfin: per request (default 30)',
+    },
     as: { type: 'string', value: `<${IMDB_LIST_KINDS.join('|')}>`, description: 'imdb only: what an IMDb list export is (default watchlist)' },
     collection: { type: 'string', value: '<name>', description: 'imdb --as list only: collection name for the list (fills a blank collection)' },
     'include-type': {
@@ -81,20 +150,42 @@ export const importCmd: Command = {
       description: `imdb only: also bring in ${IMDB_INCLUDE_TYPES.join(', ')} (repeatable)`,
     },
     'checkin-dates': { type: 'boolean', description: 'imdb --as checkins only: use check-in dates as watched dates' },
+    url: { type: 'string', value: '<server>', description: 'jellyfin only: your server address, such as http://localhost:8096' },
+    user: { type: 'string', value: '<name>', description: 'jellyfin only: whose library to read (and who signs in without a token)' },
+    'user-id': { type: 'string', value: '<id>', description: 'jellyfin only, with an admin API key: the user id whose library to read' },
+    'token-stdin': { type: 'boolean', description: 'jellyfin only: read the access token from stdin instead of JELLYFIN_TOKEN' },
+    'password-stdin': { type: 'boolean', description: 'jellyfin only: read the password from stdin instead of prompting' },
+    ratings: { type: 'boolean', description: 'jellyfin only: also import your ratings (left out by default)' },
+    'strict-played': { type: 'boolean', description: 'jellyfin only: played movies with no known runtime get no status' },
   },
   async run(ctx, pos, values) {
     const file = pos[0];
     if (!file) throw new UserError('Usage: screentrackr import <file>');
     const imdb = file === 'imdb';
+    const jellyfin = file === 'jellyfin';
     const files = imdb ? pos.slice(1) : [file];
     if (imdb && !files.length) throw new UserError('Usage: screentrackr import imdb <file.csv>...');
     if (!imdb && pos.length > 1) throw new UserError(`Unexpected argument "${pos[1]}"`);
+    const jf: Omit<JellyfinFlags, 'timeoutMs'> = {
+      url: str(values, 'url'),
+      user: str(values, 'user'),
+      userId: str(values, 'user-id'),
+      tokenStdin: bool(values, 'token-stdin'),
+      passwordStdin: bool(values, 'password-stdin'),
+      ratings: bool(values, 'ratings'),
+      strictPlayed: bool(values, 'strict-played'),
+    };
+    const jellyfinFlags =
+      jf.url !== undefined || jf.user !== undefined || jf.userId !== undefined || jf.tokenStdin || jf.passwordStdin || jf.ratings || jf.strictPlayed;
+    if (!jellyfin && jellyfinFlags) {
+      throw new UserError('--url, --user, --user-id, --token-stdin, --password-stdin, --ratings and --strict-played only apply to `import jellyfin`');
+    }
     if (bool(values, 'merge') && bool(values, 'replace')) throw new UserError('Use either --merge or --replace, not both');
     const format = str(values, 'format');
     const timeout = str(values, 'timeout');
     const appleTv = file === 'apple-tv';
-    if ((appleTv || imdb) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
-    if (!appleTv && timeout !== undefined) throw new UserError('--timeout only applies to `import apple-tv`');
+    if ((appleTv || imdb || jellyfin) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
+    if (!appleTv && !jellyfin && timeout !== undefined) throw new UserError('--timeout only applies to `import apple-tv` and `import jellyfin`');
     if (format !== undefined && !(FORMATS as readonly string[]).includes(format)) {
       throw new UserError(`Unknown format "${format}" (expected ${FORMATS.join(', ')})`);
     }
@@ -134,6 +225,9 @@ export const importCmd: Command = {
       if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
       ctx.log('Reading the TV app library (experimental). macOS may ask to allow access to the TV app.');
       parsed = { format: 'apple-tv', records: await readAppleTvLibrary({ timeoutMs }), warnings: [], notices: [] };
+    } else if (jellyfin) {
+      if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+      parsed = await readJellyfin(ctx, { ...jf, timeoutMs });
     } else if (imdb) {
       parsed = parseImdbFiles(ctx.db(), files, imdbOpts);
     } else {
@@ -152,6 +246,9 @@ export const importCmd: Command = {
     // An empty IMDb export (only a header) is "no rows", never "delete everything".
     if (parsed.format === 'imdb' && replace && parsed.records.length === 0) {
       throw new UserError('Nothing to import from the IMDb file, so --replace would empty your library. Nothing was changed.');
+    }
+    if (parsed.format === 'jellyfin' && replace && parsed.records.length === 0) {
+      throw new UserError('No movies came back from the Jellyfin server, so --replace would empty your library. Nothing was changed.');
     }
 
     const db = ctx.db();
