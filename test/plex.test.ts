@@ -605,10 +605,23 @@ describe('mapping Plex movies', () => {
     expect(two.records.every((r) => typeof r.watchedAt === 'string')).toBe(true);
   });
 
-  it('skips non-movie items and items without a title', () => {
-    const res = map([{ ...lanternSeason, type: 'episode' }, { ...lanternSeason, title: '  ' }, lanternSeason]);
+  it('skips non-movie items, and counts a movie without a title or an entry without a type as unreadable', () => {
+    const res = map([{ ...lanternSeason, type: 'episode' }, { ...lanternSeason, title: '  ' }, { ratingKey: 'x' } as PlexMetadata, lanternSeason]);
     expect(res.records).toHaveLength(1);
-    expect(res.counts.skipped).toBe(2);
+    expect(res.counts).toMatchObject({ skipped: 1, unreadable: 2 });
+    expect(res.warnings.join('\n')).toMatch(/2 Plex entries could not be read/);
+  });
+
+  it('does not call a read whole when a movie in it could not be read', async () => {
+    const { fetch } = fakeFetch({ sections: SECTIONS.slice(0, 1), movies: { '3': [lanternSeason, { ratingKey: 'b', type: 'movie' }] } });
+    const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch });
+    expect(res.records).toHaveLength(1);
+    expect(res.complete).toBe(false);
+  });
+
+  it('refuses a library list holding an entry it does not describe', async () => {
+    const { fetch } = fakeFetch({ sections: [...SECTIONS.slice(0, 1), {} as never], movies: { '3': [lanternSeason] } });
+    await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch })).rejects.toThrow(/did not describe/);
   });
 
   it('keeps Unicode titles and a non-numeric ratingKey', () => {

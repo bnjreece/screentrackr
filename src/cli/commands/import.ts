@@ -153,7 +153,7 @@ export const importCmd: Command = {
       if (res.dryRun) return emitPlexDryRun(ctx, res);
       if (!res.complete && bool(values, 'replace')) {
         throw new UserError(
-          'The Plex listing may be incomplete (a library returned fewer movies than it reported, or a saved listing has no totals), so --replace could drop movies. Nothing was changed.',
+          'The Plex listing may be incomplete (a library returned fewer movies than it reported, some movies could not be read, or a saved listing has no totals), so --replace could drop movies. Nothing was changed.',
         );
       }
       parsed = res;

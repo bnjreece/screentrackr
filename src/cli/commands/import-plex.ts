@@ -119,7 +119,7 @@ export async function readPlexImport(ctx: Ctx, values: Values): Promise<PlexPars
     }
     const dump = parsePlexDump(text);
     res = mapPlexItems(dump.movies, mapOpts);
-    complete = dump.complete;
+    complete = dump.complete && res.counts.unreadable === 0;
   } else {
     const token = readToken(values);
     const read = await readPlexLibrary({

@@ -91,6 +91,8 @@ export interface PlexCounts {
   skippedUnwatched: number;
   rated: number;
   skipped: number;
+  /** Entries that should be movies but can't be read (no type, or a movie without a title): the listing is not whole. */
+  unreadable: number;
 }
 
 export interface PlexImport extends ParsedImport {
@@ -167,19 +169,26 @@ export function mapPlexItems(items: PlexMetadata[], opts: PlexMapOptions = {}): 
   }
   const ratings = opts.ratings !== false;
   const warnings: string[] = [];
-  const counts: PlexCounts = { movies: 0, watched: 0, unwatched: 0, skippedUnwatched: 0, rated: 0, skipped: 0 };
+  const counts: PlexCounts = { movies: 0, watched: 0, unwatched: 0, skippedUnwatched: 0, rated: 0, skipped: 0, unreadable: 0 };
   let rounded = 0;
   let outOfRange = 0;
   const out: { rec: ImportRecord; edition: string; runtime: number | null }[] = [];
 
   for (const m of items) {
-    if (m === null || typeof m !== 'object' || m.type !== 'movie') {
+    // Something that is not a movie (a show, a clip) is skipped; an entry
+    // without a type, or a movie without a title, is a movie that went
+    // missing, so the listing can't count as whole.
+    if (m === null || typeof m !== 'object' || typeof m.type !== 'string' || !m.type.trim()) {
+      counts.unreadable++;
+      continue;
+    }
+    if (m.type !== 'movie') {
       counts.skipped++;
       continue;
     }
     const title = cleanText(m.title);
     if (!title) {
-      counts.skipped++;
+      counts.unreadable++;
       continue;
     }
     counts.movies++;
@@ -240,6 +249,9 @@ export function mapPlexItems(items: PlexMetadata[], opts: PlexMapOptions = {}): 
       }
     }
     out.push({ rec, edition: edition?.toLowerCase() ?? '', runtime });
+  }
+  if (counts.unreadable) {
+    warnings.push(`${counts.unreadable} Plex ${counts.unreadable === 1 ? 'entry' : 'entries'} could not be read (no type, or a movie without a title) and ${counts.unreadable === 1 ? 'was' : 'were'} left out`);
   }
   if (rounded) warnings.push(`${rounded} Plex rating${rounded === 1 ? ' was' : 's were'} not a whole number and ${rounded === 1 ? 'was' : 'were'} rounded`);
   if (outOfRange) warnings.push(`${outOfRange} Plex rating${outOfRange === 1 ? ' was' : 's were'} out of range (0 to 10) and left out`);
@@ -484,6 +496,9 @@ async function listSections(client: PlexClient, opts: PlexReadOptions, notices: 
     }
   }
   const all = (Array.isArray(dirs) ? dirs : []).map((d) => {
+    if (d === null || typeof d !== 'object' || Array.isArray(d) || !cleanText((d as Record<string, unknown>).type)) {
+      throw new ImportError('The Plex server listed a library it did not describe (no type); stopped without importing');
+    }
     const x = d as Record<string, unknown>;
     return { key: cleanText(x.key) ?? '', title: cleanText(x.title) ?? '', type: cleanText(x.type), agent: cleanText(x.agent) };
   });
@@ -652,5 +667,6 @@ export async function readPlexLibrary(
   }
   await fillDetails(client, movies);
   const mapped = mapPlexItems(movies, opts);
+  complete &&= mapped.counts.unreadable === 0;
   return { ...mapped, warnings: [...warnings, ...mapped.warnings], notices: [...notices, ...mapped.notices], sections, complete };
 }

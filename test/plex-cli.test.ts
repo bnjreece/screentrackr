@@ -66,6 +66,20 @@ beforeAll(() => {
       },
     }),
   );
+  writeFileSync(
+    join(tmp, 'unreadable.json'),
+    JSON.stringify({
+      MediaContainer: {
+        size: 2,
+        totalSize: 2,
+        librarySectionID: 3,
+        Metadata: [
+          { ratingKey: '5013', type: 'movie', title: 'Lantern Season', year: 1978 },
+          { ratingKey: '5014', type: 'movie' },
+        ],
+      },
+    }),
+  );
   writeFileSync(join(tmp, 'empty.json'), JSON.stringify({ MediaContainer: { size: 0, totalSize: 0, Metadata: [] } }));
   writeFileSync(
     join(tmp, 'partial.json'),
@@ -159,6 +173,10 @@ describe('import plex', () => {
     const partial = run(['--home', home, 'import', 'plex', '--from-file', join(tmp, 'partial.json'), '--replace']);
     expect(partial.code).toBe(1);
     expect(partial.stderr).toMatch(/may be incomplete/);
+    expect(count(home)).toBe(2);
+    const unreadable = run(['--home', home, 'import', 'plex', '--from-file', join(tmp, 'unreadable.json'), '--replace']);
+    expect(unreadable.code).toBe(1);
+    expect(unreadable.stderr).toMatch(/may be incomplete/);
     expect(count(home)).toBe(2);
   });
 });
