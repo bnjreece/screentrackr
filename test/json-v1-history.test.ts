@@ -97,6 +97,18 @@ describe('import', () => {
     expect(strip(exportLibrary(b))).toEqual(strip(first));
   });
 
+  it('merges its own export back unchanged, dateless plays with different ratings included', () => {
+    const id = Number(
+      a.sql.prepare("INSERT INTO library_items (source_title, status, match_status, source) VALUES ('Pale Rooftops', 'watched', 'unmatched', 'trakt')").run().lastInsertRowid,
+    );
+    addViewing(a, id, { watchedAt: null, source: 'trakt', rating: 7, rewatch: true });
+    addViewing(a, id, { watchedAt: null, source: 'trakt' });
+    const before = exportLibrary(a);
+    const parsed = parseImportDetailed(JSON.stringify(before));
+    expect(applyImport(a, parsed.records, { mode: 'merge', lists: parsed.lists })).toMatchObject({ updated: 0, unchanged: 1 });
+    expect(strip(exportLibrary(a))).toEqual(strip(before));
+  });
+
   it('merges add-only: plays the library has and the file lacks stay, and a re-import is unchanged', () => {
     const id = seed(a);
     const parsed = parseImportDetailed(JSON.stringify(exportLibrary(a)));

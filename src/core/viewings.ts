@@ -474,7 +474,7 @@ export function planViewingSync(
       plan.inserts.push(row);
       if (row.watchedAt !== null && (!exact || row.sourceRef === null)) insertedDays.add(calendarDate(row.watchedAt));
     };
-    const update = (cur: Viewing, v: NewViewing, how: 'ref' | 'upgrade' | 'day') => {
+    const update = (cur: Viewing, v: Partial<NewViewing>, how: 'ref' | 'upgrade' | 'day') => {
       used.add(cur.id);
       const u: ViewingUpdate = { id: cur.id };
       if (how === 'ref' && v.watchedAt !== cur.watchedAt) u.watchedAt = v.watchedAt;
@@ -505,13 +505,33 @@ export function planViewingSync(
     }
     for (const v of inc.filter((x) => x.sourceRef == null && x.watchedAt !== null)) {
       const day = calendarDate(v.watchedAt as string);
-      const hit = free((s) => s.sourceRef === null && dayOf(s.watchedAt) === day) ?? (exact ? undefined : free((s) => dayOf(s.watchedAt) === day));
-      if (hit) update(hit, v, 'day');
+      const own = free((s) => s.sourceRef === null && dayOf(s.watchedAt) === day);
+      if (own) {
+        update(own, v, 'day');
+        continue;
+      }
+      // Not exact: a play with a ref that day is this play, recorded more
+      // precisely; it is matched as it is (its own flag and rating stand).
+      const folded = exact ? undefined : free((s) => dayOf(s.watchedAt) === day);
+      if (folded) update(folded, {}, 'day');
       else if (!dayTaken(day)) insert(v);
     }
-    for (const v of inc.filter((x) => x.sourceRef == null && x.watchedAt === null)) {
-      const hit = free((s) => s.watchedAt === null && s.sourceRef === null) ?? (exact ? undefined : free((s) => s.watchedAt === null));
+    // Dateless plays carry nothing to tell them apart but their flag and
+    // rating, so each first takes a stored one that equals it, and only the
+    // rest are paired (and updated) in order. A repeat of the same set then
+    // changes nothing whatever order either side lists them in.
+    const dateless = inc.filter((x) => x.sourceRef == null && x.watchedAt === null);
+    const same = (s: Viewing, v: NewViewing) => s.rewatch === (v.rewatch ?? null) && s.rating === (v.rating ?? null);
+    const left: NewViewing[] = [];
+    for (const v of dateless) {
+      const hit = free((s) => s.watchedAt === null && s.sourceRef === null && same(s, v)) ?? (exact ? undefined : free((s) => s.watchedAt === null && same(s, v)));
       if (hit) update(hit, v, 'day');
+      else left.push(v);
+    }
+    for (const v of left) {
+      const hit = free((s) => s.watchedAt === null && s.sourceRef === null) ?? (exact ? undefined : free((s) => s.watchedAt === null));
+      // Exact (a JSON v1 merge, add-only): the count is the file's, the stored flag and rating stand.
+      if (hit) update(hit, exact ? {} : v, 'day');
       else insert(v);
     }
     if (complete.has(source) && source !== 'manual') for (const s of mine) if (!used.has(s.id)) plan.deletes.push(s.id);

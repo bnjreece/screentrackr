@@ -313,6 +313,51 @@ describe('planViewingSync', () => {
     expect(planViewingSync(after, incoming, new Set())).toEqual({ inserts: [], updates: [], deletes: [] });
   });
 
+  it('matches dateless plays to the stored ones they equal before any other', () => {
+    const stored = [v(1, null, 'trakt'), v(2, null, 'trakt', { rating: 7, rewatch: true })];
+    // Oldest first, as an export lists them; the stored order is newest first.
+    const incoming = [
+      { watchedAt: null, source: 'trakt' as const, rating: 7, rewatch: true },
+      { watchedAt: null, source: 'trakt' as const },
+    ];
+    expect(planViewingSync(stored, incoming, new Set())).toEqual({ inserts: [], updates: [], deletes: [] });
+    expect(planViewingSync(stored, incoming, new Set(['trakt']), { exact: true })).toEqual({ inserts: [], updates: [], deletes: [] });
+  });
+
+  it('folds a ref-less play into a play with a ref that day without changing it', () => {
+    const stored = [v(1, '2020-05-05', 'letterboxd', { sourceRef: 'a', rating: 7 }), v(2, '2020-05-05', 'letterboxd', { sourceRef: 'b', rating: 9 })];
+    expect(planViewingSync(stored, [{ watchedAt: '2020-05-05', source: 'letterboxd', rating: 9 }], new Set())).toEqual({ inserts: [], updates: [], deletes: [] });
+  });
+
+  it('plans nothing when a stored set comes back in any order (property style)', () => {
+    let seed = 11;
+    const rand = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    const sources = ['trakt', 'letterboxd', 'manual'] as const;
+    for (let round = 0; round < 300; round++) {
+      const stored: Viewing[] = [];
+      const taken = new Set<string>();
+      for (let k = 0, n = 1 + rand(7); k < n; k++) {
+        const source = sources[rand(3)] as (typeof sources)[number];
+        const day = rand(4) === 0 ? null : `2020-0${1 + rand(3)}-0${1 + rand(3)}`;
+        const ref = rand(2) === 0 ? `r${round}-${k}` : null;
+        if (ref === null && day !== null) {
+          if (taken.has(`${source}|${day}`)) continue;
+          taken.add(`${source}|${day}`);
+        }
+        stored.push(v(100 + k, day, source, { sourceRef: ref, rating: rand(3) === 0 ? 1 + rand(10) : null, rewatch: rand(3) === 0 ? rand(2) === 0 : null }));
+      }
+      const incoming = [...stored]
+        .sort(() => rand(3) - 1)
+        .map((x) => ({ watchedAt: x.watchedAt, source: x.source, sourceRef: x.sourceRef, ...(x.rating !== null ? { rating: x.rating } : {}), ...(x.rewatch !== null ? { rewatch: x.rewatch } : {}) }));
+      for (const exact of [false, true]) {
+        expect(planViewingSync(stored, incoming, new Set(sources), { exact }), `round ${round} exact ${exact}`).toEqual({ inserts: [], updates: [], deletes: [] });
+      }
+    }
+  });
+
   it('lets a play with a ref become dateless', () => {
     const p = planViewingSync([v(10, '2020-01-01', 'trakt', { sourceRef: 'R' })], [{ watchedAt: null, source: 'trakt', sourceRef: 'R' }], new Set(['trakt']));
     expect(p).toEqual({ inserts: [], updates: [{ id: 10, watchedAt: null }], deletes: [] });
