@@ -96,8 +96,10 @@ describe('import letterboxd', () => {
   it('opens only the loose files it reads: a glob over the export never opens profile, comments, likes, unnamed lists or deleted/ and orphaned/', () => {
     const copy = join(tmp, `glob-${n}`);
     cpSync(EXPORT, copy, { recursive: true });
+    // Lists named like the export's own files are still lists.
+    for (const f of ['watchlist.csv', 'ratings.csv']) cpSync(join(copy, 'lists', 'favourites.csv'), join(copy, 'lists', f));
     // Unreadable: opening any of these would fail the import.
-    const closed = ['profile.csv', 'comments.csv', 'reviews.csv', 'likes/films.csv', 'lists/favourites.csv', 'lists/old-shelf.csv', 'deleted/diary.csv', 'orphaned/diary.csv'];
+    const closed = ['profile.csv', 'comments.csv', 'reviews.csv', 'likes/films.csv', 'lists/favourites.csv', 'lists/old-shelf.csv', 'lists/watchlist.csv', 'lists/ratings.csv', 'deleted/diary.csv', 'orphaned/diary.csv'];
     for (const f of closed) chmodSync(join(copy, f), 0o000);
     try {
       const all = ['watched.csv', 'ratings.csv', 'diary.csv', 'watchlist.csv', 'lists/my-blu-rays.csv', ...closed].map((f) => join(copy, f));

@@ -80,8 +80,9 @@ const sameCells = (a: string[] | undefined, b: string[]) => !!a && a.length === 
 /** Whether a file's first line is a Letterboxd export header (watched, ratings, diary, watchlist, reviews or a list). */
 export function isLetterboxdHeader(firstLine: string): boolean {
   const line = firstLine.replace(/^\ufeff/, '').trim();
-  if (LIST_PREAMBLE.test(line)) return true;
-  const cells = line.split(',');
+  // Parsed as CSV, so a header with quoted cells ("Date","Name",...) is recognized too.
+  const cells = parseCsvRows(line)[0] ?? [];
+  if (cells.length === 1 && LIST_PREAMBLE.test((cells[0] ?? '').trim())) return true;
   return [FILM_HEADER, RATINGS_HEADER, DIARY_HEADER, REVIEWS_HEADER].some((h) => sameCells(cells, h));
 }
 
@@ -487,6 +488,17 @@ export function chooseLooseFiles(paths: string[], opts: LetterboxdOptions = {}, 
       warnings.push(`${path}: files in ${dir.toLowerCase()}/ are never imported, so it was not opened`);
       continue;
     }
+    // A file in a lists/ folder is a list, whatever its name (lists/watchlist.csv
+    // is a list called watchlist), and is opened only when --owned-list names
+    // it; a list name never reaches a file outside lists/ (profile.csv).
+    if (parts[parts.length - 1]?.toLowerCase() === 'lists') {
+      if (byName && !owned.has(base.replace(/\.csv$/, ''))) {
+        warnings.push(`${path}: a list that --owned-list does not name, so it was not opened`);
+        continue;
+      }
+      open.push(path);
+      continue;
+    }
     if (base === 'reviews.csv' && !opts.withReviews) {
       notices.push(`${path}: reviews are read only with --with-reviews, so it was not opened`);
       continue;
@@ -495,9 +507,7 @@ export function chooseLooseFiles(paths: string[], opts: LetterboxdOptions = {}, 
       notices.push(`${path}: --no-watchlist, so it was not opened`);
       continue;
     }
-    // A list counts only inside a lists/ folder, so --owned-list profile can never open profile.csv.
-    const namedList = parts[parts.length - 1]?.toLowerCase() === 'lists' && owned.has(base.replace(/\.csv$/, ''));
-    if (byName && !LOOSE_NAMES.has(base) && !namedList) {
+    if (byName && !LOOSE_NAMES.has(base)) {
       warnings.push(`${path}: not a file this import reads (watched.csv, ratings.csv, diary.csv, watchlist.csv, reviews.csv or a lists/ file named with --owned-list), so it was not opened`);
       continue;
     }

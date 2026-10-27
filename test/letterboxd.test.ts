@@ -334,6 +334,23 @@ describe('loose files and detection', () => {
     expect(item('Night Ferry')[0]?.myRating).toBe(9);
   });
 
+  it('treats every file in lists/ as a list, gated only by --owned-list', () => {
+    const lists = ['x/lists/watchlist.csv', 'x/lists/ratings.csv', 'x/lists/diary.csv', 'x/lists/watched.csv', 'x/lists/reviews.csv'];
+    const none = chooseLooseFiles([...lists, 'x/watched.csv']);
+    expect(none.open).toEqual(['x/watched.csv']);
+    expect(none.warnings.filter((w) => /--owned-list does not name/.test(w))).toHaveLength(5);
+    expect(chooseLooseFiles(lists, { ownedLists: ['reviews', 'watchlist'], watchlist: false }).open).toEqual(['x/lists/watchlist.csv', 'x/lists/reviews.csv']);
+  });
+
+  it('detects a header with quoted cells and imports it as Letterboxd', () => {
+    const quoted = '"Date","Name","Year","Letterboxd URI","Rating"\n"2024-01-01","Night Ferry","2002","https://boxd.it/zZ0n","4"\n';
+    expect(detectFormat(quoted, 'ratings.csv')).toBe('letterboxd');
+    const res = parseImportDetailed(quoted, undefined, 'ratings.csv');
+    expect(res.format).toBe('letterboxd');
+    expect(res.records[0]).toMatchObject({ myRating: 8, status: 'watched', ownedIfNew: false, externalIds: { letterboxd: 'https://boxd.it/zZ0n' } });
+    expect(detectFormat('"Letterboxd list export v7"\n', 'x.csv')).toBe('letterboxd');
+  });
+
   it('matches a loose list file to --owned-list without case', () => {
     const res = parseLetterboxdFiles([{ name: 'My-Blu-Rays.csv', text: text('lists/my-blu-rays.csv') }], { ownedLists: ['my-blu-rays'] });
     expect(res.records.some((r) => r.owned === true)).toBe(true);
