@@ -289,6 +289,19 @@ describe('reading the server', () => {
     expect(res.complete).toBe(false);
   });
 
+  it('trusts an empty page only when it says size 0', async () => {
+    const first = { body: { MediaContainer: { size: 1, Metadata: [film('a')] } } };
+    const claims = scripted([first, { body: { MediaContainer: { size: 200 } } }]);
+    await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: claims.fetch, pageSize: 1 })).rejects.toThrow(
+      /said it sent 200 movies/,
+    );
+    const silent = scripted([first, { body: { MediaContainer: {} } }]);
+    const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: silent.fetch, pageSize: 1 });
+    expect(res.complete).toBe(false);
+    const explicit = scripted([first, { body: { MediaContainer: { size: 0 } } }]);
+    expect((await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: explicit.fetch, pageSize: 1 })).complete).toBe(true);
+  });
+
   it('takes the larger of the body and header totals', async () => {
     const { fetch } = scripted([
       { body: { MediaContainer: { size: 2, totalSize: 2, Metadata: [film('a'), film('b')] } }, headers: { 'X-Plex-Container-Total-Size': '5' } },
