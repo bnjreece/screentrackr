@@ -3,7 +3,7 @@
  * check-ins, custom lists). Every title, person and id in the fixtures is
  * invented; none of it comes from a real export.
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -332,6 +332,71 @@ describe('importing into the library', () => {
     importFiles([{ name: 'r.csv', text }], { includeTypes: ['short'] });
     expect(db.sql.prepare('SELECT item_id, kind, value FROM item_external_ids WHERE item_id = ?').all(id)).toEqual([]);
     expect(items().find((i) => i.id === id)).toMatchObject({ tconst: 'tt9000010', matchStatus: 'manual' });
+  });
+
+  it('another format\'s record for a same-named feature never merges into an IMDb short missing from the catalog', () => {
+    const text = `${RATINGS_HEADER}\ntt9400002,7,2024-01-01,"Night Ferry","Night Ferry",u,Short,6.0,12,2002,"Short",10,"2002","Dana Fincher"\n`;
+    importFiles([{ name: 'r.csv', text }], { includeTypes: ['short'] });
+    // A CSV row that matches the feature in the catalog (same title, year and director).
+    const res = applyImport(db, [{ sourceTitle: 'Night Ferry', sourceYear: 2002, sourceDirector: 'Dana Fincher', myRating: 4, owned: true, source: 'csv' }], {
+      mode: 'merge',
+    });
+    expect(res).toMatchObject({ added: 1, updated: 0 });
+    const short = { sourceTitle: 'Night Ferry', tconst: 'tt9400002', matchStatus: 'unmatched', myRating: 7, owned: false };
+    expect(items()).toMatchObject([short, { tconst: 'tt9000010', matchStatus: 'matched', myRating: 4, owned: true }]);
+    rematch(db);
+    expect(items()).toMatchObject([short, { tconst: 'tt9000010', matchStatus: 'matched' }]);
+    applyImport(db, parseImportDetailed(JSON.stringify(exportLibrary(db))).records, { mode: 'replace' });
+    expect(items()).toMatchObject([short, { tconst: 'tt9000010', matchStatus: 'matched', myRating: 4 }]);
+  });
+
+  it('linking an IMDb item by hand to another title drops the old id, so the next import finds it', () => {
+    const short = `${RATINGS_HEADER}\ntt9400002,7,2024-01-01,"Night Ferry","Night Ferry",u,Short,6.0,12,2002,"Short",10,"2002","Dana Fincher"\n`;
+    importFiles([{ name: 'r.csv', text: short }], { includeTypes: ['short'] });
+    const id = items()[0]?.id as number;
+    linkItem(db, id, 'tt9000010');
+    expect(db.sql.prepare('SELECT kind FROM item_external_ids WHERE item_id = ?').all(id)).toEqual([]);
+    const feature = `${RATINGS_HEADER}\ntt9000010,8,2024-02-01,"Night Ferry","Night Ferry",u,Movie,6.8,112,2002,"Drama",10,"2002","Dana Fincher"\n`;
+    expect(importFiles([{ name: 'f.csv', text: feature }])).toMatchObject({ added: 0, updated: 1 });
+    expect(items()).toMatchObject([{ id, tconst: 'tt9000010', matchStatus: 'manual', myRating: 8 }]);
+    expect(db.sql.prepare('SELECT kind, value FROM item_external_ids WHERE item_id = ?').all(id)).toEqual([{ kind: 'imdb', value: 'tt9000010' }]);
+    // The link and the id survive a JSON v1 round trip, and a repeat changes nothing.
+    applyImport(db, parseImportDetailed(JSON.stringify(exportLibrary(db))).records, { mode: 'replace' });
+    expect(items()).toMatchObject([{ tconst: 'tt9000010', matchStatus: 'manual', myRating: 8 }]);
+    expect(importFiles([{ name: 'f.csv', text: feature }])).toMatchObject({ added: 0, updated: 0, unchanged: 1 });
+  });
+
+  it('linking by hand to the same title keeps the id', () => {
+    importFiles([file('ratings.csv')]);
+    const id = byConst('tt9000001')[0]?.id as number;
+    linkItem(db, id, 'tt9000001');
+    expect(db.sql.prepare('SELECT value FROM item_external_ids WHERE item_id = ?').all(id)).toEqual([{ value: 'tt9000001' }]);
+  });
+
+  it('notes come from a list row\'s Description only when asked', () => {
+    importFiles([file('watchlist.csv')], { as: 'watchlist' });
+    expect(byConst('tt9000024')[0]?.notes).toBeNull();
+    db.sql.exec('DELETE FROM library_items');
+    importFiles([file('watchlist.csv')], { as: 'watchlist', notesFromDescription: true });
+    expect(byConst('tt9000024')[0]?.notes).toBe('Watch on the "big" screen\nwith the projector');
+    expect(byConst('tt9000004')[0]?.notes).toBeNull();
+  });
+
+  it('a dry run reports the counts and writes nothing', () => {
+    importFiles([file('ratings.csv')]);
+    const before = JSON.stringify(exportLibrary(db).items);
+    const text = file('ratings.csv').text.replace('tt9000001,8,', 'tt9000001,10,');
+    const records = parse([{ name: 'n.csv', text }, file('watchlist.csv')], { as: 'watchlist' }).records;
+    const res = applyImport(db, records, { mode: 'merge', dryRun: true });
+    expect(res).toMatchObject({ dryRun: true, updated: 1, backupPath: null });
+    expect(res.added).toBeGreaterThan(0);
+    expect(JSON.stringify(exportLibrary(db).items)).toBe(before);
+    const backups = join(tmp, 'home', 'backups');
+    const backupsBefore = readdirSync(backups).length;
+    expect(applyImport(db, records, { mode: 'replace', dryRun: true })).toMatchObject({ dryRun: true, backupPath: null });
+    expect(JSON.stringify(exportLibrary(db).items)).toBe(before);
+    expect(readdirSync(backups)).toHaveLength(backupsBefore);
+    expect(applyImport(db, records, { mode: 'merge' }).dryRun).toBeUndefined();
   });
 
   it('rejects an imdb external id that is not an IMDb id', () => {

@@ -28,7 +28,8 @@
  * - Runtime (mins) depends on the account's location, and a runtime more than
  *   3 minutes off the catalog can refute a correct Const or rule out the
  *   owner's own item, so it is never read. Neither are IMDb Rating, Num
- *   Votes, Release Date, URL or the list Description.
+ *   Votes, Release Date or URL, and the list Description only becomes notes
+ *   when asked (`notesFromDescription`).
  * - Rows for one Const, across every file of one import, fold into one record.
  */
 import { cleanText, cleanTconst, cleanYear, foldRecords, ImportError, type ImportRecord, type ParsedImport } from './common.js';
@@ -51,6 +52,8 @@ export interface ImdbOptions {
   includeTypes?: readonly ImdbIncludeType[];
   /** With `as: 'checkins'`: use each check-in's Created date as the watched date. */
   checkinDates?: boolean;
+  /** List exports: use a row's Description (your note on it) as the movie's notes (fills blank notes only). */
+  notesFromDescription?: boolean;
 }
 
 export interface ImdbFile {
@@ -286,6 +289,10 @@ function parseFile(file: ImdbFile, opts: ImdbOptions, out: { records: ImportReco
       }
     }
     if (kind === 'list' && opts.collection?.trim()) rec.collection = opts.collection.trim();
+    if (opts.notesFromDescription) {
+      const note = cleanText(at(cells, 'description'));
+      if (note) rec.notes = note;
+    }
     out.records.push(rec);
   });
 }

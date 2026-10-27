@@ -132,6 +132,8 @@ export interface ImportSummary {
    */
   reviews: ImportReview[];
   backupPath: string | null;
+  /** Present and true when nothing was written (`dryRun`): the counts say what the import would do. */
+  dryRun?: true;
 }
 
 export interface ImportReview {
@@ -322,6 +324,14 @@ function externalIdsOf(db: Db): Map<number, ExternalIds> {
   return out;
 }
 
+/**
+ * An exact IMDb id (the `imdb` external id) is the item's or record's IMDb
+ * title even while the catalog lacks it, so it stands in as the established
+ * link when there is none: another movie's link then conflicts with it.
+ */
+const withExactId = (identity: Identity, exact: string | null | undefined): Identity =>
+  identity.tconst === null && exact ? { ...identity, tconst: exact } : identity;
+
 const existing = (db: Db, row: PoolRow, ids: ExternalIds | undefined): Existing => {
   const raw = rowToItem(row);
   const item: PoolItem = {
@@ -330,12 +340,12 @@ const existing = (db: Db, row: PoolRow, ids: ExternalIds | undefined): Existing 
     externalIds: canonicalIds(ids),
     watchedAtSource: raw.watchedAt === null ? null : row.watched_at_source,
   };
-  return { item, norm: normalizeTitle(item.sourceTitle), identity: identityOf(db, item) };
+  return { item, norm: normalizeTitle(item.sourceTitle), identity: withExactId(identityOf(db, item), item.externalIds.imdb) };
 };
 
 /** The identity of the item a record would be, its own catalog link included. */
 const recordIdentity = (db: Db, r: ImportRecord, t: Target): Identity =>
-  identityOf(db, {
+  withExactId(identityOf(db, {
     sourceTitle: r.sourceTitle.trim(),
     sourceYear: r.sourceYear ?? null,
     sourceRuntimeMin: r.sourceRuntimeMin ?? null,
@@ -343,7 +353,7 @@ const recordIdentity = (db: Db, r: ImportRecord, t: Target): Identity =>
     editionYear: r.editionYear ?? null,
     tconst: t.tconst,
     matchStatus: t.matchStatus,
-  });
+  }), r.externalIds?.imdb);
 
 /** What the import does with one record. */
 type MergeTarget =
@@ -607,16 +617,45 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   return out;
 }
 
+/** Thrown inside a dry run's transaction to roll it back, carrying the summary out. */
+class DryRun {
+  constructor(readonly summary: ImportSummary) {}
+}
+
 /**
  * Write records into the library in one transaction. In `replace` mode the
  * current library is first exported to `backups/` and the backup path is
- * returned.
+ * returned. With `dryRun` the import runs as usual inside the transaction and
+ * is then rolled back: nothing is written (no backup either) and the summary
+ * says what it would have done.
  */
-export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merge' | 'replace' }): ImportSummary {
+export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merge' | 'replace'; dryRun?: boolean }): ImportSummary {
   if (opts.mode !== 'merge' && opts.mode !== 'replace') throw new ImportError(`Unknown import mode "${String(opts.mode)}"`);
   validate(records);
   records = records.map(cleanRecord);
+  if (opts.dryRun === true) {
+    try {
+      writeImport(db, records, opts.mode, null, (summary) => {
+        throw new DryRun(summary);
+      });
+    } catch (err) {
+      if (err instanceof DryRun) return { ...err.summary, dryRun: true };
+      throw err;
+    }
+    throw new Error('unreachable: a dry run always rolls back');
+  }
   const backupPath = opts.mode === 'replace' ? writeBackup(db) : null;
+  return writeImport(db, records, opts.mode, backupPath, (summary) => summary);
+}
+
+function writeImport(
+  db: Db,
+  records: ImportRecord[],
+  mode: 'merge' | 'replace',
+  backupPath: string | null,
+  finish: (summary: ImportSummary) => ImportSummary,
+): ImportSummary {
+  const opts = { mode };
 
   const select = db.sql.prepare(`SELECT ${POOL_COLUMNS} FROM library_items WHERE id = ?`);
   const insert = db.sql.prepare(
@@ -733,6 +772,6 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
       }
       if (final === 'ambiguous' || final === 'unmatched') summary.needsReview++;
     });
-    return summary;
+    return finish(summary);
   });
 }

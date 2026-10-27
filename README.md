@@ -77,7 +77,7 @@ screentrackr import imdb imdb-ratings.csv imdb-watchlist.csv
 ```
 
 - **Ratings** (the file with `Your Rating` and `Date Rated` columns): each movie is marked watched with your rating, a whole number from 1 to 10. The date you rated it is not used as a watch date.
-- **List exports** (watchlist, check-ins and custom lists share one layout, and the file doesn't say which it is). Pass `--as` to say: `--as watchlist` (the default, with a notice) puts movies you don't have yet in the queue and never changes the status of a movie you already have, so a watched movie stays watched. `--as checkins` marks movies watched; add `--checkin-dates` to use each check-in's date as the watched date. `--as list` sets no status; add `--collection <name>` to name the list's collection. A rated movie in any list is marked watched with that rating.
+- **List exports** (watchlist, check-ins and custom lists share one layout, and the file doesn't say which it is). Pass `--as` to say: `--as watchlist` (the default, with a notice) puts movies you don't have yet in the queue and never changes the status of a movie you already have, so a watched movie stays watched. `--as checkins` marks movies watched; add `--checkin-dates` to use each check-in's date as the watched date. `--as list` sets no status; add `--collection <name>` to name the list's collection. A rated movie in any list is marked watched with that rating. A list row's Description (your note on it) is dropped unless you add `--notes-from-description`, which uses it as the movie's notes when the movie has none.
 - IMDb has no idea of what you own, so a new movie from IMDb is not marked owned and a movie you already have keeps its owned flag. Title, year, directors and genres only fill fields a movie you already have left blank; they never replace what your other imports said.
 - Only rows whose Title Type is Movie come in (and TV Movie, when you built the catalog with `--include-tv-movies`). TV series, episodes, shorts and the rest are skipped and counted; `--include-type short,video` (also `tvMovie`, `tvSpecial`, `tvShort`) brings those in, unmatched.
 - Each row's IMDb id decides the match: the catalog's movie when the catalog has that id, otherwise the movie stays unmatched (keeping the id) rather than being matched to another title by name. The id is kept with the movie, so a later `setup`, `match` or restore from an export keeps to it too. The runtime in the file depends on your location, so it is ignored. IMDb's own rating, votes and release date are never stored, and neither is a list's description.
@@ -170,7 +170,7 @@ Every command takes `--home <dir>`, `--json` and `--help`.
 
 ```text
 screentrackr setup [--refresh] [--no-cast] [--include-tv-movies]
-screentrackr import <file|apple-tv|imdb <file.csv>...> [--format <format>] [--merge | --replace]
+screentrackr import <file|apple-tv|imdb <file.csv>...> [--format <format>] [--merge | --replace] [--dry-run]
 screentrackr search [filters]
 screentrackr show <id|tconst|title>
 screentrackr add <tconst|title> [--year <yyyy>] [--status <status>] [--new-edition]
@@ -187,7 +187,7 @@ screentrackr doctor
 | Command | What it does |
 |---|---|
 | `setup` | Downloads the IMDb datasets and builds the catalog. `--refresh` checks for newer files. Afterwards it refreshes automatic matches; your statuses, ratings, notes and manual links are never changed. |
-| `import` | Brings in a library file, the Apple TV app's library with `import apple-tv`, or IMDb CSV exports with `import imdb` (`--as`, `--collection`, `--include-type`, `--checkin-dates`). |
+| `import` | Brings in a library file, the Apple TV app's library with `import apple-tv`, or IMDb CSV exports with `import imdb` (`--as`, `--collection`, `--include-type`, `--checkin-dates`, `--notes-from-description`). `--dry-run` shows what any import would add, update and leave for review without changing anything. |
 | `search` | The main query. Filters are listed below. |
 | `show` | The full record for one movie, by library id, IMDb id or title. An IMDb id or catalog title only finds items that are matched or linked by hand; an unmatched item (one imported with an unchecked IMDb id before `setup`, say) is reached by its id or its own title. A year in a title, as in `"The Glass Harbor (2009)"` or `"The Glass Harbor (2009) (4K)"`, only finds items of that year (within one); `set` works the same way. |
 | `add` | Adds a catalog movie to your library. An ambiguous title lists the candidates instead of guessing. A year in the title, like `--year`, only finds movies of that year (within one), and a title year that disagrees with `--year` finds nothing. A movie you already have is refused unless you pass `--new-edition`. |
