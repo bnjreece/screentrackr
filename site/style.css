@@ -250,6 +250,8 @@ p { margin: 0 0 1em; }
   tab-size: 2;
 }
 .term-body code { font-size: inherit; }
+/* Inset and light so the ring stays visible on the dark panel and isn't clipped by it. */
+.term-body:focus-visible { outline-color: var(--term-head); outline-offset: -3px; }
 .term-body .prompt { color: var(--term-dim); }
 .term-body b { color: var(--term-head); font-weight: 600; }
 
