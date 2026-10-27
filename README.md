@@ -267,7 +267,7 @@ screentrackr stats --list Halloween      # only the movies in a list
 
 - A film is every edition of one IMDb title together, so a movie you own twice counts once. A movie not matched to IMDb is its own film.
 - One night recorded by two sources (a Letterboxd diary entry and the same play on Trakt, say) is one play. Plays with no date count, but only in the totals.
-- A film is watched when it has a play or the status `watched`. Its rating is the one you set most recently on any of its editions.
+- A film is watched when it has a play or the status `watched`. Its rating is the rating of its most recently updated edition that has one.
 - Genres and directors come from the IMDb catalog for matched movies and from the movie's own fields otherwise, as in `search`.
 - Over MCP: `watch_stats` (with `year`, `by`, `limit` and `lists`), and `library_stats` now also returns `playsThisYear` and `rated`.
 

@@ -164,6 +164,18 @@ describe('watchStats', () => {
     expect(watchStats(db, { now: NOW }).plays).toBe(7);
   });
 
+  it('editions linked to one tconst are one film even with no catalog row for it', () => {
+    db.sql.exec('DELETE FROM viewings; DELETE FROM library_items;');
+    const ins = db.sql.prepare(
+      "INSERT INTO library_items (tconst, source_title, status, match_status, source, my_rating, updated_at) VALUES ('tt8000001', 'Paper Comet', 'watched', ?, 'json', ?, ?)",
+    );
+    const a = Number(ins.run('manual', 8, '2024-01-01T00:00:00.000Z').lastInsertRowid);
+    const b = Number(ins.run('matched', 9, '2025-01-01T00:00:00.000Z').lastInsertRowid);
+    addViewing(db, a, { watchedAt: '2025-02-01', source: 'letterboxd', sourceRef: 'https://boxd.it/p1' });
+    addViewing(db, b, { watchedAt: '2025-02-01', source: 'trakt', sourceRef: '5' });
+    expect(watchStats(db, { now: NOW })).toMatchObject({ films: 1, plays: 1, rated: 1, averageRating: 9 });
+  });
+
   it('rejects bad options', () => {
     expect(() => watchStats(db, { year: 99 })).toThrow(/year/);
     expect(() => watchStats(db, { by: 'month' as never })).toThrow(/by/);

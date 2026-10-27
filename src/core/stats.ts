@@ -52,6 +52,7 @@ interface ItemRow {
   id: number;
   status: Status;
   match_status: string;
+  /** The item's tconst when it is linked (matched or manual), with or without a catalog row: the film's identity. */
   linked_tconst: string | null;
   source_director: string | null;
   source_genre: string | null;
@@ -67,7 +68,8 @@ function itemRows(db: Db): ItemRow[] {
   return db.sql
     .prepare(
       `SELECT li.id AS id, li.status AS status, li.match_status AS match_status,
-              t.tconst AS linked_tconst, li.source_director AS source_director, li.source_genre AS source_genre,
+              CASE WHEN li.tconst IS NOT NULL AND li.match_status IN ('matched', 'manual') THEN li.tconst END AS linked_tconst,
+              li.source_director AS source_director, li.source_genre AS source_genre,
               t.genres_csv AS genres_csv, COALESCE(t.year, li.source_year) AS year,
               (SELECT group_concat(p.name, char(31)) FROM (SELECT p.name FROM title_people tp JOIN people p ON p.nconst = tp.nconst
                 WHERE tp.tconst = t.tconst AND tp.role = 'director' ORDER BY tp.ord) p) AS directors,
