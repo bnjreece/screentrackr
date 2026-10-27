@@ -4,7 +4,13 @@ import { addMembers, ListRefError, removeMembers } from '../../core/list-members
 import { createList, deleteList, listLists, MAX_LIST_DESCRIPTION, MAX_LIST_NAME, type List } from '../../core/lists.js';
 import { handler, id, itemLine, ok, tconst, ToolInputError, type RegisterTools } from './common.js';
 
-const listName = z.string().trim().min(1).max(MAX_LIST_NAME).describe('The list name (case-insensitive).');
+/** A list name, its length counted after NFC as the core counts it (an accent typed as two code points is one character). */
+export const listNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((s) => [...s.normalize('NFC')].length <= MAX_LIST_NAME, `A list name can be at most ${MAX_LIST_NAME} characters`);
+const listName = listNameSchema.describe('The list name (case-insensitive).');
 
 const count = (n: number) => `${n} movie${n === 1 ? '' : 's'}`;
 const line = (l: List) => `- ${l.name} (${count(l.count)})${l.description ? `: ${l.description}` : ''}`;

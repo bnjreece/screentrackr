@@ -137,6 +137,14 @@ describe('list tools', () => {
     expect(text(await call('list_add', { list: 'Fincher' }))).toMatch(/at least one id or tconst/);
   });
 
+  it('counts a list name after NFC, as the core does', async () => {
+    const decomposed = 'e\u0301'.repeat(60);
+    const c = await call('create_list', { name: decomposed });
+    expect(c.isError, text(c)).toBeFalsy();
+    expect((await call('watch_stats', { lists: [decomposed] })).isError).toBeFalsy();
+    expect((await call('create_list', { name: 'x'.repeat(101) })).isError).toBe(true);
+  });
+
   it('search_movies takes lists', async () => {
     await call('create_list', { name: 'Halloween' });
     await call('list_add', { list: 'Halloween', ids: [ids.s4b] });

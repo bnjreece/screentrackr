@@ -4,6 +4,7 @@ import { LIST_MODES } from '../../core/filters.js';
 import { libraryStats, WATCH_STATS_BY, WATCH_STATS_MAX_LIMIT, watchStats, type WatchStats } from '../../core/stats.js';
 import { STATUSES } from '../../core/types.js';
 import { handler, ok, type RegisterTools } from './common.js';
+import { listNameSchema } from './lists.js';
 
 const pairs = (rows: { name: string; films: number; averageRating: number | null }[]) =>
   rows
@@ -67,7 +68,7 @@ export const register: RegisterTools = (server, { db }) => {
         year: z.number().int().min(1800).max(2200).optional().describe('Calendar year watched, e.g. 2025.'),
         by: z.enum(WATCH_STATS_BY).optional().describe('The one block to return in full: year, decade, genre, director or rating.'),
         limit: z.number().int().min(1).max(WATCH_STATS_MAX_LIMIT).optional().describe('Rows in the genre and director blocks (default 10), or in the by block.'),
-        lists: z.array(z.string().trim().min(1).max(100)).min(1).max(50).optional().describe('Your lists by name (case-insensitive): films in any of them.'),
+        lists: z.array(listNameSchema).min(1).max(50).optional().describe('Your lists by name (case-insensitive): films in any of them.'),
         listMode: z.enum(LIST_MODES).optional().describe('any (default): in at least one of lists. all: in every one.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
