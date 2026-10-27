@@ -620,6 +620,8 @@ async function listMovies(
  * listing returned without them. Only items with a `plex://` guid (matched by
  * the current agent) can have more to give. Never sends a side-effect parameter.
  */
+const isEntry = (m: unknown): m is PlexMetadata => m !== null && typeof m === 'object' && !Array.isArray(m);
+
 async function fillDetails(client: PlexClient, movies: PlexMetadata[]): Promise<void> {
   const needs = movies.filter(
     (m) =>
@@ -632,7 +634,7 @@ async function fillDetails(client: PlexClient, movies: PlexMetadata[]): Promise<
     const ids = batch.map((m) => encodeURIComponent(String(m.ratingKey))).join(',');
     const { body } = await client.get(`/library/metadata/${ids}`, { includeGuids: '1', excludeFields: EXCLUDE_FIELDS });
     const meta = container(body).Metadata;
-    const byKey = new Map((Array.isArray(meta) ? (meta as PlexMetadata[]) : []).map((m) => [String(m.ratingKey), m]));
+    const byKey = new Map((Array.isArray(meta) ? (meta as unknown[]) : []).filter(isEntry).map((m) => [String(m.ratingKey), m]));
     for (const m of batch) {
       const d = byKey.get(String(m.ratingKey));
       if (!d) continue;
@@ -659,13 +661,16 @@ export async function readPlexLibrary(
     movies.push(...listed.movies);
     complete &&= listed.complete;
   }
-  const matched = movies.filter((m) => /^plex:\/\//.test(cleanText(m.guid) ?? ''));
+  // A null or non-object entry is left to mapPlexItems, which counts it as
+  // unreadable (so the read is not whole); only real entries get details.
+  const entries = movies.filter(isEntry);
+  const matched = entries.filter((m) => /^plex:\/\//.test(cleanText(m.guid) ?? ''));
   if (matched.length && !matched.some((m) => Array.isArray(m.Guid))) {
     warnings.push(
       'The server returned no external ids (includeGuids was ignored), so they were fetched per movie; movies without an IMDb id are matched by title, year, runtime and director',
     );
   }
-  await fillDetails(client, movies);
+  await fillDetails(client, entries);
   const mapped = mapPlexItems(movies, opts);
   complete &&= mapped.counts.unreadable === 0;
   return { ...mapped, warnings: [...warnings, ...mapped.warnings], notices: [...notices, ...mapped.notices], sections, complete };

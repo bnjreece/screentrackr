@@ -619,6 +619,14 @@ describe('mapping Plex movies', () => {
     expect(res.complete).toBe(false);
   });
 
+  it('reads the good movies of a page that also holds a null entry, and calls the read incomplete', async () => {
+    const { fetch } = fakeFetch({ sections: SECTIONS.slice(0, 1), movies: { '3': [glassHarbor2009, null as never] } });
+    const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch });
+    expect(res.records).toHaveLength(1);
+    expect(res.counts.unreadable).toBe(1);
+    expect(res.complete).toBe(false);
+  });
+
   it('refuses a library list holding an entry it does not describe', async () => {
     const { fetch } = fakeFetch({ sections: [...SECTIONS.slice(0, 1), {} as never], movies: { '3': [lanternSeason] } });
     await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch })).rejects.toThrow(/did not describe/);
