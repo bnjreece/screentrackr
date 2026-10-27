@@ -32,19 +32,22 @@ const LETTERBOXD_UPLOAD: Record<LetterboxdWhat, string> = {
 function writeOwnerOnly(files: { path: string; content: string }[]): void {
   const temps: string[] = [];
   let renamed = 0;
+  let current = 0;
   try {
-    for (const f of files) {
+    for (const [i, f] of files.entries()) {
+      current = i;
       const tmp = join(dirname(f.path), `.${basename(f.path)}.${process.pid}.${Date.now()}.tmp`);
       temps.push(tmp);
       writeFileSync(tmp, f.content, { mode: 0o600, flag: 'wx' });
     }
     for (const [i, f] of files.entries()) {
+      current = i;
       renameSync(temps[i] as string, f.path);
       renamed++;
     }
   } catch (err) {
     for (const t of temps.slice(renamed)) rmSync(t, { force: true });
-    const failed = files[Math.min(renamed, files.length - 1)] as { path: string };
+    const failed = files[current] as { path: string };
     const done = files.slice(0, renamed).map((f) => basename(f.path));
     const note = done.length ? ` Already replaced: ${done.join(', ')}; the rest were not written, so don't upload this set.` : '';
     throw new UserError(`Could not write ${failed.path}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}.${note}`);
