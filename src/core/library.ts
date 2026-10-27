@@ -5,9 +5,11 @@
  * refuse to write when a title is ambiguous.
  */
 import { transaction, type Db } from './db.js';
+import { LibraryError } from './errors.js';
 import { identityOf, parseTitleRef } from './identity.js';
 import { normalizeTitle } from './normalize.js';
 import { yearsConflict } from './match.js';
+import { addViewing, atomic, calendarDate, isFutureDate, isValidWatchedAt, refreshWatched, removeAllViewings, WATCHED_AT_RE } from './viewings.js';
 import {
   STATUSES,
   WATCHED_ERAS,
@@ -19,12 +21,7 @@ import {
 } from './types.js';
 
 /** A user-facing error (bad input, missing item). The CLI maps it to exit code 1. */
-export class LibraryError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'LibraryError';
-  }
-}
+export { LibraryError };
 
 const LEGACY_STATUS: Record<string, { status: Status; watchedEra: WatchedEra | null }> = {
   'to-watch': { status: 'queue', watchedEra: null },
@@ -220,10 +217,13 @@ export function resolveRef(db: Db, ref: string): RefResult {
  * Add a catalog movie to the library. Source fields are copied from the
  * catalog, and the item is `manual` (the user chose the tconst), so rematching
  * never moves it. Adding a tconst already in the library adds another edition.
+ * `owned` defaults to true (a movie you add is one you have); `list add
+ * --add-missing` adds not-owned queue items.
  */
-export function addFromCatalog(db: Db, tconst: string, opts: { status?: Status } = {}): LibraryItem {
+export function addFromCatalog(db: Db, tconst: string, opts: { status?: Status; owned?: boolean } = {}): LibraryItem {
   const status = opts.status ?? 'queue';
   if (!(STATUSES as readonly string[]).includes(status)) throw new LibraryError(`Invalid status "${String(status)}"`);
+  if (opts.owned !== undefined && typeof opts.owned !== 'boolean') throw new LibraryError('owned must be true or false');
   const t = requireCatalogTitle(db, tconst);
   const directors = (
     db.sql
@@ -234,10 +234,10 @@ export function addFromCatalog(db: Db, tconst: string, opts: { status?: Status }
   ).map((d) => d.name);
   const res = db.sql
     .prepare(
-      `INSERT INTO library_items (tconst, source_title, source_year, source_director, source_runtime_min, source_genre, status, match_status, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'manual', 'manual')`,
+      `INSERT INTO library_items (tconst, source_title, source_year, source_director, source_runtime_min, source_genre, status, owned, match_status, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'manual', 'manual')`,
     )
-    .run(t.tconst, t.title, t.year, directors.length ? directors.join(', ') : null, t.runtime_min, t.genres_csv, status);
+    .run(t.tconst, t.title, t.year, directors.length ? directors.join(', ') : null, t.runtime_min, t.genres_csv, status, opts.owned === false ? 0 : 1);
   return requireItem(db, Number(res.lastInsertRowid));
 }
 
@@ -249,15 +249,30 @@ export interface ItemPatch {
   notes?: string | null;
 }
 
-export const WATCHED_AT_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+export { WATCHED_AT_RE };
 
 /**
  * Update one item's status, era, watched date, rating or notes. Only the
  * fields present in `patch` change. `myRating` is a whole number from 1 to 10,
  * or null to clear. A watched era only applies to `watched`; moving an item
  * off `watched` clears its era. `updated_at` is bumped on every update.
+ *
+ * `watchedAt` is "this is the movie's watched date" on top of the play log
+ * (core/viewings.ts): a date adds a `manual` viewing on that day (once; the
+ * same day again changes nothing). A date earlier than a viewing the item
+ * already has is refused, naming that viewing, since the watched date is the
+ * latest play; remove it first with `history --remove`. A date more than a day
+ * in the future is refused. `null` removes every viewing of the item. The
+ * cached watched date follows (refreshWatched), and the era with it unless
+ * the patch sets the era itself. Everything is written in one transaction, so
+ * a refusal writes nothing.
  */
 export function updateItem(db: Db, id: number, patch: ItemPatch): LibraryItem {
+  return updateItemDetailed(db, id, patch).item;
+}
+
+/** updateItem, also reporting how many viewings a cleared watched date removed. */
+export function updateItemDetailed(db: Db, id: number, patch: ItemPatch): { item: LibraryItem; viewingsRemoved: number } {
   assertId(id);
   const current = requireItem(db, id);
 
@@ -285,14 +300,13 @@ export function updateItem(db: Db, id: number, patch: ItemPatch): LibraryItem {
   if (patch.watchedEra !== undefined) set('watched_era', patch.watchedEra);
   else if (nextStatus !== 'watched' && current.watchedEra !== null) set('watched_era', null);
 
+  let watchedAt: string | null | undefined;
   if (patch.watchedAt !== undefined) {
-    const v = patch.watchedAt === null ? null : patch.watchedAt.trim();
-    if (v !== null && (!WATCHED_AT_RE.test(v) || Number.isNaN(Date.parse(v)))) {
-      throw new LibraryError(`Invalid watched date "${patch.watchedAt}" (expected YYYY-MM-DD or an ISO date-time)`);
+    watchedAt = patch.watchedAt === null ? null : String(patch.watchedAt).trim();
+    if (watchedAt !== null && !isValidWatchedAt(watchedAt)) {
+      throw new LibraryError(`Invalid watched date "${String(patch.watchedAt)}" (expected YYYY-MM-DD or an ISO date-time)`);
     }
-    set('watched_at', v);
-    // A date the user sets (or clears) is theirs: no import may clear it later.
-    set('watched_at_source', null);
+    if (watchedAt !== null && isFutureDate(watchedAt)) throw new LibraryError(`Watched date ${watchedAt} is in the future`);
   }
 
   if (patch.myRating !== undefined) {
@@ -305,9 +319,30 @@ export function updateItem(db: Db, id: number, patch: ItemPatch): LibraryItem {
 
   if (patch.notes !== undefined) set('notes', patch.notes);
 
-  if (sets.length === 0) return current;
-  db.sql.prepare(`UPDATE library_items SET ${sets.join(', ')}, updated_at = ${NOW_SQL} WHERE id = ?`).run(...params, id);
-  return requireItem(db, id);
+  if (sets.length === 0 && watchedAt === undefined) return { item: current, viewingsRemoved: 0 };
+  return atomic(db, () => {
+    let viewingsRemoved = 0;
+    if (typeof watchedAt === 'string') {
+      const day = calendarDate(watchedAt);
+      const later = db.sql
+        .prepare(
+          'SELECT id, watched_at, source FROM viewings WHERE item_id = ? AND watched_at IS NOT NULL AND substr(watched_at, 1, 10) > ? ORDER BY substr(watched_at, 1, 10) DESC, id DESC LIMIT 1',
+        )
+        .get(id, day) as { id: number; watched_at: string; source: string } | undefined;
+      if (later) {
+        throw new LibraryError(
+          `Item ${id} has a later play (viewing ${later.id}, ${later.watched_at}, from ${later.source}), and the watched date is the latest play. Remove it first with \`screentrackr history --remove ${later.id}\`, or log this play with \`screentrackr log\`.`,
+        );
+      }
+    }
+    db.sql.prepare(`UPDATE library_items SET ${[...sets, `updated_at = ${NOW_SQL}`].join(', ')} WHERE id = ?`).run(...params, id);
+    // An era set in this same patch is the caller's word; otherwise it follows the date (see refreshWatched).
+    const eraLocked = patch.watchedEra !== undefined;
+    if (typeof watchedAt === 'string') addViewing(db, id, { watchedAt, source: 'manual' }, { eraLocked });
+    else if (watchedAt === null) viewingsRemoved = removeAllViewings(db, id, { eraLocked });
+    else refreshWatched(db, id, { eraLocked });
+    return { item: requireItem(db, id), viewingsRemoved };
+  });
 }
 
 /** Remove one library item (and its stored match candidates). */

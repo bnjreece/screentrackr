@@ -20,7 +20,21 @@ import { join } from 'node:path';
 import { catalogReady, transaction, type Db } from '../db.js';
 import { exportLibrary } from '../export.js';
 import { backupsDir } from '../home.js';
-import { LIBRARY_COLUMNS, rowToItem, WATCHED_AT_RE, type LibraryRow } from '../library.js';
+import { LIBRARY_COLUMNS, rowToItem, type LibraryRow } from '../library.js';
+import { cleanListName, ensureList, normListName, updateListDescription } from '../lists.js';
+import {
+  applyViewingPlan,
+  calendarDate,
+  eraOf,
+  isValidWatchedAt,
+  planIsEmpty,
+  planViewingSync,
+  viewingsByItem,
+  viewingsOf,
+  type NewViewing,
+  type Viewing,
+  type ViewingPlan,
+} from '../viewings.js';
 import { factsConflict, identityOf, sameMovie, type Identity } from '../identity.js';
 import { directorsConflict, directorsOf, matchOne, meaningfulCredit, SCORE, type MatchCandidate } from '../match.js';
 import { normalizeTitle, titleEditionTag } from '../normalize.js';
@@ -31,11 +45,12 @@ import {
   STATUSES,
   WATCHED_ERAS,
   type ExternalIds,
+  type ItemSource,
   type LibraryItem,
   type MatchStatus,
 } from '../types.js';
 import { parseApplePaste } from './apple-paste.js';
-import { eraOf, FORMATS, ImportError, type ImportFormat, type ImportRecord, type ParsedImport } from './common.js';
+import { FORMATS, ImportError, type ImportFormat, type ImportList, type ImportRecord, type ImportViewing, type ParsedImport } from './common.js';
 import { parseCsv } from './csv.js';
 import { isImdbHeader, parseImdb } from './imdb.js';
 import { isJsonV1, parseJsonV1 } from './json-v1.js';
@@ -44,7 +59,7 @@ import { isLetterboxdHeader, parseLetterboxdFiles } from './letterboxd.js';
 import { isNeonRows, parseNeonRows } from './neon-legacy-rows.js';
 import { isTraktJson, parseTraktFile, traktFileOf } from './trakt.js';
 
-export { FORMATS, ImportError, type ImportFormat, type ImportRecord, type ParsedImport };
+export { FORMATS, ImportError, type ImportFormat, type ImportList, type ImportRecord, type ImportViewing, type ParsedImport };
 
 function stripBom(text: string): string {
   return text.replace(/^\uFEFF/, '');
@@ -151,6 +166,8 @@ export interface ImportSummary {
   backupPath: string | null;
   /** Present and true when nothing was written (`dryRun`): the counts say what the import would do. */
   dryRun?: true;
+  /** Lists the import created (records' `lists`, a JSON v1 envelope's), present only when it created any. */
+  listsCreated?: string[];
 }
 
 export interface ImportReview {
@@ -171,7 +188,7 @@ function validate(records: ImportRecord[]): void {
     if (r.statusIfNew !== undefined && !(STATUSES as readonly string[]).includes(r.statusIfNew)) {
       fail(`invalid new-item status "${String(r.statusIfNew)}"`);
     }
-    for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'imdbIdExact', 'clearWatchedAtIfOwn'] as const) {
+    for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'imdbIdExact', 'clearWatchedAtIfOwn', 'viewingsComplete'] as const) {
       if (r[flag] !== undefined && typeof r[flag] !== 'boolean') fail(`${flag} must be true or false`);
     }
     if (r.watchedAtSource != null && !(ITEM_SOURCES as readonly string[]).includes(r.watchedAtSource)) {
@@ -196,8 +213,30 @@ function validate(records: ImportRecord[]): void {
     if (r.myRating != null && !(Number.isInteger(r.myRating) && r.myRating >= 1 && r.myRating <= 10)) {
       fail(`rating must be a whole number from 1 to 10 (got ${String(r.myRating)})`);
     }
-    if (r.watchedAt != null && (!WATCHED_AT_RE.test(r.watchedAt) || Number.isNaN(Date.parse(r.watchedAt)))) {
-      fail(`invalid watched date "${r.watchedAt}"`);
+    if (r.watchedAt != null && (typeof r.watchedAt !== 'string' || !isValidWatchedAt(r.watchedAt.trim()))) {
+      fail(`invalid watched date "${String(r.watchedAt)}"`);
+    }
+    if (r.viewings != null) {
+      if (!Array.isArray(r.viewings)) fail('viewings must be a list');
+      r.viewings.forEach((v, n) => {
+        const at = `viewing ${n + 1}`;
+        if (typeof v !== 'object' || v === null) fail(`${at} must be an object`);
+        if (v.watchedAt !== null && (typeof v.watchedAt !== 'string' || !isValidWatchedAt(v.watchedAt.trim()))) fail(`${at}: invalid watched date "${String(v.watchedAt)}"`);
+        if (v.rewatch != null && typeof v.rewatch !== 'boolean') fail(`${at}: rewatch must be true or false`);
+        if (v.rating != null && !(Number.isInteger(v.rating) && v.rating >= 1 && v.rating <= 10)) fail(`${at}: rating must be a whole number from 1 to 10 (got ${String(v.rating)})`);
+        if (v.sourceRef != null && (typeof v.sourceRef !== 'string' || !v.sourceRef.trim() || v.sourceRef.length > 1000)) fail(`${at}: invalid source ref`);
+        if (v.source !== undefined && !(ITEM_SOURCES as readonly string[]).includes(v.source)) fail(`${at}: invalid source "${String(v.source)}"`);
+      });
+    }
+    if (r.lists != null) {
+      if (!Array.isArray(r.lists)) fail('lists must be a list of names');
+      for (const name of r.lists) {
+        try {
+          cleanListName(name);
+        } catch (err) {
+          fail(`list "${String(name)}": ${(err as Error).message}`);
+        }
+      }
     }
     if (r.tconst != null && !/^tt\d{7,}$/.test(r.tconst)) fail(`invalid IMDb id "${r.tconst}"`);
     if (r.editionYear != null && !(Number.isInteger(r.editionYear) && r.editionYear >= 1000 && r.editionYear <= 9999)) {
@@ -298,15 +337,62 @@ const credit = (v: string | null | undefined): string | null => (meaningfulCredi
  * blank IMDb hint, or a director credit like "Unknown" or "-" count as absent,
  * so they never match each other and never overwrite a known value.
  */
-function cleanRecord(r: ImportRecord): ImportRecord {
+function cleanRecord(r: ImportRecord): CleanRecord {
+  const viewings: NewViewing[] = (
+    Array.isArray(r.viewings)
+      ? r.viewings
+      : typeof r.watchedAt === 'string' && r.watchedAt.trim() !== ''
+        ? [{ watchedAt: r.watchedAt, source: (dateSource(r) ?? 'manual') as ItemSource }]
+        : []
+  ).map((v: ImportViewing) => ({
+    watchedAt: v.watchedAt === null ? null : v.watchedAt.trim(),
+    source: v.source ?? r.source,
+    ...(v.rewatch !== undefined ? { rewatch: v.rewatch } : {}),
+    ...(v.rating !== undefined ? { rating: v.rating } : {}),
+    sourceRef: v.sourceRef == null ? null : v.sourceRef.trim(),
+  }));
+  // clearWatchedAtIfOwn is a complete, empty set of this source's plays.
+  const complete = r.viewingsComplete === true || (r.clearWatchedAtIfOwn === true && viewings.length === 0);
+  const names = new Map<string, string>();
+  for (const n of r.lists ?? []) {
+    const clean = cleanListName(n);
+    if (!names.has(normListName(clean))) names.set(normListName(clean), clean);
+  }
   return {
     ...r,
     applePersistentId: blankToNull(r.applePersistentId),
     imdbIdHint: blankToNull(r.imdbIdHint),
     sourceDirector: credit(r.sourceDirector),
     externalIds: canonicalIds(r.externalIds),
+    plays: viewings,
+    complete: complete ? new Set([r.source]) : new Set(),
+    listNames: [...names.values()],
   };
 }
+
+/** A record after cleanRecord: its plays with sources filled in, the sources it gives whole, and its list names. */
+type CleanRecord = ImportRecord & { plays: NewViewing[]; complete: ReadonlySet<string>; listNames: string[] };
+
+/** How the record's plays meet the item's stored ones. */
+const planFor = (cur: PoolItem, r: CleanRecord): ViewingPlan => planViewingSync(cur.viewings, r.plays, r.complete);
+
+/** The record's lists the item is not in yet (normalized names). */
+const listsToAdd = (cur: PoolItem, r: CleanRecord): string[] => r.listNames.filter((n) => !cur.lists.includes(normListName(n)));
+
+/** A play as a multiset key: source, date string, ref, flag and rating. */
+const playKey = (v: { source: string; watchedAt: string | null; sourceRef?: string | null; rewatch?: boolean | null; rating?: number | null }) =>
+  JSON.stringify([v.source, v.watchedAt, v.sourceRef ?? null, v.rewatch ?? null, v.rating ?? null]);
+
+/** Whether the item's stored plays are exactly the ones the record would write. */
+const samePlays = (stored: readonly Viewing[], plays: readonly NewViewing[]): boolean => {
+  const a = stored.map(playKey).sort();
+  const b = plays.map(playKey).sort();
+  return a.length === b.length && a.every((k, i) => k === b[i]);
+};
+
+/** The latest of a set of plays by calendar date, or null. */
+const latestPlay = (plays: readonly NewViewing[]): string | null =>
+  plays.reduce<string | null>((best, v) => (v.watchedAt !== null && (best === null || calendarDate(v.watchedAt) >= calendarDate(best)) ? v.watchedAt : best), null);
 
 /** External ids with blank values dropped, trimmed, in a stable key order (so equal sets compare equal). */
 function canonicalIds(ids: ExternalIds | null | undefined): ExternalIds {
@@ -324,7 +410,7 @@ const sameIds = (a: ExternalIds, b: ExternalIds): boolean => JSON.stringify(cano
  * An item as the import sees it: its row plus its external ids and the source
  * that set its watched date (null: the user, or unknown; see schema V3).
  */
-type PoolItem = LibraryItem & { externalIds: ExternalIds; watchedAtSource: string | null };
+type PoolItem = LibraryItem & { externalIds: ExternalIds; watchedAtSource: string | null; viewings: Viewing[]; lists: string[] };
 
 /** The library columns plus watched_at_source, for the import's own reads. */
 const POOL_COLUMNS = `${LIBRARY_COLUMNS}, watched_at_source`;
@@ -353,13 +439,27 @@ function externalIdsOf(db: Db): Map<number, ExternalIds> {
 const withExactId = (identity: Identity, exact: string | null | undefined): Identity =>
   identity.tconst === null && exact ? { ...identity, tconst: exact } : identity;
 
-const existing = (db: Db, row: PoolRow, ids: ExternalIds | undefined): Existing => {
+/** Each item's lists, as normalized names. */
+function listNamesOf(db: Db, itemId?: number): Map<number, string[]> {
+  const rows = (
+    itemId === undefined
+      ? db.sql.prepare('SELECT li.item_id, l.norm_name FROM list_items li JOIN lists l ON l.id = li.list_id').all()
+      : db.sql.prepare('SELECT li.item_id, l.norm_name FROM list_items li JOIN lists l ON l.id = li.list_id WHERE li.item_id = ?').all(itemId)
+  ) as { item_id: number; norm_name: string }[];
+  const out = new Map<number, string[]>();
+  for (const r of rows) out.set(r.item_id, [...(out.get(r.item_id) ?? []), r.norm_name]);
+  return out;
+}
+
+const existing = (db: Db, row: PoolRow, ids: ExternalIds | undefined, viewings: Viewing[] = [], lists: string[] = []): Existing => {
   const raw = rowToItem(row);
   const item: PoolItem = {
     ...raw,
     applePersistentId: blankToNull(raw.applePersistentId),
     externalIds: canonicalIds(ids),
     watchedAtSource: raw.watchedAt === null ? null : row.watched_at_source,
+    viewings,
+    lists,
   };
   return { item, norm: normalizeTitle(item.sourceTitle), identity: withExactId(identityOf(db, item), item.externalIds.imdb) };
 };
@@ -385,6 +485,14 @@ type MergeTarget =
 
 /** The columns that hold an item's match, as opposed to its own data. */
 const MATCH_COLUMNS = new Set(['tconst', 'match_status', 'match_score']);
+/**
+ * mergeChanges entries that are not library_items columns: new, changed or
+ * removed plays, and new list memberships. They count as changes to the
+ * item's data (a record that would add a play is not a repeat).
+ */
+const PLAYS_COL = 'plays:';
+const LISTS_COL = 'lists:';
+const isColumn = (c: string) => !c.startsWith(EXT_PREFIX) && c !== PLAYS_COL && c !== LISTS_COL;
 
 /**
  * Decide which existing item, if any, a record is. This is the only place
@@ -420,7 +528,7 @@ const MATCH_COLUMNS = new Set(['tconst', 'match_status', 'match_score']);
  * `pool` holds only the items no earlier record of this import has claimed
  * (see applyImport), so every rule above applies among unclaimed items.
  */
-function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: Identity): MergeTarget {
+function resolveMergeTarget(pool: Existing[], r: CleanRecord, t: Target, rec: Identity): MergeTarget {
   const title = r.sourceTitle.trim();
   const norm = normalizeTitle(title);
   const apple = r.applePersistentId ?? null;
@@ -525,6 +633,8 @@ function sameContent(a: PoolItem, b: PoolItem): boolean {
     const rest: Partial<PoolItem> = { ...x };
     delete rest.id;
     delete rest.watchedAtSource;
+    delete rest.viewings;
+    delete rest.lists;
     delete rest.addedAt;
     delete rest.updatedAt;
     return JSON.stringify(rest);
@@ -538,13 +648,16 @@ function sameContent(a: PoolItem, b: PoolItem): boolean {
  * claimed before any other record is resolved, so an import of an export finds
  * every row's own item whatever the order of the rows.
  */
-function isTwin(cur: PoolItem, r: ImportRecord, t: Target): boolean {
+function isTwin(cur: PoolItem, r: CleanRecord, t: Target): boolean {
   const status = newStatus(r);
+  // The era a new item would get: the record's, else the one its latest play implies (refreshWatched).
+  const latest = latestPlay(r.plays);
+  const era = status === 'watched' ? (r.watchedEra ?? (latest === null ? null : eraOf(latest))) : null;
   const same =
     cur.sourceTitle === r.sourceTitle.trim() &&
     cur.tconst === t.tconst &&
     cur.status === status &&
-    cur.watchedEra === (status === 'watched' ? (r.watchedEra ?? null) : null) &&
+    cur.watchedEra === era &&
     cur.owned === newOwned(r) &&
     cur.source === r.source &&
     cur.sourceYear === (r.sourceYear ?? null) &&
@@ -553,7 +666,9 @@ function isTwin(cur: PoolItem, r: ImportRecord, t: Target): boolean {
     cur.sourceGenre === (r.sourceGenre ?? null) &&
     cur.collection === (r.collection ?? null) &&
     cur.sourceOwnedRaw === (r.sourceOwnedRaw ?? null) &&
-    cur.watchedAt === (r.watchedAt ?? null) &&
+    samePlays(cur.viewings, r.plays) &&
+    cur.lists.length === r.listNames.length &&
+    r.listNames.every((n) => cur.lists.includes(normListName(n))) &&
     cur.myRating === (r.myRating ?? null) &&
     cur.notes === (r.notes ?? null) &&
     blankToNull(cur.applePersistentId) === blankToNull(r.applePersistentId) &&
@@ -567,8 +682,9 @@ const newStatus = (r: ImportRecord) => r.status ?? r.statusIfNew ?? 'queue';
 const newOwned = (r: ImportRecord) => r.owned ?? r.ownedIfNew ?? true;
 
 /**
- * The source recorded for a date this record writes: a JSON v1 record's own
- * `watchedAtSource` (null when the file gives none), else the record's source.
+ * The source of the play a record's plain `watchedAt` becomes: a JSON v1
+ * record's own `watchedAtSource` (null when the file gives none, which
+ * cleanRecord makes `manual`), else the record's source.
  */
 const dateSource = (r: ImportRecord): string | null => (r.watchedAtSource !== undefined ? r.watchedAtSource : r.source);
 
@@ -582,18 +698,21 @@ type Col = [column: string, value: string | number | null];
 
 /**
  * The column changes needed to merge `r` into `cur`. Absent or null fields
- * never clear anything, except that `clearWatchedAtIfOwn` clears a watched
- * date the record's own source set. `ownedIfNew` and `statusIfNew` are never read here
+ * never clear anything; the only removals are plays of the record's own
+ * source that a complete set no longer lists (viewingsComplete,
+ * clearWatchedAtIfOwn). `ownedIfNew` and `statusIfNew` are never read here
  * (they are for new items only), and with `fillOnly` the descriptive fields
- * only fill blanks. External ids the item lacks come back as `ext:<kind>`.
+ * only fill blanks. External ids the item lacks come back as `ext:<kind>`,
+ * play changes as `plays:` and new list memberships as `lists:`. The watched
+ * date and its source are never columns here: they follow the plays
+ * (refreshWatched).
  */
-function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
+function mergeChanges(cur: PoolItem, r: CleanRecord, t: Target): Col[] {
   const out: Col[] = [];
-  let clearsEra = false;
   const keep = <K extends keyof LibraryItem & keyof ImportRecord>(key: K, column: string, descriptive = false) => {
-    const v = r[key];
-    if (v === undefined || v === null || v === cur[key]) return;
-    const have = cur[key];
+    const v = (r as ImportRecord)[key];
+    const have = (cur as LibraryItem)[key];
+    if (v === undefined || v === null || v === have) return;
     if (descriptive && r.fillOnly === true && have !== null && !(typeof have === 'string' && have.trim() === '')) return;
     out.push([column, typeof v === 'boolean' ? (v ? 1 : 0) : (v as string | number)]);
   };
@@ -604,20 +723,10 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   keep('collection', 'collection', true);
   keep('owned', 'owned');
   keep('sourceOwnedRaw', 'source_owned_raw');
-  if (r.watchedAt != null && r.watchedAt !== cur.watchedAt) {
-    out.push(['watched_at', r.watchedAt], ['watched_at_source', dateSource(r)]);
-  } else if (r.watchedAt != null && r.watchedAtSource !== undefined && r.watchedAtSource !== cur.watchedAtSource) {
-    // A JSON v1 record says who set this same date (null: the user, or
-    // unknown); its word replaces the stored one, so a date a file gives
-    // without a source can no longer be cleared by the source that set it.
-    out.push(['watched_at_source', r.watchedAtSource]);
-  } else if (r.watchedAt == null && r.clearWatchedAtIfOwn === true && cur.watchedAt !== null && cur.watchedAtSource === r.source) {
-    // The one clear an import may make: a date this same source set earlier.
-    // The era that date implies goes with it (an era of its own, which the
-    // date does not imply, stays).
-    out.push(['watched_at', null], ['watched_at_source', null]);
-    if (cur.watchedEra !== null && cur.watchedEra === eraOf(cur.watchedAt)) clearsEra = true;
-  }
+  const plan = planFor(cur, r);
+  if (!planIsEmpty(plan)) out.push([PLAYS_COL, plan.inserts.length + plan.updates.length + plan.deletes.length]);
+  const lists = listsToAdd(cur, r);
+  if (lists.length) out.push([LISTS_COL, lists.length]);
   keep('myRating', 'my_rating');
   keep('notes', 'notes', true);
   keep('applePersistentId', 'apple_persistent_id');
@@ -629,12 +738,12 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
     out.push([`${EXT_PREFIX}${kind}`, value]);
   }
 
+  // The era a play moves (or a removed play takes away) is refreshWatched's.
   if (r.status !== undefined) {
     if (r.status !== cur.status) out.push(['status', r.status]);
-    const era =
-      r.status !== 'watched' ? null : (r.watchedEra ?? (cur.status === 'watched' && !clearsEra ? cur.watchedEra : null));
+    const era = r.status !== 'watched' ? null : (r.watchedEra ?? (cur.status === 'watched' ? cur.watchedEra : null));
     if (era !== cur.watchedEra) out.push(['watched_era', era]);
-  } else if (clearsEra) out.push(['watched_era', null]);
+  }
 
   // A hand link is never moved, and an automatic match is not downgraded here
   // (`screentrackr match` re-runs matching on purpose). Unresolved items take
@@ -673,13 +782,32 @@ class DryRun {
  * is then rolled back: nothing is written (no backup either) and the summary
  * says what it would have done.
  */
-export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merge' | 'replace'; dryRun?: boolean }): ImportSummary {
+export interface ApplyImportOptions {
+  mode: 'merge' | 'replace';
+  dryRun?: boolean;
+  /**
+   * Lists to create before the records are written (a JSON v1 envelope's), so
+   * empty lists and descriptions survive. A list that exists keeps its name
+   * and takes the description only when it has none.
+   */
+  lists?: ImportList[];
+}
+
+export function applyImport(db: Db, input: ImportRecord[], opts: ApplyImportOptions): ImportSummary {
   if (opts.mode !== 'merge' && opts.mode !== 'replace') throw new ImportError(`Unknown import mode "${String(opts.mode)}"`);
-  validate(records);
-  records = records.map(cleanRecord);
+  validate(input);
+  for (const l of opts.lists ?? []) {
+    try {
+      cleanListName(l.name);
+    } catch (err) {
+      throw new ImportError(`List "${String(l.name)}": ${(err as Error).message}`);
+    }
+  }
+  const records = input.map(cleanRecord);
+  const lists = opts.lists ?? [];
   if (opts.dryRun === true) {
     try {
-      writeImport(db, records, opts.mode, null, (summary) => {
+      writeImport(db, records, lists, opts.mode, null, (summary) => {
         throw new DryRun(summary);
       });
     } catch (err) {
@@ -689,12 +817,13 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
     throw new Error('unreachable: a dry run always rolls back');
   }
   const backupPath = opts.mode === 'replace' ? writeBackup(db) : null;
-  return writeImport(db, records, opts.mode, backupPath, (summary) => summary);
+  return writeImport(db, records, lists, opts.mode, backupPath, (summary) => summary);
 }
 
 function writeImport(
   db: Db,
-  records: ImportRecord[],
+  records: CleanRecord[],
+  envelopeLists: ImportList[],
   mode: 'merge' | 'replace',
   backupPath: string | null,
   finish: (summary: ImportSummary) => ImportSummary,
@@ -715,11 +844,34 @@ function writeImport(
   };
 
   return transaction(db.sql, () => {
-    if (opts.mode === 'replace') db.sql.exec('DELETE FROM match_candidates; DELETE FROM item_external_ids; DELETE FROM library_items;');
+    if (opts.mode === 'replace') {
+      db.sql.exec(
+        'DELETE FROM match_candidates; DELETE FROM item_external_ids; DELETE FROM viewings; DELETE FROM list_items; DELETE FROM lists; DELETE FROM library_items;',
+      );
+    }
+    const listsCreated: string[] = [];
+    const listIds = new Map<string, number>();
+    const listId = (name: string, extra: { description?: string | null; createdAt?: string | null } = {}): number => {
+      const key = normListName(name);
+      const have = listIds.get(key);
+      if (have !== undefined && !extra.description) return have;
+      const { list, created } = ensureList(db, name, extra);
+      if (created) listsCreated.push(list.name);
+      else if (extra.description && list.description === null) updateListDescription(db, list.name, extra.description);
+      listIds.set(key, list.id);
+      return list.id;
+    };
+    for (const l of envelopeLists) listId(l.name, { description: l.description ?? null, createdAt: l.createdAt ?? null });
+    const addMember = db.sql.prepare('INSERT OR IGNORE INTO list_items (list_id, item_id) VALUES (?, ?)');
+    const writeLists = (id: number, names: readonly string[]) => {
+      for (const n of names) addMember.run(listId(n), id);
+    };
 
     const ids = externalIdsOf(db);
+    const plays = viewingsByItem(db);
+    const memberships = listNamesOf(db);
     const pool: Existing[] = (db.sql.prepare(`SELECT ${POOL_COLUMNS} FROM library_items ORDER BY id`).all() as unknown as PoolRow[]).map(
-      (row) => existing(db, row, ids.get(row.id)),
+      (row) => existing(db, row, ids.get(row.id), plays.get(row.id), memberships.get(row.id)),
     );
     // One import claims each existing item for at most one record, and an item
     // it adds is never a candidate for a later record: N records that fit N
@@ -728,6 +880,8 @@ function writeImport(
     const claimed = new Set<number>();
     const unclaimed = () => pool.filter((e) => !claimed.has(e.item.id));
     const summary: ImportSummary = { added: 0, updated: 0, unchanged: 0, needsReview: 0, reviews: [], backupPath };
+    // An era the record gives is its word; otherwise the era follows the plays (refreshWatched).
+    const eraLocked = (r: CleanRecord) => r.watchedEra != null;
     const targets = records.map((r) => targetFor(db, r));
 
     // Exact twins first, so a later, sparser record can't take an earlier row's own item.
@@ -776,8 +930,8 @@ function writeImport(
           r.sourceOwnedRaw ?? null,
           status,
           status === 'watched' ? (r.watchedEra ?? null) : null,
-          r.watchedAt ?? null,
-          r.watchedAt != null ? dateSource(r) : null,
+          null,
+          null,
           r.myRating ?? null,
           r.notes ?? null,
           t.matchStatus,
@@ -788,6 +942,8 @@ function writeImport(
         );
         const id = Number(res.lastInsertRowid);
         for (const [kind, value] of Object.entries(r.externalIds ?? {})) addExternalId.run(id, kind, value);
+        if (r.plays.length) applyViewingPlan(db, id, planViewingSync([], r.plays, new Set()), { eraLocked: eraLocked(r) });
+        writeLists(id, r.listNames);
         storeCandidates(id, t);
         summary.added++;
         final = t.matchStatus;
@@ -796,7 +952,7 @@ function writeImport(
         if (!(target.kind === 'unchanged' && target.claim === false)) claimed.add(found.item.id);
         const changes = target.kind === 'update' ? mergeChanges(found.item, r, t) : [];
         if (changes.length) {
-          const columns = changes.filter(([c]) => !c.startsWith(EXT_PREFIX));
+          const columns = changes.filter(([c]) => isColumn(c));
           db.sql
             .prepare(`UPDATE library_items SET ${columns.map(([c]) => `${c} = ?, `).join('')}updated_at = ${NOW_SQL} WHERE id = ?`)
             .run(...columns.map(([, v]) => v), found.item.id);
@@ -806,8 +962,13 @@ function writeImport(
             addExternalId.run(found.item.id, c.slice(EXT_PREFIX.length), v);
             ext[c.slice(EXT_PREFIX.length)] = String(v);
           }
+          if (changes.some(([c]) => c === PLAYS_COL)) applyViewingPlan(db, found.item.id, planFor(found.item, r), { eraLocked: eraLocked(r) });
+          if (changes.some(([c]) => c === LISTS_COL)) writeLists(found.item.id, listsToAdd(found.item, r));
           if (changes.some(([c]) => c === 'match_status' || c === 'tconst')) storeCandidates(found.item.id, t);
-          Object.assign(found, existing(db, select.get(found.item.id) as unknown as PoolRow, ext));
+          Object.assign(
+            found,
+            existing(db, select.get(found.item.id) as unknown as PoolRow, ext, viewingsOf(db, found.item.id), listNamesOf(db, found.item.id).get(found.item.id)),
+          );
           summary.updated++;
         } else {
           summary.unchanged++;
@@ -816,6 +977,7 @@ function writeImport(
       }
       if (final === 'ambiguous' || final === 'unmatched') summary.needsReview++;
     });
+    if (listsCreated.length) summary.listsCreated = listsCreated;
     return finish(summary);
   });
 }

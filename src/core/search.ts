@@ -12,6 +12,7 @@
 import { catalogReady, type Db } from './db.js';
 import { FilterSchema, type Filter } from './filters.js';
 import { LibraryError } from './library.js';
+import { getList, normListName } from './lists.js';
 import { splitPeople } from './match.js';
 import { UNWATCHED_STATUSES, type MatchStatus, type Status, type WatchedEra } from './types.js';
 
@@ -161,6 +162,15 @@ function movieConditions(f: Filter, library: boolean, fts: boolean, params: Para
     where.push('year <= ?');
     params.push(f.yearTo);
   }
+  if (f.maxVotes !== undefined) {
+    where.push('votes <= ?');
+    params.push(f.maxVotes);
+  }
+  if (f.decades) {
+    const starts = [...new Set(f.decades.map((d) => Number(d.slice(0, 4))))];
+    where.push(`(${starts.map(() => '(year BETWEEN ? AND ?)').join(' OR ')})`);
+    for (const y of starts) params.push(y, y + 9);
+  }
 
   if (f.text) {
     const q = !library && fts ? ftsQuery(f.text) : null;
@@ -177,8 +187,20 @@ function movieConditions(f: Filter, library: boolean, fts: boolean, params: Para
   return where;
 }
 
-/** Conditions on the library item (status, personal rating), over `prefix` columns. */
-function itemConditions(f: Filter, prefix: string, params: Param[]): string[] {
+/** A list membership condition on the item id column `idCol`. */
+function inLists(idCol: string, names: string[], params: Param[]): string {
+  params.push(JSON.stringify(names.map(normListName)));
+  return `${idCol} IN (SELECT li.item_id FROM list_items li JOIN lists l ON l.id = li.list_id WHERE l.norm_name IN (SELECT value FROM json_each(?)))`;
+}
+
+/** A library item that counts as seen: status watched, or any recorded play. Over the library_items alias `x`. */
+const SEEN = "(x.status = 'watched' OR EXISTS (SELECT 1 FROM viewings v WHERE v.item_id = x.id))";
+
+/**
+ * Conditions on the library item (status, personal rating, owned, lists,
+ * never seen), over `prefix` columns; `idCol` is the item's id column.
+ */
+function itemConditions(f: Filter, prefix: string, idCol: string, params: Param[]): string[] {
   const where: string[] = [];
   const statuses = f.unwatched ? [...UNWATCHED_STATUSES] : f.status;
   if (statuses) {
@@ -188,6 +210,14 @@ function itemConditions(f: Filter, prefix: string, params: Param[]): string[] {
   if (f.myRatingMin !== undefined) {
     where.push(`${prefix}my_rating >= ?`);
     params.push(f.myRatingMin);
+  }
+  if (f.owned !== undefined) {
+    where.push(`${prefix}owned = ?`);
+    params.push(f.owned ? 1 : 0);
+  }
+  if (f.lists) {
+    const groups = f.listMode === 'all' ? f.lists.map((l) => [l]) : [f.lists];
+    for (const g of groups) where.push(inLists(idCol, g, params));
   }
   return where;
 }
@@ -218,7 +248,15 @@ export function compileSearch(f: Filter, ctx: { fts: boolean; catalog: boolean }
   let withSql: string;
 
   if (f.scope === 'library') {
-    const itemConds = itemConditions(f, '', params);
+    const itemConds = itemConditions(f, '', 'items.item_id', params);
+    // neverSeen is about this item; excludeWatched about the film, any edition.
+    // Qualified with `items.`: inside the subqueries a bare tconst would be x's.
+    if (f.neverSeen) itemConds.push(`NOT EXISTS (SELECT 1 FROM library_items x WHERE x.id = items.item_id AND ${SEEN})`);
+    if (f.excludeWatched) {
+      itemConds.push(
+        `NOT EXISTS (SELECT 1 FROM library_items x WHERE (x.id = items.item_id OR (items.tconst IS NOT NULL AND x.tconst = items.tconst AND x.match_status IN ('matched', 'manual'))) AND ${SEEN})`,
+      );
+    }
     const movieConds = movieConditions(f, true, false, params);
     withSql = `WITH items AS (
   SELECT li.id AS item_id,
@@ -248,9 +286,14 @@ export function compileSearch(f: Filter, ctx: { fts: boolean; catalog: boolean }
     if (!ctx.catalog) throw new CatalogMissingError();
     // With notInLibrary every result is a movie you do not have, which is unwatched by
     // definition, so unwatched must not turn into a "library items only" condition.
-    const itemConds = itemConditions(f.notInLibrary ? { ...f, unwatched: undefined } : f, 'li.', params);
+    const itemConds = itemConditions(f.notInLibrary ? { ...f, unwatched: undefined } : f, 'li.', 'li.id', params);
     const movieConds = movieConditions(f, false, ctx.fts, params);
     if (itemConds.length) movieConds.push('item_id IS NOT NULL');
+    // In the whole catalog a movie you do not have is unseen; one you have is
+    // seen when any linked edition is (neverSeen and excludeWatched agree here).
+    if (f.neverSeen || f.excludeWatched) {
+      movieConds.push(`NOT EXISTS (SELECT 1 FROM library_items x WHERE x.tconst = cat_tconst AND x.match_status IN ('matched', 'manual') AND ${SEEN})`);
+    }
     if (f.notInLibrary) {
       movieConds.push(
         "NOT EXISTS (SELECT 1 FROM library_items x WHERE x.tconst = cat_tconst AND x.match_status IN ('matched', 'manual'))",
@@ -311,8 +354,14 @@ interface PageRow {
 const placeholders = (n: number) => Array.from({ length: n }, () => '?').join(', ');
 
 /** Run a search. `input` is parsed with FilterSchema. */
+/** Throws LibraryError for a list name the filter uses that no list has. */
+export function assertFilterLists(db: Db, f: Pick<Filter, 'lists'>): void {
+  for (const name of f.lists ?? []) if (!getList(db, name)) throw new LibraryError(`No list named "${name}"`);
+}
+
 export function searchMovies(db: Db, input: unknown): { total: number; results: MovieResult[] } {
   const f = parseFilter(input);
+  assertFilterLists(db, f);
   const q = compileSearch(f, { fts: db.fts, catalog: f.scope === 'all' ? catalogReady(db) : true });
   const total = Number((db.sql.prepare(q.countSql).get(...q.countParams) as { n: number }).n);
   const rows = db.sql.prepare(q.sql).all(...q.params) as unknown as PageRow[];

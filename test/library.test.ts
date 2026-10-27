@@ -231,6 +231,13 @@ describe('updateItem', () => {
   });
 });
 
+describe('addFromCatalog owned option', () => {
+  it('adds owned by default and not owned when asked', () => {
+    expect(addFromCatalog(db, 'tt9000009').owned).toBe(true);
+    expect(addFromCatalog(db, 'tt9000010', { owned: false })).toMatchObject({ owned: false, status: 'queue' });
+  });
+});
+
 describe('removeItem', () => {
   it('removes an item and its match candidates', () => {
     const id = insertRaw({ title: 'The Glass Harbor', matchStatus: 'ambiguous' });

@@ -542,9 +542,9 @@ describe('applying a Trakt import', () => {
     expect(partial.bulkDated).toBe(0);
     applyImport(db, partial.records, { mode: 'merge' });
     expect(items().filter((i) => i.watchedAt === '2019-01-01')).toHaveLength(9);
-    // One of them got a date you set yourself; a different source set the date of another.
+    // One of them got a date you set yourself (0.4.0: no earlier than its plays); a different source set the date of another.
     const own = byTitle('Bulk Reel 1')[0] as LibraryItem;
-    updateItem(db, own.id, { watchedAt: '2018-06-01' });
+    updateItem(db, own.id, { watchedAt: '2019-06-01' });
     applyImport(db, [{ sourceTitle: 'Bulk Reel 2', sourceYear: 2001, status: 'watched', watchedAt: '2017-02-02', source: 'letterboxd' }], {
       mode: 'merge',
     });
@@ -562,7 +562,7 @@ describe('applying a Trakt import', () => {
       expect(byTitle(`Bulk Reel ${i}`)[0]).toMatchObject({ status: 'watched', watchedAt: null, watchedEra: null });
     }
     // A date you set and one another source set stay.
-    expect(byTitle('Bulk Reel 1')[0]).toMatchObject({ status: 'watched', watchedAt: '2018-06-01' });
+    expect(byTitle('Bulk Reel 1')[0]).toMatchObject({ status: 'watched', watchedAt: '2019-06-01' });
     expect(byTitle('Bulk Reel 2')[0]).toMatchObject({ status: 'watched', watchedAt: '2017-02-02' });
     // A real play keeps its date.
     expect(byTitle('The Glass Harbor')[0]).toMatchObject({ watchedAt: '2021-03-03', watchedEra: '2020s' });

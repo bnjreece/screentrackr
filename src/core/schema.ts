@@ -203,7 +203,70 @@ const V3 = `
 ALTER TABLE library_items ADD COLUMN watched_at_source TEXT;
 `;
 
-export const MIGRATIONS: readonly string[] = [V1, V2, V3];
+/**
+ * V4 (0.4.0): every play, and user lists.
+ *
+ * viewings holds one row per play: a date (WATCHED_AT_RE, or NULL for a real
+ * play with no real date), the source's own rewatch flag (NULL: it didn't
+ * say), the rating given at that play, the source (ITEM_SOURCES, checked in
+ * code) and the source's own id for the play (a Letterboxd diary entry URI, a
+ * Trakt history id kept as a string since it is int64, `manual:<hex>` for a
+ * hand-logged play). A play with a ref is unique by (item, source, ref); a
+ * dated play without one is unique by (item, source, calendar date), so a
+ * single-date source (the TV app, Jellyfin) re-imported never duplicates.
+ *
+ * library_items.watched_at and watched_at_source stay, as a cache of the
+ * latest dated viewing (see refreshWatched in core/viewings.ts), so every
+ * read path and a 0.3.x JSON v1 reader keep the date.
+ *
+ * Backfill: each item with a watched date gets one viewing with that date
+ * string unchanged and its watched-date source, or `manual` when there was
+ * none (the user set it, a JSON v1 file gave it without a source, or it
+ * predates V3): those dates were never clearable, and no import removes a
+ * manual viewing. The cached columns are left exactly as they were.
+ *
+ * lists and list_items are the user's own lists (not `collection`, which is
+ * the source's folder name). Names are unique case-insensitively through
+ * norm_name (NFC, trimmed, lowercased; see core/lists.ts).
+ */
+const V4 = `
+CREATE TABLE viewings (
+  id          INTEGER PRIMARY KEY,
+  item_id     INTEGER NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+  watched_at  TEXT,
+  rewatch     INTEGER CHECK (rewatch IS NULL OR rewatch IN (0, 1)),
+  rating      INTEGER CHECK (rating IS NULL OR rating BETWEEN 1 AND 10),
+  source      TEXT NOT NULL,
+  source_ref  TEXT,
+  added_at    TEXT NOT NULL DEFAULT ${NOW}
+);
+CREATE INDEX viewings_item ON viewings(item_id, watched_at);
+CREATE UNIQUE INDEX viewings_ref ON viewings(item_id, source, source_ref) WHERE source_ref IS NOT NULL;
+CREATE UNIQUE INDEX viewings_dated ON viewings(item_id, source, substr(watched_at, 1, 10))
+  WHERE source_ref IS NULL AND watched_at IS NOT NULL;
+
+INSERT INTO viewings (item_id, watched_at, rewatch, rating, source, source_ref)
+  SELECT id, watched_at, NULL, NULL, COALESCE(watched_at_source, 'manual'), NULL
+  FROM library_items WHERE watched_at IS NOT NULL ORDER BY id;
+
+CREATE TABLE lists (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT NOT NULL,
+  norm_name   TEXT NOT NULL UNIQUE,
+  description TEXT,
+  created_at  TEXT NOT NULL DEFAULT ${NOW},
+  updated_at  TEXT NOT NULL DEFAULT ${NOW}
+);
+CREATE TABLE list_items (
+  list_id  INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+  item_id  INTEGER NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+  added_at TEXT NOT NULL DEFAULT ${NOW},
+  PRIMARY KEY (list_id, item_id)
+);
+CREATE INDEX list_items_item ON list_items(item_id);
+`;
+
+export const MIGRATIONS: readonly string[] = [V1, V2, V3, V4];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
 

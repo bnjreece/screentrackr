@@ -8,6 +8,8 @@ import { FilterSchema } from '../src/core/filters.js';
 import { addFromCatalog, updateItem } from '../src/core/library.js';
 import { CatalogMissingError, compileSearch, searchMovies, type MovieResult } from '../src/core/search.js';
 import { libraryStats } from '../src/core/stats.js';
+import { addToList, createList } from '../src/core/lists.js';
+import { addViewing } from '../src/core/viewings.js';
 
 const FIXTURES = join(import.meta.dirname, 'fixtures', 'imdb');
 
@@ -47,7 +49,7 @@ function insertUnmatched(fields: {
 
 /** Library: Fincher 03, 04 (two editions), 20; Villeneuve 06, 07, 18; one unmatched item. */
 function seedLibrary(): void {
-  db.sql.exec('DELETE FROM match_candidates; DELETE FROM library_items;');
+  db.sql.exec('DELETE FROM match_candidates; DELETE FROM library_items; DELETE FROM lists;');
   ids = {
     q03: addFromCatalog(db, 'tt9000003', { status: 'watched' }).id,
     s04a: addFromCatalog(db, 'tt9000004', { status: 'queue' }).id,
@@ -316,5 +318,68 @@ describe('store genre for owned movies', () => {
     // The catalog-wide scope is unchanged: only IMDb genres count there.
     const all = searchMovies(db, { scope: 'all', genres: ['Western'], minVotes: 0 });
     expect(all.results.map((r) => r.tconst)).not.toContain('tt9000007');
+  });
+});
+
+describe('0.4.0 shared filter fields', () => {
+  it('validates the new fields', () => {
+    expect(FilterSchema.safeParse({ decades: ['1980s'] }).success).toBe(true);
+    for (const d of ['1985s', '1870s', '2200s', '80s', '1980']) expect(FilterSchema.safeParse({ decades: [d] }).success, d).toBe(false);
+    expect(FilterSchema.safeParse({ decades: ['1880s', '2190s'] }).success).toBe(true);
+    expect(FilterSchema.safeParse({ scope: 'all', notInLibrary: true, owned: true }).success).toBe(false);
+    expect(FilterSchema.safeParse({ scope: 'all', notInLibrary: true, lists: ['Halloween'] }).success).toBe(false);
+    expect(FilterSchema.safeParse({ neverSeen: true, status: ['watched'] }).success).toBe(false);
+    expect(FilterSchema.safeParse({ neverSeen: true, status: ['queue', 'watched'] }).success).toBe(true);
+    expect(FilterSchema.safeParse({ minVotes: 10, maxVotes: 5 }).success).toBe(false);
+    expect(FilterSchema.safeParse({ lists: ['x'.repeat(101)] }).success).toBe(false);
+    expect(FilterSchema.parse({ lists: ['A'] }).listMode).toBe('any');
+  });
+
+  it('owned filters library items in both scopes', () => {
+    db.sql.prepare('UPDATE library_items SET owned = 0 WHERE id = ?').run(ids.b07 as number);
+    expect(tconsts(searchMovies(db, { owned: false }).results)).toEqual(['tt9000007']);
+    expect(tconsts(searchMovies(db, { owned: true }).results)).not.toContain('tt9000007');
+    expect(tconsts(searchMovies(db, { scope: 'all', owned: false }).results)).toEqual(['tt9000007']);
+  });
+
+  it('decades OR together and AND with a year bound', () => {
+    expect(tconsts(searchMovies(db, { decades: ['1990s'] }).results)).toEqual(['tt9000003', 'tt9000004']);
+    expect(tconsts(searchMovies(db, { decades: ['1990s', '2010s'], yearFrom: 1996 }).results)).toEqual(
+      ['tt9000003', 'tt9000006', 'tt9000007', 'tt9000018', 'tt9000020'],
+    );
+  });
+
+  it('lists: any or all, in both scopes, and an unknown list is an error', () => {
+    createList(db, 'Halloween');
+    createList(db, 'Winter');
+    addToList(db, 'Halloween', [ids.r20 as number, ids.b07 as number]);
+    addToList(db, 'Winter', [ids.b07 as number]);
+    expect(tconsts(searchMovies(db, { lists: ['halloween'] }).results)).toEqual(['tt9000007', 'tt9000020']);
+    expect(tconsts(searchMovies(db, { lists: ['Halloween', 'Winter'], listMode: 'all' }).results)).toEqual(['tt9000007']);
+    expect(tconsts(searchMovies(db, { lists: ['Halloween', 'Winter'] }).results)).toEqual(['tt9000007', 'tt9000020']);
+    expect(tconsts(searchMovies(db, { scope: 'all', lists: ['Winter'] }).results)).toEqual(['tt9000007']);
+    expect(() => searchMovies(db, { lists: ['Nope'] })).toThrow(/No list named "Nope"/);
+  });
+
+  it('neverSeen: this item has no viewings and is not watched', () => {
+    addViewing(db, ids.b07 as number, { watchedAt: '2020-01-01', source: 'manual' });
+    expect(tconsts(searchMovies(db, { neverSeen: true }).results)).toEqual([null, 'tt9000004', 'tt9000018', 'tt9000020']);
+  });
+
+  it('excludeWatched drops films watched or played in any edition, and keeps owned unwatched ones', () => {
+    addViewing(db, ids.b07 as number, { watchedAt: null, source: 'trakt' });
+    expect(tconsts(searchMovies(db, { excludeWatched: true }).results)).toEqual([null, 'tt9000018', 'tt9000020']);
+    const all = tconsts(searchMovies(db, { scope: 'all', excludeWatched: true, minVotes: 0, limit: 200 }).results);
+    expect(all).toContain('tt9000020');
+    expect(all).toContain('tt9000001');
+    for (const t of ['tt9000003', 'tt9000004', 'tt9000006', 'tt9000007']) expect(all).not.toContain(t);
+  });
+
+  it('maxVotes bounds votes from above and drops titles with no votes', () => {
+    const res = searchMovies(db, { scope: 'all', minVotes: 0, maxVotes: 5000, limit: 200 });
+    expect(res.results.length).toBeGreaterThan(0);
+    for (const r of res.results) expect(r.votes !== null && r.votes <= 5000).toBe(true);
+    expect(tconsts(res.results)).toContain('tt9000023');
+    expect(tconsts(res.results)).not.toContain('tt9000001');
   });
 });

@@ -1,6 +1,6 @@
 # ScreenTrackr JSON v1
 
-The library format that `screentrackr export` writes and `screentrackr import` reads back. A round trip is lossless: every status, era, rating, note and IMDb link survives. Use it for backups, for moving a library to another machine, or for writing your own converter from another app.
+The library format that `screentrackr export` writes and `screentrackr import` reads back. A round trip is lossless: every status, era, rating, note, IMDb link, play and list survives. Use it for backups, for moving a library to another machine, or for writing your own converter from another app.
 
 The file is UTF-8 JSON. Only your library is in it. The full IMDb catalog is not exported. Library records may contain metadata copied from the catalog.
 
@@ -32,8 +32,16 @@ The file is UTF-8 JSON. Only your library is in it. The full IMDb catalog is not
       "source": "paste",
       "applePersistentId": null,
       "addedAt": "2026-10-23T17:55:02.000Z",
-      "updatedAt": "2026-10-23T17:59:40.000Z"
+      "updatedAt": "2026-10-23T17:59:40.000Z",
+      "viewings": [
+        { "watchedAt": "2012-03-09", "rewatch": null, "rating": null, "source": "manual", "sourceRef": null },
+        { "watchedAt": "2014-06-01", "rewatch": true, "rating": 8, "source": "letterboxd", "sourceRef": "https://boxd.it/aB3cD4" }
+      ],
+      "lists": ["Heists"]
     }
+  ],
+  "lists": [
+    { "name": "Heists", "description": "Crews and vaults", "createdAt": "2026-10-23T17:58:00.000Z" }
   ]
 }
 ```
@@ -46,6 +54,7 @@ The file is UTF-8 JSON. Only your library is in it. The full IMDb catalog is not
 | `version` | number | Always `1` for this format. A future, incompatible format gets a new number. |
 | `exportedAt` | string | ISO 8601 time of the export. Optional on import. |
 | `items` | array | One object per library item, described below. |
+| `lists` | array | Your lists (0.4.0): one object per list with `name`, `description` (string or null) and `createdAt`, in name order, so an empty list and a description survive a round trip. Optional on import. |
 
 ## Items
 
@@ -64,8 +73,8 @@ Only `sourceTitle` is required on import. Every other field may be omitted or `n
 | `sourceOwnedRaw` | string or null | null | The source's raw "owned" value, kept so a blank can be told apart from an explicit yes. |
 | `status` | string or null | `"queue"` | One of `queue`, `priority`, `someday`, `watched`. When omitted, a new item goes in the queue and a merge keeps the existing status and watched era. |
 | `watchedEra` | string or null | null | When you watched it: `long-ago`, `2010s` or `2020s`. Only kept when `status` is `watched`. |
-| `watchedAt` | string or null | null | Watched date, `YYYY-MM-DD`. |
-| `watchedAtSource` | string, omitted when none | none | Which import source set `watchedAt` (one of the `source` values, such as `trakt`). Written only when an import set the date; omitted when you set it yourself (`set`, MCP `update_movie`), when a JSON v1 file gave it without a `watchedAtSource`, or when the date predates this field. Kept on import, so a round trip keeps it. A merge that brings the same `watchedAt` an item already has takes the file's `watchedAtSource` (or its absence) in place of the stored one. Ignored when `watchedAt` is null. See [Clearing a watched date](#clearing-a-watched-date). |
+| `watchedAt` | string or null | null | Watched date, `YYYY-MM-DD` (or an ISO date-time, kept as written). Since 0.4.0 it is derived from `viewings`: the latest play by calendar date. It is still written, so a 0.3.x reader keeps the date. On import, an item with `viewings` uses them and ignores `watchedAt` (a `watchedAt` on another day than the latest play is reported as a warning); an item without `viewings` gets one play on `watchedAt`. |
+| `watchedAtSource` | string, omitted when none | none | The source of the play `watchedAt` comes from (one of the `source` values, such as `trakt`). Omitted when that play is one you logged or set yourself (`set`, MCP `update_movie`, a `manual` play). On import of an item without `viewings`, it is the source of the one play `watchedAt` becomes; without it, that play is `manual`. Ignored when `watchedAt` is null or the item has `viewings`. See [Plays and watched dates](#plays-and-watched-dates). |
 | `myRating` | integer or null | null | Your rating, a whole number from 1 to 10. |
 | `notes` | string or null | null | Free text notes. |
 | `matchStatus` | string | | `matched`, `ambiguous`, `unmatched` or `manual`. On import, a linked item keeps `manual` if it was manual and is otherwise `matched`; an unlinked item is matched again. |
@@ -75,6 +84,8 @@ Only `sourceTitle` is required on import. Every other field may be omitted or `n
 | `externalIds` | object, omitted when empty | none | A source's own stable id for this film, by kind: `imdb`, `letterboxd`, `trakt`, `plex` or `jellyfin`, each a string, as in `{ "letterboxd": "https://boxd.it/aB3c" }`. Written only for items that have one. Used like `applePersistentId` to recognize the same movie on a later import. A merge adds a kind the item lacks and never replaces or clears one. Unknown kinds are rejected. `imdb` is the IMDb id of the row `import imdb` read (`tt` and 7 or more digits), so it names exactly this IMDb title: the import, `setup`, `match` and a JSON v1 restore link the item to that title when the catalog has it, and otherwise leave it `unmatched` with the id kept as its `tconst`, never matching it to another title of the same name. A later record that reaches the item another way (its Apple id, another external id, its title) never moves that link either. An item whose `tconst` names a different title than its `imdb` id is rejected, and the import changes nothing. It is not stored on an item you linked by hand to a different title, and `link` drops one that names a different title, so the next IMDb import of the linked title finds the item. |
 | `addedAt` | string | import time | ISO 8601 time the item was first added. Kept on import. |
 | `updatedAt` | string | import time | ISO 8601 time of the last change. Written on export; set fresh on import. |
+| `viewings` | array, omitted when empty | none | Every play of the item (0.4.0), oldest first, dateless plays last. Each is `{ "watchedAt", "rewatch", "rating", "source", "sourceRef" }`: `watchedAt` a date (or date-time) or null for a play with no known date; `rewatch` the source's own flag (true, false, or null when it didn't say); `rating` the 1 to 10 rating given at that play, or null; `source` one of the `source` values (required: it decides which import may remove the play); `sourceRef` the source's own id for the play (a Letterboxd diary entry URI, a Trakt history id as a string, `manual:` and 16 hex digits for a play you logged), or null. See [Plays and watched dates](#plays-and-watched-dates). |
+| `lists` | array of strings, omitted when empty | none | The names of your lists the item is in (0.4.0). Names are unique ignoring case; a list named here and missing from the envelope `lists` is created on import. |
 
 The local item `id` is not exported. Ids belong to one database, so an import assigns its own.
 
@@ -89,9 +100,17 @@ A merge adds new items and updates the fields an item has. A field that is missi
 
 Importers for sources that are not your own copy of a movie (`import imdb`) go further, with the same rules below for which item a record is. Their owned flag (not owned) and their watchlist status (`queue`) apply only to a movie the import adds, so they never change an existing item's owned flag and never move it out of `watched`. Their title year, directors, runtime, genres, collection and notes only fill fields an existing item has blank (null, or a string of only spaces). A rating still means watched, and still updates the item's rating.
 
-### Clearing a watched date
+### Plays and watched dates
 
-Imports never clear a field, with one exception. An importer may ask to clear the watched date of the item a record updates when the record has no date of its own, and it is cleared only when the same source set that date: the item's `watchedAtSource` equals the record's `source`. This is for a source whose earlier export carried dates that a later, complete export shows were not real (a partial Trakt export that dated plays which a full export reveals as one bulk "mark watched" second). The watched era goes with the date only when it is the era that date falls in (2019 and `2010s`); any other era, the status and the rating stay as they are. A date you set yourself, a date another source set, and a date a JSON v1 file gave without `watchedAtSource` are never cleared by an import. "The same source" means the same kind of source (`trakt`), not the same account. Items whose dates were set before this was recorded have no `watchedAtSource`, so no import clears them.
+Since 0.4.0 the library keeps every play (`viewings`), and an item's `watchedAt` is the latest one by calendar date (the first ten characters of the date, so no time zone conversion happens), ties going to the play added last. A play with no known date counts as a play but never sets `watchedAt`. So an older date from one source never replaces a newer one from another.
+
+An import adds the plays it knows and never adds one twice: a play with a `sourceRef` is the same play as a stored one with that ref; without one, a source has at most one play per calendar date, and its dateless plays count up to the number the file has. A stored play of the same source and day with no ref (one carried over from a 0.3.0 date) takes the incoming ref, flag and rating. The same night from two sources is kept twice, once per source, and counted once.
+
+A JSON v1 merge only adds plays and memberships. `--replace` restores exactly what the file has.
+
+Imports never remove anything, with one exception: an importer whose export is a source's whole history of a film (a Letterboxd diary, a Trakt history) may remove that same source's plays it no longer lists. This is for a source whose earlier export carried plays that a later, complete export shows were not real (a partial Trakt export that dated plays which a full export reveals as one bulk "mark watched" second). Plays you logged or set yourself (`manual`), plays another source gave, and the plays of a JSON v1 date without `watchedAtSource` (which become `manual`) are never removed by an import. "The same source" means the same kind of source (`trakt`), not the same account. The watched era moves with `watchedAt` only when it was empty or the era of the old date (2019 and `2010s`); an era you set that disagrees is kept, and the status and the rating are never changed by a play.
+
+A 0.3.x screentrackr reads a 0.4.0 file without error, but keeps only each item's latest `watchedAt` (with its `watchedAtSource`): the other plays and the lists are dropped.
 
 ### Which item a record updates
 

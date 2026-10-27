@@ -54,11 +54,11 @@ describe('openDb', () => {
 
   it('creates the db file, dirs and the current schema version', () => {
     db = openDb(home);
-    expect(SCHEMA_VERSION).toBe(3);
+    expect(SCHEMA_VERSION).toBe(4);
     expect(existsSync(join(home, 'screentrackr.db'))).toBe(true);
     expect(existsSync(join(home, 'cache'))).toBe(true);
     expect(existsSync(join(home, 'backups'))).toBe(true);
-    expect(version(db)).toBe('3');
+    expect(version(db)).toBe('4');
     expect(db.home).toBe(home);
   });
 
@@ -83,7 +83,7 @@ describe('openDb', () => {
       .run();
     db.close();
     db = openDb(home);
-    expect(version(db)).toBe('3');
+    expect(version(db)).toBe('4');
     const n = db.sql.prepare('SELECT COUNT(*) AS n FROM library_items').get() as { n: number };
     expect(n.n).toBe(1);
   });
@@ -183,7 +183,7 @@ describe('migrating a version 1 database', () => {
 
       const db = openDb(home);
       try {
-        expect(db.sql.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({ value: '3' });
+        expect(db.sql.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({ value: '4' });
         expect(db.sql.prepare('SELECT id, source_title, status, watched_era, my_rating, source, owned, apple_persistent_id, added_at, updated_at FROM library_items ORDER BY id').all()).toEqual([
           { id: 7, source_title: 'The Glass Harbor', status: 'watched', watched_era: '2010s', my_rating: 8, source: 'paste', owned: 0, apple_persistent_id: 'A1', added_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-02T00:00:00.000Z' },
           { id: 12, source_title: 'Night Ferry', status: 'queue', watched_era: null, my_rating: null, source: 'csv', owned: 1, apple_persistent_id: null, added_at: '2026-01-03T00:00:00.000Z', updated_at: '2026-01-03T00:00:00.000Z' },
@@ -228,7 +228,7 @@ describe('migrating a version 2 database', () => {
 
       const db = openDb(home);
       try {
-        expect(db.sql.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({ value: '3' });
+        expect(db.sql.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({ value: '4' });
         expect(db.sql.prepare('SELECT id, watched_at, watched_at_source FROM library_items ORDER BY id').all()).toEqual([
           { id: 3, watched_at: '2024-02-03', watched_at_source: null },
           { id: 4, watched_at: null, watched_at_source: null },

@@ -1,5 +1,6 @@
 /** Shared pieces for the importers: the record shape, errors and value cleaners. */
 import { LibraryError, mapLegacyStatus } from '../library.js';
+import { eraOf } from '../viewings.js';
 import type { ExternalIds, ItemSource, MatchStatus, Status, WatchedEra } from '../types.js';
 
 /** One movie as a source describes it, before it is matched and written. */
@@ -69,23 +70,58 @@ export interface ImportRecord {
   watchedEra?: WatchedEra | null;
   /** Absent means the source has no rating; merge keeps the existing one. */
   myRating?: number | null;
+  /**
+   * One watched date, for formats without a list of plays (CSV, a JSON v1
+   * item without `viewings`, the old formats). The import turns it into one
+   * viewing of `watchedAtSource` (JSON v1), else of the record's `source`; a
+   * JSON v1 date with no source is `manual`. Ignored when `viewings` is given.
+   * The item's watched date is then the latest play across every source, so
+   * an older date never replaces a newer one.
+   */
   watchedAt?: string | null;
   /**
+   * Every play of this film the source knows (0.4.0). Each is written to the
+   * item the record resolves to (a record that goes to review writes none),
+   * deduplicated against the stored plays: by `sourceRef` when given (a
+   * Letterboxd diary entry URI, a Trakt history id as a decimal string), else
+   * one play per source and calendar date, and dateless plays by count. A
+   * stored play of the same source and date with no ref is upgraded with the
+   * incoming ref, flag and rating. `source` is the record's unless a viewing
+   * says otherwise (JSON v1 only). `rewatch` is the source's own flag (null or
+   * absent: it didn't say); `rating` the rating given at that play. Status is
+   * never changed by a play: send `status: 'watched'` with plays as before.
+   */
+  viewings?: ImportViewing[] | null;
+  /**
+   * The record's `viewings` are this source's whole set for the film: stored
+   * plays of the record's `source` that are not in the set are deleted.
+   * `manual` plays and every other source's plays are never touched. For a
+   * source that exports a full history (a Letterboxd diary, a Trakt history).
+   */
+  viewingsComplete?: boolean;
+  /**
+   * The user's lists this film is in, by name (case-insensitive). Add-only:
+   * missing lists are created, and a merge never removes a membership.
+   */
+  lists?: string[] | null;
+  /**
    * Imports never clear a field, with this one exception. When the record has
-   * no `watchedAt` and this is true, the item's watched date is cleared, but
-   * only if this record's `source` set that date (the item's stored
-   * watched-date source equals `source`). A date the user set, another source
-   * set, or a JSON v1 file gave without a source is never cleared. For a
-   * source whose earlier, partial export carried dates a later, full export
-   * shows were fake (Trakt's bulk "mark watched" plays). The watched era goes
-   * with the date only when it is the era that date implies (eraOf); any other
-   * era, the status and the rating are untouched.
+   * no `watchedAt` and no `viewings` and this is true, every stored play of
+   * this record's `source` is removed (as `viewingsComplete` with an empty
+   * set), so a date only that source gave goes with it. A date the user set,
+   * another source's play, or a JSON v1 date without a source (a `manual`
+   * play) is never removed. For a source whose earlier, partial export carried
+   * dates a later, full export shows were fake (Trakt's bulk "mark watched"
+   * plays). The watched era goes with the date only when it is the era that
+   * date implies (eraOf); any other era, the status and the rating are
+   * untouched.
    */
   clearWatchedAtIfOwn?: boolean;
   /**
    * ScreenTrackr JSON v1 only: which source set `watchedAt`, as the export
-   * wrote it (null: the user, or unknown). Every other importer leaves it out,
-   * and the record's `source` is recorded as the date's source.
+   * wrote it (null: the user, or unknown, which becomes a `manual` play).
+   * Every other importer leaves it out, and the record's `source` is the
+   * play's source.
    */
   watchedAtSource?: ItemSource | null;
   /** An authoritative link (ScreenTrackr JSON v1 only). Kept as is, without rematching. */
@@ -110,6 +146,25 @@ export interface ImportRecord {
   addedAt?: string;
 }
 
+/** One play as an import gives it (see ImportRecord.viewings). */
+export interface ImportViewing {
+  /** WATCHED_AT_RE, or null for a real play with no real date. */
+  watchedAt: string | null;
+  rewatch?: boolean | null;
+  rating?: number | null;
+  /** The source's own id for this play, as a string. */
+  sourceRef?: string | null;
+  /** JSON v1 only: the play's own source. Others leave it out (the record's source). */
+  source?: ItemSource;
+}
+
+/** A list as a ScreenTrackr JSON v1 envelope carries it, so empty lists and descriptions survive. */
+export interface ImportList {
+  name: string;
+  description?: string | null;
+  createdAt?: string | null;
+}
+
 export const FORMATS = ['json-v1', 'legacy', 'neon-rows', 'apple-paste', 'csv', 'imdb', 'letterboxd', 'trakt'] as const;
 export type ImportFormat = (typeof FORMATS)[number];
 
@@ -125,15 +180,14 @@ export class ImportError extends LibraryError {
 export interface ParsedImport {
   records: ImportRecord[];
   warnings: string[];
+  /** JSON v1 only: the envelope's lists, for applyImport's `lists` option. */
+  lists?: ImportList[];
 }
+
+/** The watched era a watched date falls in (defined with the watch history; re-exported for the importers). */
+export { eraOf };
 
 /** Trimmed string, or null when blank or not a string-like value. */
-/** The watched era a watched date falls in. */
-export function eraOf(date: string): WatchedEra {
-  const y = Number(date.slice(0, 4));
-  return y < 2010 ? 'long-ago' : y < 2020 ? '2010s' : '2020s';
-}
-
 export function cleanText(v: unknown): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v !== 'string' && typeof v !== 'number') return null;
@@ -211,7 +265,11 @@ export function cleanTconst(v: unknown): string | null {
  * - watchedAt: the latest date, with that record's watchedAtSource.
  *   watchedEra: the first one given.
  * - clearWatchedAtIfOwn: true when any record asks (it only applies when the
- *   folded record has no watchedAt).
+ *   folded record has no watchedAt and no viewings).
+ * - viewings: when any record has some, every record's plays in record order
+ *   (a record with only a watchedAt gives one play), so no play is lost.
+ *   viewingsComplete: true when any record says so.
+ * - lists: every record's, first spelling of each name kept.
  * - owned, ownedIfNew and the other flags: true when any record says true,
  *   else false when any says false.
  * - externalIds: merged by kind; a kind with two different values keeps the
@@ -298,7 +356,23 @@ function foldGroup(group: ImportRecord[], warn: (message: string) => void): Impo
   set('watchedAt', latest);
   set('watchedAtSource', latest === undefined ? undefined : group.find((r) => r.watchedAt === latest)?.watchedAtSource);
 
-  for (const key of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'fromTvApp', 'imdbIdExact', 'clearWatchedAtIfOwn'] as const) {
+  if (group.some((r) => Array.isArray(r.viewings))) {
+    set(
+      'viewings',
+      group.flatMap((r): ImportViewing[] =>
+        Array.isArray(r.viewings)
+          ? r.viewings
+          : typeof r.watchedAt === 'string' && r.watchedAt !== ''
+            ? [{ watchedAt: r.watchedAt, ...(r.watchedAtSource !== undefined ? { source: r.watchedAtSource ?? 'manual' } : {}) }]
+            : [],
+      ),
+    );
+  }
+  const names = new Map<string, string>();
+  for (const r of group) for (const n of r.lists ?? []) if (typeof n === 'string' && !names.has(n.trim().toLowerCase())) names.set(n.trim().toLowerCase(), n);
+  set('lists', names.size ? [...names.values()] : undefined);
+
+  for (const key of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'fromTvApp', 'imdbIdExact', 'clearWatchedAtIfOwn', 'viewingsComplete'] as const) {
     const vs = group.map((r) => r[key]).filter((v): v is boolean => typeof v === 'boolean');
     set(key, vs.length ? vs.includes(true) : undefined);
   }

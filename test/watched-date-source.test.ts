@@ -57,11 +57,13 @@ describe('recording which source set the watched date', () => {
     expect(rows()).toMatchObject([{ at: '2020-01-05', src: 'imdb' }]);
   });
 
-  it('keeps the recorded source when a record repeats the same date', () => {
+  it('keeps a same-night play from another source as its own play (0.4.0), the newest naming the source', () => {
     applyImport(db, [trakt({ watchedAt: '2019-04-02' })], { mode: 'merge' });
     const res = applyImport(db, [{ sourceTitle: 'The Copper Orchard', sourceYear: 1994, watchedAt: '2019-04-02', source: 'imdb' }], { mode: 'merge' });
-    expect(res.unchanged).toBe(1);
-    expect(rows()).toMatchObject([{ at: '2019-04-02', src: 'trakt' }]);
+    expect(res.updated).toBe(1);
+    expect(rows()).toMatchObject([{ at: '2019-04-02', src: 'imdb' }]);
+    // The same play again from the same source is no change.
+    expect(applyImport(db, [{ sourceTitle: 'The Copper Orchard', sourceYear: 1994, watchedAt: '2019-04-02', source: 'imdb' }], { mode: 'merge' }).unchanged).toBe(1);
   });
 
   it('leaves no source on an item without a date', () => {
@@ -105,9 +107,11 @@ describe('clearWatchedAtIfOwn', () => {
   it('never clears a date the user set', () => {
     applyImport(db, [trakt({ watchedAt: '2019-04-02' })], { mode: 'merge' });
     const id = (rows()[0] as { id: number }).id;
-    updateItem(db, id, { watchedAt: '2018-11-30' });
-    expect(applyImport(db, [trakt({ clearWatchedAtIfOwn: true })], { mode: 'merge' }).updated).toBe(0);
-    expect(rows()).toMatchObject([{ at: '2018-11-30', src: null }]);
+    // 0.4.0: a hand-set date can't be earlier than a play the item has, so it is later here.
+    updateItem(db, id, { watchedAt: '2019-11-30' });
+    // Trakt's own play goes (an update); the date you set stays.
+    expect(applyImport(db, [trakt({ clearWatchedAtIfOwn: true })], { mode: 'merge' }).updated).toBe(1);
+    expect(rows()).toMatchObject([{ at: '2019-11-30', src: null }]);
   });
 
   it('never clears a date another source set, even over one this source set first', () => {
@@ -193,9 +197,9 @@ describe('JSON v1', () => {
     expect(rows()).toMatchObject([{ at: '2019-04-02', src: 'letterboxd' }]);
     // The same word again changes nothing.
     expect(applyImport(db, parseImport(file({ watchedAtSource: 'letterboxd' })), { mode: 'merge' })).toMatchObject({ updated: 0, unchanged: 1 });
-    // An ordinary importer repeating the date keeps the recorded source.
+    // 0.4.0: another importer's play that night is a play of its own, and the newest names the cached source.
     applyImport(db, [{ sourceTitle: 'The Copper Orchard', sourceYear: 1994, watchedAt: '2019-04-02', source: 'imdb' }], { mode: 'merge' });
-    expect(rows()).toMatchObject([{ at: '2019-04-02', src: 'letterboxd' }]);
+    expect(rows()).toMatchObject([{ at: '2019-04-02', src: 'imdb' }]);
   });
 
   it('rejects an unknown watchedAtSource and ignores one without a date', () => {
