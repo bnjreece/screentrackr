@@ -159,36 +159,58 @@ export function openerFor(platform: NodeJS.Platform): string | null {
 interface SpawnedChild {
   once(event: 'spawn', fn: () => void): unknown;
   once(event: 'error', fn: (err: Error) => void): unknown;
+  once(event: 'exit', fn: (code: number | null, signal: string | null) => void): unknown;
   unref(): void;
 }
 type SpawnFn = (command: string, args: string[], options: { stdio: 'ignore'; detached: boolean; shell: false }) => SpawnedChild;
 
+/** How long `openUrl` waits for the opener to report failure before taking it as handed off. */
+export const OPENER_WAIT_MS = 3000;
+
 /**
  * Hand a JustWatch link to the system browser. The URL is the opener's only
  * argument and no shell runs, so nothing in it can become a command or an
- * option. Anything but a JustWatch https link is refused. Resolves once the
- * opener has started.
+ * option. Anything but a JustWatch https link is refused. `open` and
+ * `xdg-open` normally exit at once: a nonzero exit (no browser, say) is an
+ * error. An opener still running after `waitMs` (some xdg-open setups run the
+ * browser in the foreground) is left running and taken as handed off.
  */
-export function openUrl(url: string, opts: { platform?: NodeJS.Platform; spawn?: SpawnFn } = {}): Promise<void> {
+export function openUrl(url: string, opts: { platform?: NodeJS.Platform; spawn?: SpawnFn; waitMs?: number } = {}): Promise<void> {
   if (!url.startsWith(`${JUSTWATCH_ORIGIN}/`)) return Promise.reject(new LibraryError('Only a JustWatch link can be opened'));
   const command = openerFor(opts.platform ?? process.platform);
   if (!command) return Promise.reject(new LibraryError('--open works on macOS and Linux. Open the link yourself.'));
   const spawn = opts.spawn ?? (nodeSpawn as unknown as SpawnFn);
+  const waitMs = opts.waitMs ?? OPENER_WAIT_MS;
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const settle = (err?: LibraryError) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (err) reject(err);
+      else resolve();
+    };
     let child: SpawnedChild;
     try {
       child = spawn(command, [url], { stdio: 'ignore', detached: true, shell: false });
     } catch (err) {
-      reject(new LibraryError(`Could not run ${command}: ${(err as Error).message}`));
+      settle(new LibraryError(`Could not run ${command}: ${(err as Error).message}`));
       return;
     }
     child.once('spawn', () => {
-      child.unref();
-      resolve();
+      timer = setTimeout(() => {
+        child.unref();
+        settle();
+      }, waitMs);
+    });
+    child.once('exit', (code, signal) => {
+      if (code === 0) settle();
+      else settle(new LibraryError(`${command} could not open the link (${code !== null ? `exit code ${code}` : `signal ${signal ?? 'unknown'}`}). Open it yourself.`));
     });
     child.once('error', (err) => {
       const code = (err as NodeJS.ErrnoException).code;
-      reject(new LibraryError(code === 'ENOENT' ? `${command} was not found. Open the link yourself.` : `Could not run ${command}: ${err.message}`));
+      settle(new LibraryError(code === 'ENOENT' ? `${command} was not found. Open the link yourself.` : `Could not run ${command}: ${err.message}`));
     });
   });
 }

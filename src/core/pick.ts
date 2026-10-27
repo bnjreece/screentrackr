@@ -21,10 +21,9 @@ import { randomInt } from 'node:crypto';
 import { z } from 'zod';
 import { catalogReady, type Db } from './db.js';
 import { FilterShape, type FilterInput } from './filters.js';
-import { stripTitleSuffixes } from './normalize.js';
 import { assertFilterLists, compileSearch, FilterError, parseFilter, RESULT_COLS, toMovieResults, type MovieResult, type PageRow } from './search.js';
 import { STATUSES, UNWATCHED_STATUSES, type Status } from './types.js';
-import { DEFAULT_COUNTRY, whereFor } from './where.js';
+import { DEFAULT_COUNTRY, whereFor, whereTitle } from './where.js';
 
 export const PICK_MAX_COUNT = 10;
 export const MAX_SEED = 2 ** 32 - 1;
@@ -145,18 +144,20 @@ export function pickMovies(db: Db, input: unknown, opts: { country?: string } = 
   let picks: Pick[] = [];
   if (offsets.length) {
     const sql = `${pool.q.withSql}, ordered AS (
-  SELECT ${RESULT_COLS}, ROW_NUMBER() OVER (ORDER BY tconst, item_id) - 1 AS pos FROM page
+  SELECT ${RESULT_COLS}, CASE WHEN cat_tconst IS NOT NULL THEN title END AS cat_title,
+         ROW_NUMBER() OVER (ORDER BY tconst, item_id) - 1 AS pos FROM page
 )
-SELECT ${RESULT_COLS}, pos FROM ordered WHERE pos IN (SELECT value FROM json_each(?))`;
-    const rows = db.sql.prepare(sql).all(...pool.q.countParams, JSON.stringify(offsets)) as unknown as (PageRow & { pos: number })[];
+SELECT ${RESULT_COLS}, cat_title, pos FROM ordered WHERE pos IN (SELECT value FROM json_each(?))`;
+    type Row = PageRow & { cat_title: string | null; pos: number };
+    const rows = db.sql.prepare(sql).all(...pool.q.countParams, JSON.stringify(offsets)) as unknown as Row[];
     const byPos = new Map(rows.map((r) => [Number(r.pos), r]));
-    const ordered = offsets.map((o) => byPos.get(o)).filter((r): r is PageRow & { pos: number } => r !== undefined);
+    const ordered = offsets.map((o) => byPos.get(o)).filter((r): r is Row => r !== undefined);
     const country = opts.country ?? DEFAULT_COUNTRY;
-    picks = toMovieResults(db, ordered).map((m) => ({
-      ...m,
-      // A linked result's title is the catalog's; an unlinked one's is its source title.
-      whereToWatch: whereFor(m.tconst ? m.title : stripTitleSuffixes(m.title), country).url,
-    }));
+    picks = toMovieResults(db, ordered).map((m, i) => {
+      // The catalog's title when the catalog has the film, else the source title (as where and show do).
+      const catTitle = ordered[i]?.cat_title ?? null;
+      return { ...m, whereToWatch: whereFor(whereTitle({ linked: catTitle !== null, catalogTitle: catTitle, sourceTitle: m.title }), country).url };
+    });
   }
   return { total: pool.n, picks, ...(priorityFirst ? { priorityOnly, matched } : {}) };
 }

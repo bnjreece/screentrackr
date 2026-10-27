@@ -308,6 +308,18 @@ describe('where to watch in picks', () => {
     expect(linked.picks[0]!.whereToWatch).toBe('https://www.justwatch.com/us/search?q=A%20Room%20Downstairs');
   });
 
+  it('cleans the source title of a linked item whose catalog row is missing, as where does', () => {
+    const id = Number(
+      db.sql
+        .prepare("INSERT INTO library_items (source_title, status, match_status, tconst, source) VALUES ('Ferry Tales (2002) (4K)', 'queue', 'matched', 'tt9999998', 'paste')")
+        .run().lastInsertRowid,
+    );
+    const r = pickMovies(db, { text: 'Ferry Tales', seed: 1 });
+    expect(r.picks[0]!.library!.id).toBe(id);
+    expect(r.picks[0]!.whereToWatch).toBe('https://www.justwatch.com/us/search?q=Ferry%20Tales');
+    expect(whereForItem(db, getItem(db, id)!, 'us').url).toBe(r.picks[0]!.whereToWatch);
+  });
+
   it('whereForItem uses the catalog title for a linked item and the source title otherwise', () => {
     const linked = whereForItem(db, getItem(db, ids.p20!)!, 'de');
     expect(linked).toEqual({ title: 'A Room Downstairs', country: 'de', url: 'https://www.justwatch.com/de/search?q=A%20Room%20Downstairs' });

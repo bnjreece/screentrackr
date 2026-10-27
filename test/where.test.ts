@@ -139,19 +139,25 @@ describe('openUrl', () => {
     expect(openerFor('win32')).toBeNull();
   });
 
-  function fakeSpawn(outcome: 'spawn' | Error) {
+  /** A fake spawn: the child starts, then exits with `exit` (a code, or 'stay' to keep running), or fails with an Error. */
+  function fakeSpawn(outcome: { exit: number | 'stay' } | Error = { exit: 0 }) {
     const calls: { command: string; args: string[]; options: Record<string, unknown> }[] = [];
+    let unrefs = 0;
     const spawn = (command: string, args: string[], options: Record<string, unknown>) => {
       calls.push({ command, args, options });
-      const child = Object.assign(new EventEmitter(), { unref() {} });
-      queueMicrotask(() => (outcome === 'spawn' ? child.emit('spawn') : child.emit('error', outcome)));
+      const child = Object.assign(new EventEmitter(), { unref: () => void unrefs++ });
+      queueMicrotask(() => {
+        if (outcome instanceof Error) return void child.emit('error', outcome);
+        child.emit('spawn');
+        if (outcome.exit !== 'stay') child.emit('exit', outcome.exit, null);
+      });
       return child;
     };
-    return { spawn, calls };
+    return { spawn, calls, unrefs: () => unrefs };
   }
 
   it('passes the URL as the one argument, with no shell', async () => {
-    const { spawn, calls } = fakeSpawn('spawn');
+    const { spawn, calls } = fakeSpawn();
     const url = 'https://www.justwatch.com/us/search?q=a%20%26%20b';
     await openUrl(url, { platform: 'darwin', spawn });
     expect(calls).toHaveLength(1);
@@ -161,7 +167,7 @@ describe('openUrl', () => {
   });
 
   it('refuses anything but a JustWatch https link', async () => {
-    const { spawn, calls } = fakeSpawn('spawn');
+    const { spawn, calls } = fakeSpawn();
     await expect(openUrl('file:///etc/passwd', { platform: 'darwin', spawn })).rejects.toThrow(LibraryError);
     await expect(openUrl('-a Calculator', { platform: 'darwin', spawn })).rejects.toThrow(LibraryError);
     await expect(openUrl('https://example.com/', { platform: 'darwin', spawn })).rejects.toThrow(LibraryError);
@@ -169,9 +175,20 @@ describe('openUrl', () => {
   });
 
   it('reports an unsupported platform and a missing opener as user errors', async () => {
-    const { spawn } = fakeSpawn('spawn');
+    const { spawn } = fakeSpawn();
     await expect(openUrl('https://www.justwatch.com/us/search?q=X', { platform: 'win32', spawn })).rejects.toThrow(/macOS and Linux/);
     const missing = fakeSpawn(Object.assign(new Error('spawn xdg-open ENOENT'), { code: 'ENOENT' }));
     await expect(openUrl('https://www.justwatch.com/us/search?q=X', { platform: 'linux', spawn: missing.spawn })).rejects.toThrow(/xdg-open/);
+  });
+
+  it('reports an opener that exits nonzero (no browser) as an error', async () => {
+    const { spawn } = fakeSpawn({ exit: 3 });
+    await expect(openUrl('https://www.justwatch.com/us/search?q=X', { platform: 'linux', spawn })).rejects.toThrow(/xdg-open could not open the link \(exit code 3\)/);
+  });
+
+  it('takes an opener still running after the wait as handed off, and lets it run', async () => {
+    const f = fakeSpawn({ exit: 'stay' });
+    await expect(openUrl('https://www.justwatch.com/us/search?q=X', { platform: 'linux', spawn: f.spawn, waitMs: 20 })).resolves.toBeUndefined();
+    expect(f.unrefs()).toBe(1);
   });
 });
