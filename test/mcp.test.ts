@@ -74,12 +74,23 @@ afterEach(async () => {
 });
 
 describe('tools/list', () => {
-  it('returns the 6 tools with their annotations', async () => {
+  it('returns the 8 tools with their annotations', async () => {
     const { tools } = await client.listTools();
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
     expect(Object.keys(byName).sort()).toEqual(
-      ['add_to_library', 'get_movie', 'library_stats', 'remove_from_library', 'search_movies', 'update_movie'].sort(),
+      [
+        'add_to_library',
+        'catalog_status',
+        'get_movie',
+        'library_stats',
+        'remove_from_library',
+        'search_movies',
+        'setup_catalog',
+        'update_movie',
+      ].sort(),
     );
+    expect(byName.catalog_status!.annotations).toMatchObject({ readOnlyHint: true });
+    expect(byName.setup_catalog!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, openWorldHint: true });
     expect(byName.search_movies!.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: false });
     expect(byName.get_movie!.annotations).toMatchObject({ readOnlyHint: true });
     expect(byName.library_stats!.annotations).toMatchObject({ readOnlyHint: true });
@@ -153,6 +164,7 @@ describe('search_movies', () => {
       const r = (await c.callTool({ name: 'search_movies', arguments: { scope: 'all' } })) as ToolResult;
       expect(r.isError).toBe(true);
       expect(text(r)).toContain('Catalog not built. Run `screentrackr setup`.');
+      expect(text(r)).toContain('setup_catalog');
       const lib = (await c.callTool({ name: 'search_movies', arguments: {} })) as ToolResult;
       expect(lib.isError).toBeFalsy();
     } finally {
@@ -325,7 +337,7 @@ describe('stdio session (Review Focus #1)', () => {
     for (const m of msgs) expect(m.jsonrpc).toBe('2.0');
     expect(msgs.map((m) => m.id)).toEqual([1, 2, 3]);
     expect((msgs[0]!.result as { serverInfo: { name: string } }).serverInfo.name).toBe('screentrackr');
-    expect((msgs[1]!.result as { tools: unknown[] }).tools).toHaveLength(6);
+    expect((msgs[1]!.result as { tools: unknown[] }).tools).toHaveLength(8);
     expect((msgs[2]!.result as { isError?: boolean }).isError).toBeFalsy();
   }, 30_000);
 });

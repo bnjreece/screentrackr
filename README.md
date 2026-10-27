@@ -110,11 +110,30 @@ Output is a readable table. Every command takes `--json` for machine-readable ou
 claude mcp add screentrackr -- npx -y screentrackr mcp
 ```
 
-Then ask in plain words: "Which Villeneuve movies do I own that I haven't watched?" or "What highly rated thrillers under two hours should I rent?" The MCP tools are `search_movies`, `get_movie`, `library_stats`, `update_movie`, `add_to_library` and `remove_from_library`. They share the CLI's filters and query code, so both always give the same answers.
+Then ask in plain words: "Which Villeneuve movies do I own that I haven't watched?" or "What highly rated thrillers under two hours should I rent?" The MCP tools are `search_movies`, `get_movie`, `library_stats`, `update_movie`, `add_to_library` and `remove_from_library`. They share the CLI's filters and query code, so both always give the same answers. Two more, `setup_catalog` and `catalog_status`, build the catalog from inside the chat when you haven't run `setup` in a terminal (see below).
 
-## Use it from Claude Desktop
+## Claude Desktop
 
-Add this to `claude_desktop_config.json` (on macOS, `~/Library/Application Support/Claude/claude_desktop_config.json`) and restart Claude Desktop:
+### One-click extension
+
+ScreenTrackr comes as a Claude Desktop extension, a single `screentrackr-<version>.mcpb` file. Open it (double-click it, or drag it onto Claude Desktop's Extensions settings) and confirm the install. You don't need Node.js or a terminal: the extension runs on the Node.js that Claude Desktop ships with.
+
+Then, in a chat, ask Claude to set up ScreenTrackr's movie catalog. That calls the `setup_catalog` tool, which downloads IMDb's dataset files (about 1 GB, once) and builds the catalog in the background. It takes several minutes; Claude follows along with `catalog_status`, and you can keep chatting meanwhile. If it's interrupted (you quit Claude Desktop, say), ask again: files that finished downloading are reused. Once it's done, ask away: "Which Villeneuve movies do I own that I haven't watched?"
+
+The extension keeps its data in `~/.screentrackr/`, the same folder the command line tool uses, so a library you imported from a terminal shows up in Claude Desktop and the other way round. To import a library, use the command line tool (see [Import your library](#import-your-library)).
+
+To build the extension file yourself from a checkout of this repository:
+
+```sh
+npm ci
+npm run pack:mcpb
+```
+
+That writes `build/mcpb/screentrackr-<version>.mcpb`. The bundle holds only the compiled server, its production dependencies, the manifest, the icon and the license.
+
+### Manual configuration
+
+If you'd rather run it through `npx`, add this to `claude_desktop_config.json` (on macOS, `~/Library/Application Support/Claude/claude_desktop_config.json`) and restart Claude Desktop. This needs Node.js 22.13 or newer on your PATH:
 
 ```json
 {
@@ -127,7 +146,7 @@ Add this to `claude_desktop_config.json` (on macOS, `~/Library/Application Suppo
 }
 ```
 
-Run `npx screentrackr setup` once in a terminal first. The MCP server doesn't download the catalog itself.
+Either run `npx screentrackr setup` once in a terminal, or ask Claude to set up the catalog, as above.
 
 ## Commands
 
@@ -198,7 +217,7 @@ The code is MIT licensed. See [LICENSE](LICENSE).
 
 ## Privacy
 
-The only network calls screentrackr makes are downloads from datasets.imdbws.com during `setup`. There's no telemetry, no account and no server. Your library stays in a SQLite file on your machine.
+The only network calls screentrackr makes are downloads from datasets.imdbws.com during `setup` (or the `setup_catalog` MCP tool, which runs the same thing). There's no telemetry, no account and no server. Your library stays in a SQLite file on your machine.
 
 ## Not affiliated
 
@@ -212,6 +231,7 @@ npm run build
 npm test
 npm run lint
 npm run typecheck
+npm run pack:mcpb   # the Claude Desktop extension, into build/mcpb/
 ```
 
 Tests use small synthetic datasets with made-up titles, never real IMDb rows.

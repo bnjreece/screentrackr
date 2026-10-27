@@ -1,11 +1,8 @@
-import { downloadDatasets } from '../../core/catalog/download.js';
-import { buildCatalog } from '../../core/catalog/build.js';
-import { cacheDir } from '../../core/home.js';
-import { rematch } from '../../core/match.js';
+import { IMDB_CREDIT, runSetup } from '../../core/setup.js';
 import { bool, type Command } from '../command.js';
 import { UserError } from '../context.js';
 
-export const IMDB_CREDIT = 'Information courtesy of IMDb (https://www.imdb.com). Used with permission.';
+export { IMDB_CREDIT };
 
 export const setup: Command = {
   name: 'setup',
@@ -23,16 +20,15 @@ export const setup: Command = {
     if (bool(values, 'with-cast') && bool(values, 'no-cast')) throw new UserError('Use either --with-cast or --no-cast, not both');
     const db = ctx.db();
     const progress = (msg: string) => ctx.log(msg);
-    const downloads = await downloadDatasets(cacheDir(ctx.home), { refresh: bool(values, 'refresh'), onProgress: progress });
-    const stats = await buildCatalog(db, {
-      cacheDir: cacheDir(ctx.home),
+    const result = await runSetup(db, {
+      refresh: bool(values, 'refresh'),
       withCast: !bool(values, 'no-cast'),
       includeTvMovies: bool(values, 'include-tv-movies'),
       onProgress: progress,
     });
-    progress('Matching your library against the catalog');
-    const matching = rematch(db);
-    ctx.emit({ catalog: stats, downloads, matching, credit: IMDB_CREDIT }, () =>
+    const { matching } = result;
+    const stats = result.catalog as NonNullable<typeof result.catalog>; // Always built: no matchOnly here.
+    ctx.emit(result, () =>
       [
         `Catalog built: ${stats.movies.toLocaleString('en-US')} movies, ${stats.rated.toLocaleString('en-US')} rated, ${stats.people.toLocaleString('en-US')} people, ${stats.castRows.toLocaleString('en-US')} cast credits in ${stats.seconds.toFixed(1)}s.`,
         `Library matching: ${matching.matched} matched, ${matching.ambiguous} ambiguous, ${matching.unmatched} unmatched.`,
