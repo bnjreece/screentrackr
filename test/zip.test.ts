@@ -77,6 +77,16 @@ describe('the ZIP reader, more cases', () => {
     expect(() => listZip(Buffer.alloc(10))).toThrow(ImportError);
   });
 
+  it('finds the real end record when the archive comment holds its signature', () => {
+    const zip = makeZip({ 'a.csv': Buffer.from('x') });
+    const comment = Buffer.concat([Buffer.from([0x50, 0x4b, 0x05, 0x06]), Buffer.alloc(30, 0x20)]);
+    zip.writeUInt16LE(comment.length, zip.length - 2);
+    const withComment = Buffer.concat([zip, comment]);
+    expect(listZip(withComment).map((e) => e.read(10).toString('utf8'))).toEqual(['x']);
+    // A comment length that does not reach the end of the file is not an end record.
+    expect(() => listZip(Buffer.concat([withComment, Buffer.from('trailing')]))).toThrow(/not a ZIP/);
+  });
+
   it('flags backslash and drive-letter names as unsafe', () => {
     const zip = makeZip({ '..\\x.csv': Buffer.from('a'), 'C:/x.csv': Buffer.from('b'), 'ok/..x.csv': Buffer.from('c') });
     expect(listZip(zip).map((e) => e.unsafe)).toEqual([true, true, false]);

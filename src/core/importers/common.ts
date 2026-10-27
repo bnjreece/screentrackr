@@ -274,7 +274,12 @@ function foldGroup(group: ImportRecord[], warn: (message: string) => void): Impo
   } else set('myRating', ratings[0]);
 
   const dates = group.map((r) => r.watchedAt).filter((d): d is string => typeof d === 'string' && d !== '');
-  const latest = dates.length ? dates.reduce((a, b) => (b > a ? b : a)) : undefined;
+  // Compared as instants (an offset can make the later string the earlier time); the chosen string is kept as is.
+  const time = (d: string) => {
+    const t = Date.parse(d);
+    return Number.isNaN(t) ? -Infinity : t;
+  };
+  const latest = dates.length ? dates.reduce((a, b) => (time(b) > time(a) ? b : a)) : undefined;
   set('watchedAt', latest);
   set('watchedAtSource', latest === undefined ? undefined : group.find((r) => r.watchedAt === latest)?.watchedAtSource);
 

@@ -204,6 +204,16 @@ describe('foldRecords', () => {
       warn,
     );
     expect(dated).toMatchObject({ watchedAt: '2020-01-01', watchedAtSource: null });
+    // Instants, not strings: 23:00 at -02:00 is an hour after midnight UTC the next day.
+    const [offset] = foldRecords(
+      [
+        { sourceTitle: 'A', source: 'json', watchedAt: '2024-01-02T00:00:00Z', watchedAtSource: 'trakt' },
+        { sourceTitle: 'A', source: 'json', watchedAt: '2024-01-01T23:00:00-02:00', watchedAtSource: 'letterboxd' },
+      ],
+      () => 'a',
+      warn,
+    );
+    expect(offset).toMatchObject({ watchedAt: '2024-01-01T23:00:00-02:00', watchedAtSource: 'letterboxd' });
     const [cleared] = foldRecords([trakt({ myRating: 6 }), trakt({ clearWatchedAtIfOwn: true })], () => 'k', warn);
     expect(cleared?.clearWatchedAtIfOwn).toBe(true);
     expect(cleared?.watchedAt).toBeUndefined();
