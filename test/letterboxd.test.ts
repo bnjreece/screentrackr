@@ -15,6 +15,7 @@ import {
   folderSource,
   parseLetterboxdExport,
   parseLetterboxdFiles,
+  chooseLooseFiles,
   reviewText,
   zipSource,
   type LetterboxdOptions,
@@ -298,9 +299,36 @@ describe('loose files and detection', () => {
     const files = ['watched.csv', 'ratings.csv', 'diary.csv', 'lists/my-blu-rays.csv', 'lists/favourites.csv'].map((n) => ({ name: n, text: text(n) }));
     const res = parseLetterboxdFiles(files, { ownedLists: ['my-blu-rays'] });
     expect(rec(res.records, 'zZ1a')).toMatchObject({ myRating: 9, watchedAt: '2025-01-10', owned: true });
-    expect(res.warnings.join('\n')).toMatch(/favourites.csv: a list that --owned-list does not name/);
+    expect(res.warnings.join('\n')).toMatch(/favourites.csv: a list that --owned-list does not name/); // chooseLooseFiles keeps the CLI from opening it
     expect(() => parseLetterboxdFiles(files.slice(0, 2), { ownedLists: ['my-blu-rays'] })).toThrow(/pass its file/);
     expect(() => parseLetterboxdFiles([files[0] as { name: string; text: string }, files[0] as { name: string; text: string }])).toThrow(/two watched files/);
+  });
+
+  it('chooses loose files by path alone, before opening any', () => {
+    const paths = ['x/watched.csv', 'x/Ratings.csv', 'x/diary.csv', 'x/watchlist.csv', 'x/reviews.csv', 'x/profile.csv', 'x/comments.csv', 'x/likes/films.csv', 'x/lists/My-Blu-Rays.csv', 'x/lists/favourites.csv', 'x/deleted/diary.csv', 'x\\orphaned\\diary.csv'];
+    const c = chooseLooseFiles(paths, { ownedLists: ['my-blu-rays'] });
+    expect(c.open).toEqual(['x/watched.csv', 'x/Ratings.csv', 'x/diary.csv', 'x/watchlist.csv', 'x/lists/My-Blu-Rays.csv']);
+    expect(chooseLooseFiles(paths, { withReviews: true, watchlist: false }).open).toEqual(['x/watched.csv', 'x/Ratings.csv', 'x/diary.csv', 'x/reviews.csv']);
+    // Plain import already read its one file to detect it, so only folders and options decide.
+    expect(chooseLooseFiles(['my-ratings.csv'], {}, false).open).toEqual(['my-ratings.csv']);
+    expect(() => chooseLooseFiles(['deleted/diary.csv'], {}, false)).toThrow(ImportError);
+    expect(() => chooseLooseFiles(['profile.csv'])).toThrow(/None of the files/);
+  });
+
+  it('matches a loose list file to --owned-list without case', () => {
+    const res = parseLetterboxdFiles([{ name: 'My-Blu-Rays.csv', text: text('lists/my-blu-rays.csv') }], { ownedLists: ['my-blu-rays'] });
+    expect(res.records.some((r) => r.owned === true)).toBe(true);
+  });
+
+  it('never falls back to a diary rating for a film whose ratings row is blank', () => {
+    const res = parseLetterboxdFiles([
+      { name: 'ratings.csv', text: 'Date,Name,Year,Letterboxd URI,Rating\n2024-01-01,Night Ferry,2002,https://boxd.it/zZ0n,\n' },
+      { name: 'diary.csv', text: 'Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date\n2020-01-01,Night Ferry,2002,https://boxd.it/aB0000,1,,,2020-01-01\n' },
+    ]);
+    expect(res.records[0]?.myRating).toBeUndefined();
+    applyImport(db, [{ sourceTitle: 'Night Ferry', sourceYear: 2002, status: 'watched', myRating: 9, source: 'paste' }], { mode: 'merge' });
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(item('Night Ferry')[0]?.myRating).toBe(9);
   });
 
   it('does not use diary entries for films missing from the files given', () => {

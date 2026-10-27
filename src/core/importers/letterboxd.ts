@@ -167,6 +167,8 @@ interface Film {
   rawYear: string;
   watched: boolean;
   watchlist: boolean;
+  /** The film has a row in ratings.csv (even with a blank or bad rating), so diary ratings are not used. */
+  ratingsRow: boolean;
   rating?: number;
   ownedList?: string;
 }
@@ -224,7 +226,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
       const year = /^\d{4}$/.test(rawYear) ? Number(rawYear) : null;
       let f = films.get(uri);
       if (!f) {
-        f = { uri, title, year, rawYear, watched: false, watchlist: false };
+        f = { uri, title, year, rawYear, watched: false, watchlist: false, ratingsRow: false };
         films.set(uri, f);
       }
       apply(f, cells, at, where);
@@ -235,6 +237,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
     f.watched = true;
   });
   filmRows(inp.ratings, (f, cells, at, where) => {
+    f.ratingsRow = true;
     const r = halfStars(at(cells, 'Rating'));
     if (r === null) warnings.push(`${where}: rating "${at(cells, 'Rating') ?? ''}" is not a half-star rating from 0.5 to 5, so it was left out`);
     else if (r !== undefined) f.rating = r;
@@ -272,7 +275,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
       const rawYear = (at(cells, 'Year') ?? '').trim();
       let f = films.get(uri);
       if (!f) {
-        f = { uri, title, year: /^\d{4}$/.test(rawYear) ? Number(rawYear) : null, rawYear, watched: false, watchlist: false };
+        f = { uri, title, year: /^\d{4}$/.test(rawYear) ? Number(rawYear) : null, rawYear, watched: false, watchlist: false, ratingsRow: false };
         films.set(uri, f);
       }
       f.ownedList ??= listName;
@@ -379,7 +382,9 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
       }
     } else rec.statusIfNew = 'queue';
 
-    const rating = f.rating ?? entries.find((e) => e.rating !== undefined)?.rating;
+    // ratings.csv decides when the film has a row there, even a blank one;
+    // only a film with no ratings row takes its latest diary rating.
+    const rating = f.ratingsRow ? f.rating : entries.find((e) => e.rating !== undefined)?.rating;
     if (rating !== undefined) rec.myRating = rating;
 
     if (opts.withReviews) {
@@ -455,12 +460,56 @@ export function parseLetterboxdExport(source: LetterboxdSource, opts: Letterboxd
   return { records, warnings, notices, skipped };
 }
 
+const LOOSE_NAMES = new Set(['watched.csv', 'ratings.csv', 'diary.csv', 'watchlist.csv', 'reviews.csv']);
+const NEVER_DIRS = new Set(['deleted', 'orphaned', 'likes']);
+
+/**
+ * Which loose files to open, decided from their paths alone so nothing else
+ * is read: a file in deleted/, orphaned/ or likes/ never is; reviews.csv only
+ * with `withReviews`, watchlist.csv unless `watchlist` is false; a list only
+ * when `ownedLists` names it. With `byName` (`import letterboxd`), any other
+ * name is left unopened too (profile.csv, comments.csv, unnamed lists);
+ * without it (plain import, which has already read the one file to detect
+ * its format) the file's columns decide what it is.
+ */
+export function chooseLooseFiles(paths: string[], opts: LetterboxdOptions = {}, byName = true): { open: string[]; warnings: string[]; notices: string[] } {
+  const owned = new Set((opts.ownedLists ?? []).map((v) => cleanListSlug(v).toLowerCase()));
+  const open: string[] = [];
+  const warnings: string[] = [];
+  const notices: string[] = [];
+  for (const path of paths) {
+    const parts = path.split(/[\\/]/).filter(Boolean);
+    const base = (parts.pop() ?? '').toLowerCase();
+    const dir = parts.find((d) => NEVER_DIRS.has(d.toLowerCase()));
+    if (dir) {
+      warnings.push(`${path}: files in ${dir.toLowerCase()}/ are never imported, so it was not opened`);
+      continue;
+    }
+    if (base === 'reviews.csv' && !opts.withReviews) {
+      notices.push(`${path}: reviews are read only with --with-reviews, so it was not opened`);
+      continue;
+    }
+    if (base === 'watchlist.csv' && opts.watchlist === false) {
+      notices.push(`${path}: --no-watchlist, so it was not opened`);
+      continue;
+    }
+    if (byName && !LOOSE_NAMES.has(base) && !owned.has(base.replace(/\.csv$/, ''))) {
+      warnings.push(`${path}: not a file this import reads (watched.csv, ratings.csv, diary.csv, watchlist.csv, reviews.csv or a list named with --owned-list), so it was not opened`);
+      continue;
+    }
+    open.push(path);
+  }
+  if (!open.length) throw new ImportError('None of the files given is one a Letterboxd import reads, so nothing was imported.');
+  return { open, warnings, notices };
+}
+
 /** Parse loose CSV files from an export (watched.csv, ratings.csv, diary.csv, watchlist.csv, reviews.csv, list files). */
 export function parseLetterboxdFiles(files: { name: string; text: string }[], opts: LetterboxdOptions = {}): LetterboxdParse {
   const warnings: string[] = [];
   const notices: string[] = [];
   const inputs: Inputs = { lists: [] };
-  const owned = new Set((opts.ownedLists ?? []).map(cleanListSlug));
+  // List slugs compare without case, as the whole-export reader finds files.
+  const owned = new Set((opts.ownedLists ?? []).map((v) => cleanListSlug(v).toLowerCase()));
   const found = new Set<string>();
   for (const f of files) {
     const t = table(f.name, f.text);
@@ -468,9 +517,9 @@ export function parseLetterboxdFiles(files: { name: string; text: string }[], op
     if (kind === null) throw new ImportError(`${f.name}: not a Letterboxd export file (watched, ratings, diary, watchlist, reviews or a list)`);
     if (kind === 'list') {
       const slug = basename(f.name).replace(/\.csv$/i, '');
-      if (owned.has(slug)) {
+      if (owned.has(slug.toLowerCase())) {
         inputs.lists.push({ slug, table: t });
-        found.add(slug);
+        found.add(slug.toLowerCase());
       } else warnings.push(`${f.name}: a list that --owned-list does not name, so it was ignored`);
       continue;
     }

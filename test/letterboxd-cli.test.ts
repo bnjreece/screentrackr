@@ -4,7 +4,7 @@
  * The export fixtures are invented.
  */
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -91,6 +91,33 @@ describe('import letterboxd', () => {
     expect(json<Summary>(files)).toMatchObject({ format: 'letterboxd', records: 10, added: 0 });
     const one = run(['import', join(EXPORT, 'watchlist.csv'), '--json']);
     expect(json<Summary>(one)).toMatchObject({ format: 'letterboxd', records: 3 });
+  }, 60_000);
+
+  it('opens only the loose files it reads: a glob over the export never opens profile, comments, likes, unnamed lists or deleted/ and orphaned/', () => {
+    const copy = join(tmp, `glob-${n}`);
+    cpSync(EXPORT, copy, { recursive: true });
+    // Unreadable: opening any of these would fail the import.
+    const closed = ['profile.csv', 'comments.csv', 'reviews.csv', 'likes/films.csv', 'lists/favourites.csv', 'lists/old-shelf.csv', 'deleted/diary.csv', 'orphaned/diary.csv'];
+    for (const f of closed) chmodSync(join(copy, f), 0o000);
+    try {
+      const all = ['watched.csv', 'ratings.csv', 'diary.csv', 'watchlist.csv', 'lists/my-blu-rays.csv', ...closed].map((f) => join(copy, f));
+      const r = run(['import', 'letterboxd', ...all, '--owned-list', 'my-blu-rays', '--json']);
+      expect(r.code, r.stderr).toBe(0);
+      expect(r.stderr).toMatch(/deleted\/ are never imported/);
+      expect(r.stderr).toMatch(/profile\.csv: not a file this import reads/);
+      const db = openDb(home);
+      try {
+        const ferry = db.sql.prepare("SELECT status, watched_at AS w FROM library_items WHERE source_title = 'Night Ferry'").get() as { status: string; w: string | null };
+        expect(ferry).toMatchObject({ w: null });
+        expect(ferry.status).not.toBe('watched');
+      } finally {
+        db.close();
+      }
+      const deleted = run(['import', 'letterboxd', join(copy, 'deleted', 'diary.csv')]);
+      expect(deleted.code).toBe(1);
+    } finally {
+      for (const f of closed) chmodSync(join(copy, f), 0o644);
+    }
   }, 60_000);
 
   it('never empties the library from an export with nothing in it under --replace', () => {

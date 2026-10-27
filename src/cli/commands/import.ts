@@ -12,6 +12,7 @@ import {
   type ImdbOptions,
 } from '../../core/importers/imdb.js';
 import {
+  chooseLooseFiles,
   folderSource,
   looksLikeZip,
   parseLetterboxdExport,
@@ -81,22 +82,25 @@ function fromLetterboxd(res: LetterboxdParse): Parsed {
  * A Letterboxd export: one ZIP or folder, or loose CSV files from one. Only
  * the files the import needs are opened (see core/importers/letterboxd.ts).
  */
-function parseLetterboxdPaths(paths: string[], opts: LetterboxdOptions): Parsed {
+function parseLetterboxdPaths(paths: string[], opts: LetterboxdOptions, detected = false): Parsed {
   const first = paths[0] as string;
   const whole = isDir(first) || (!first.toLowerCase().endsWith('.csv') && looksLikeZip(readBytes(first)));
   if (whole) {
     if (paths.length > 1) throw new UserError('Pass one Letterboxd export (a ZIP or a folder) at a time, or its CSV files');
     return fromLetterboxd(parseLetterboxdExport(isDir(first) ? folderSource(first) : zipSource(readBytes(first)), opts));
   }
-  const warnings: string[] = [];
-  const files = paths.map((path) => {
-    if (isDir(path)) throw new UserError('Pass one Letterboxd export (a ZIP or a folder) at a time, or its CSV files');
+  if (paths.some(isDir)) throw new UserError('Pass one Letterboxd export (a ZIP or a folder) at a time, or its CSV files');
+  // Decide from the paths alone which files to open, so a glob over the
+  // export never opens profile.csv, comments.csv or deleted/ entries.
+  const chosen = chooseLooseFiles(paths, opts, !detected);
+  const warnings = [...chosen.warnings];
+  const files = chosen.open.map((path) => {
     const decoded = decodeImdbFile(readBytes(path));
     if (decoded.warning) warnings.push(`${basename(path)}: ${decoded.warning}`);
     return { name: basename(path), text: decoded.text };
   });
   const res = fromLetterboxd(parseLetterboxdFiles(files, opts));
-  return { ...res, warnings: [...warnings, ...res.warnings] };
+  return { ...res, warnings: [...warnings, ...res.warnings], notices: [...chosen.notices, ...res.notices] };
 }
 
 export const importCmd: Command = {
@@ -223,7 +227,7 @@ export const importCmd: Command = {
         parsed = parseImdbFiles(ctx.db(), [file], imdbOpts);
       } else if (fmt === 'letterboxd') {
         if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
-        parsed = parseLetterboxdPaths([file], lbOpts);
+        parsed = parseLetterboxdPaths([file], lbOpts, true);
       } else {
         if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
         noLbFlags();
