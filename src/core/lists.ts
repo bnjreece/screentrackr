@@ -32,11 +32,12 @@ const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
 
 /**
  * The key a name is unique by: NFC, trimmed and case-folded. Folding goes
- * through upper case and back (so "ß" meets "SS") and treats a final sigma
- * as a sigma, which lowercasing alone does not.
+ * through upper case and back (so "ß" meets "SS"), writes a sharp s left
+ * over (from a capital sharp s) as "ss", and treats a final sigma as a
+ * sigma, which lowercasing alone does not.
  */
 export function normListName(name: string): string {
-  return name.normalize('NFC').trim().toUpperCase().toLowerCase().replace(/\u03c2/g, '\u03c3').normalize('NFC');
+  return name.normalize('NFC').trim().toUpperCase().toLowerCase().replace(/\u03c2/g, '\u03c3').replace(/\u00df/g, 'ss').normalize('NFC');
 }
 
 /** A list name as stored: NFC and trimmed. Throws LibraryError when empty, too long or holding control characters. */

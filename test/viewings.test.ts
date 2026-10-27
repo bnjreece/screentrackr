@@ -305,6 +305,14 @@ describe('planViewingSync', () => {
     ]);
   });
 
+  it('takes the incoming date-time when it upgrades a ref-less play of that day, so a repeat is a no-op', () => {
+    const stored = [v(1, '2020-01-01', 'letterboxd')];
+    const incoming = [{ watchedAt: '2020-01-01T20:00:00Z', source: 'letterboxd' as const, sourceRef: 'A' }];
+    expect(planViewingSync(stored, incoming, new Set()).updates).toEqual([{ id: 1, sourceRef: 'A', watchedAt: '2020-01-01T20:00:00Z' }]);
+    const after = [v(1, '2020-01-01T20:00:00Z', 'letterboxd', { sourceRef: 'A' })];
+    expect(planViewingSync(after, incoming, new Set())).toEqual({ inserts: [], updates: [], deletes: [] });
+  });
+
   it('lets a play with a ref become dateless', () => {
     const p = planViewingSync([v(10, '2020-01-01', 'trakt', { sourceRef: 'R' })], [{ watchedAt: null, source: 'trakt', sourceRef: 'R' }], new Set(['trakt']));
     expect(p).toEqual({ inserts: [], updates: [{ id: 10, watchedAt: null }], deletes: [] });

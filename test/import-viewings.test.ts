@@ -176,6 +176,17 @@ describe('viewings on import', () => {
     expect(bad({ lists: 'Spooky' as never })).toThrow(/lists/);
   });
 
+  it('never clears a play flag or rating: null says nothing', () => {
+    applyImport(db, [letterboxd([{ date: '2021-10-31', ref: 'https://boxd.it/e2', rewatch: true, rating: 8 }])], { mode: 'merge' });
+    const res = applyImport(
+      db,
+      [{ ...letterboxd([]), viewings: [{ watchedAt: '2021-10-31', sourceRef: 'https://boxd.it/e2', rewatch: null, rating: null }] }],
+      { mode: 'merge' },
+    );
+    expect(res).toMatchObject({ updated: 0, unchanged: 1 });
+    expect(plays()).toEqual([['2021-10-31', 'letterboxd', 'https://boxd.it/e2', true, 8]]);
+  });
+
   it('keeps the cache sound through all of it', () => {
     applyImport(db, [letterboxd([{ date: '2019-04-02', ref: 'https://boxd.it/e1' }])], { mode: 'merge' });
     applyImport(db, [{ sourceTitle: 'Pale Rooftops', status: 'watched', source: 'plex', watchedAt: '2025-01-01' }], { mode: 'merge' });

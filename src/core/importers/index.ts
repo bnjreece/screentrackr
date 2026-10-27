@@ -347,8 +347,9 @@ function cleanRecord(r: ImportRecord): CleanRecord {
   ).map((v: ImportViewing) => ({
     watchedAt: v.watchedAt === null ? null : v.watchedAt.trim(),
     source: v.source ?? r.source,
-    ...(v.rewatch !== undefined ? { rewatch: v.rewatch } : {}),
-    ...(v.rating !== undefined ? { rating: v.rating } : {}),
+    // A null flag or rating says nothing: an import never clears one.
+    ...(v.rewatch != null ? { rewatch: v.rewatch } : {}),
+    ...(v.rating != null ? { rating: v.rating } : {}),
     sourceRef: v.sourceRef == null ? null : v.sourceRef.trim(),
   }));
   // clearWatchedAtIfOwn is a complete, empty set of this source's plays.

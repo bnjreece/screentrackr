@@ -86,9 +86,10 @@ export interface ImportRecord {
    * Letterboxd diary entry URI, a Trakt history id as a decimal string), else
    * one play per source and calendar date, and dateless plays by count. A
    * stored play of the same source and date with no ref is upgraded with the
-   * incoming ref, flag and rating. `source` is the record's unless a viewing
-   * says otherwise (JSON v1 only). `rewatch` is the source's own flag (null or
-   * absent: it didn't say); `rating` the rating given at that play. Status is
+   * incoming ref, date string, flag and rating. `source` is the record's
+   * unless a viewing says otherwise (JSON v1 only). `rewatch` is the source's
+   * own flag; `rating` the rating given at that play. Null or absent, either
+   * says nothing: an import never clears a stored flag or rating. Status is
    * never changed by a play: send `status: 'watched'` with plays as before.
    */
   viewings?: ImportViewing[] | null;

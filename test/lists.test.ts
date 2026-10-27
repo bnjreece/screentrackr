@@ -49,6 +49,7 @@ describe('lists', () => {
     // Case-insensitive beyond lowercasing: a final sigma, a sharp s.
     expect(normListName('ΟΣ')).toBe(normListName('οσ'));
     expect(normListName('Straße')).toBe(normListName('STRASSE'));
+    expect(normListName('STRA\u1E9EE')).toBe(normListName('Straße'));
   });
 
   it('creates, finds case-insensitively, and refuses a duplicate', () => {

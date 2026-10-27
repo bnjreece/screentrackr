@@ -420,13 +420,14 @@ export const planIsEmpty = (p: ViewingPlan): boolean => p.inserts.length === 0 &
  * Per source: an incoming play with a ref matches the stored play with that
  * ref (taking its date, which may be null: a play found to have no real
  * date), else a stored play of the same source and calendar date that has no
- * ref (which it upgrades with its ref, flag and rating). A dated play with no
+ * ref (which it upgrades with its ref, date string, flag and rating). A dated play with no
  * ref is one per source and calendar date: it matches a stored play of that
  * day or is added once (the days counted are those the plan leaves, so a
  * play moved off a day frees it). Dateless plays with no ref match stored
  * dateless ones one for one, so a source's dateless count only grows to what
  * it sends. Matched plays take the incoming rewatch flag and rating when
- * given (undefined leaves them).
+ * given (undefined leaves them; the import core passes a null as undefined,
+ * so an import never clears one).
  *
  * With `exact` (a ScreenTrackr JSON v1 file, ScreenTrackr's own record of
  * these plays) a play only matches the very same stored play: the same ref,
@@ -477,7 +478,11 @@ export function planViewingSync(
       used.add(cur.id);
       const u: ViewingUpdate = { id: cur.id };
       if (how === 'ref' && v.watchedAt !== cur.watchedAt) u.watchedAt = v.watchedAt;
-      if (how === 'upgrade' && v.sourceRef != null) u.sourceRef = v.sourceRef;
+      if (how === 'upgrade' && v.sourceRef != null) {
+        u.sourceRef = v.sourceRef;
+        // The same day: the play with a ref brings its own date string (a time, say), so a repeat matches it as is.
+        if (v.watchedAt !== null && v.watchedAt !== cur.watchedAt) u.watchedAt = v.watchedAt;
+      }
       if (v.rewatch !== undefined && v.rewatch !== cur.rewatch) u.rewatch = v.rewatch;
       if (v.rating !== undefined && v.rating !== cur.rating) u.rating = v.rating;
       resultDay.set(cur.id, dayOf(u.watchedAt !== undefined ? u.watchedAt : cur.watchedAt));
