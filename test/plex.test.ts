@@ -264,6 +264,51 @@ describe('reading the server', () => {
     expect(res.warnings.join('\n')).toMatch(/3 of 4/);
   });
 
+  /** A section-3 listing that answers each request with the next of `pages` (body and headers). */
+  const scripted = (pages: { body: unknown; headers?: Record<string, string> }[]) => {
+    const { fetch, calls } = fakeFetch({ sections: SECTIONS.slice(0, 1), movies: {} });
+    let n = 0;
+    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname !== '/library/sections/3/all') return fetch(input, init);
+      const p = pages[n++] ?? { body: { MediaContainer: { size: 0 } } };
+      return new Response(JSON.stringify(p.body), { headers: { 'content-type': 'application/json', ...p.headers } });
+    }) as typeof fetch;
+    return { fetch: impl, calls };
+  };
+  const film = (k: string) => ({ ...lanternSeason, ratingKey: k, title: `Invented Film ${k}` });
+
+  it('does not trust overlapping pages without a total, even when they end on an empty page', async () => {
+    const { fetch } = scripted([
+      { body: { MediaContainer: { size: 2, Metadata: [film('a'), film('b')] } } },
+      { body: { MediaContainer: { size: 2, Metadata: [film('b'), film('c')] } } },
+      { body: { MediaContainer: { size: 0 } } },
+    ]);
+    const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch, pageSize: 2 });
+    expect(res.records).toHaveLength(3);
+    expect(res.complete).toBe(false);
+  });
+
+  it('takes the larger of the body and header totals', async () => {
+    const { fetch } = scripted([
+      { body: { MediaContainer: { size: 2, totalSize: 2, Metadata: [film('a'), film('b')] } }, headers: { 'X-Plex-Container-Total-Size': '5' } },
+      { body: { MediaContainer: { size: 0, totalSize: 2 } } },
+    ]);
+    const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch, pageSize: 2 });
+    expect(res.complete).toBe(false);
+  });
+
+  it('refuses a listing answer without a MediaContainer instead of reading it as the end', async () => {
+    const { fetch } = scripted([{ body: { MediaContainer: { size: 2, Metadata: [film('a'), film('b')] } } }, { body: { error: 'busy' } }]);
+    await expect(readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch, pageSize: 2 })).rejects.toThrow(/MediaContainer/);
+  });
+
+  it('reads a library named twice (by title and by key) once', async () => {
+    const res = await read({ sections: SECTIONS, movies: { '3': [lanternSeason] } }, { sections: ['Movies', '3'] });
+    expect(res.records).toHaveLength(1);
+    expect(res.calls.filter((c) => c.url.pathname === '/library/sections/3/all')).toHaveLength(1);
+  });
+
   it('keeps the largest reported total when a later page drops or lowers it', async () => {
     const [a, b] = ['a', 'b'].map((k) => ({ ...lanternSeason, ratingKey: k, title: `Invented Film ${k}` }));
     for (const last of [{}, { totalSize: 0 }]) {
@@ -543,6 +588,20 @@ describe('mapping Plex movies', () => {
     expect(years.records).toHaveLength(2);
   });
 
+  it('drops a placeholder director credit, so a folded copy keeps the real one', () => {
+    const res = map([
+      { ...glassHarbor2009, Director: [{ tag: 'Unknown' }] },
+      { ...glassHarbor2009, ratingKey: 'u2' },
+    ]);
+    expect(res.records).toHaveLength(1);
+    expect(res.records[0]?.sourceDirector).toBe('Teodor Brask');
+  });
+
+  it('flattens brackets inside an edition name so the tag stays readable', () => {
+    const res = map([{ ...glassHarbor2009, editionTitle: "Director's Cut (4K)" }]);
+    expect(res.records[0]?.sourceTitle).toBe("The Glass Harbor (Director's Cut 4K)");
+  });
+
   it('never folds records whose directors are clearly different people', () => {
     const res = map([
       glassHarbor2009,
@@ -654,6 +713,15 @@ describe('importing into the library', () => {
       ['The Glass Harbor', 'someday', null],
     ]);
     expect(plexImport([{ ...glassHarbor2009, ratingKey: '5099', editionTitle: "Director's Cut", userRating: 9 }])).toMatchObject({ added: 0, unchanged: 1 });
+  });
+
+  it('keeps an edition with brackets in its name apart from the bare edition', () => {
+    plexImport([{ ...glassHarbor2009, viewCount: 0, userRating: undefined }]);
+    plexImport([{ ...glassHarbor2009, ratingKey: '5101', editionTitle: "Director's Cut [4K]", userRating: 9 }]);
+    expect(items().map((i) => [i.sourceTitle, i.status, i.myRating])).toEqual([
+      ['The Glass Harbor', 'someday', null],
+      ["The Glass Harbor (Director's Cut 4K)", 'watched', 9],
+    ]);
   });
 
   it('never downgrades a watched movie, never clears a rating, and marks an existing movie owned', () => {

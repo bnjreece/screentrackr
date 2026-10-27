@@ -26,7 +26,7 @@
  * - Plex's own ids (ratingKey, plex:// guid) are not stored: a ratingKey is
  *   per server and per file, and a guid changes when the owner fixes a match.
  */
-import { directorsConflict } from '../match.js';
+import { directorsConflict, meaningfulCredit } from '../match.js';
 import { normalizeTitle, titleEditionTag, titleSuffixYear } from '../normalize.js';
 import { cleanTconst, cleanText, cleanYear, foldRecords, ImportError, type ImportRecord, type ParsedImport } from './common.js';
 
@@ -175,7 +175,9 @@ export function mapPlexItems(items: PlexMetadata[], opts: PlexMapOptions = {}): 
       continue;
     }
     counts.movies++;
-    const edition = cleanText(m.editionTitle);
+    // Brackets inside an edition name ("Director's Cut (4K)") would nest and
+    // hide the tag from the normalizer, so they become spaces.
+    const edition = cleanText(cleanText(m.editionTitle)?.replace(/[()[\]]+/g, ' ').replace(/\s+/g, ' '));
     let sourceTitle = title;
     if (edition) {
       if (EDITION_WORDS.test(edition)) sourceTitle = `${title} (${edition})`;
@@ -187,7 +189,8 @@ export function mapPlexItems(items: PlexMetadata[], opts: PlexMapOptions = {}): 
     const rec: ImportRecord = {
       sourceTitle,
       sourceYear: year !== null && Number.isInteger(year) ? cleanYear(year) : null,
-      sourceDirector: joined(m.Director),
+      // A placeholder credit ("Unknown") is no credit, so folding keeps a real one.
+      sourceDirector: meaningfulCredit(joined(m.Director)) ? joined(m.Director) : null,
       sourceGenre: joined(m.Genre),
       sourceRuntimeMin: runtime,
       collection: joined(m.Collection),
@@ -450,7 +453,7 @@ async function listSections(client: PlexClient, opts: PlexReadOptions, notices: 
   });
   const movies = all.filter((s) => s.type === 'movie' && s.key);
   if (opts.sections?.length) {
-    return opts.sections.map((want) => {
+    const chosen = opts.sections.map((want) => {
       const w = want.trim().toLowerCase();
       const hit = all.find((s) => s.key === want.trim()) ?? all.find((s) => s.title.toLowerCase() === w);
       if (!hit) {
@@ -461,6 +464,8 @@ async function listSections(client: PlexClient, opts: PlexReadOptions, notices: 
       if (hit.type !== 'movie') throw new ImportError(`"${hit.title}" is not a movie library (it holds ${hit.type ?? 'something else'})`);
       return { key: hit.key, title: hit.title };
     });
+    // A library named twice (by title and by key) is read once.
+    return chosen.filter((s, i) => chosen.findIndex((c) => c.key === s.key) === i);
   }
   const picked = movies.filter((s) => opts.includeOtherVideos || s.agent !== OTHER_VIDEOS_AGENT);
   const other = movies.filter((s) => !picked.includes(s));
@@ -480,6 +485,7 @@ async function listMovies(
   const seen = new Set<string>();
   let start = 0;
   let total: number | null = null;
+  let irregular = false;
   for (let page = 0; ; page++) {
     if (page >= MAX_PAGES) throw new ImportError(`"${section.title}" kept returning new pages after ${MAX_PAGES} requests; stopped without importing`);
     const { body, headers } = await client.get(
@@ -487,11 +493,22 @@ async function listMovies(
       { type: '1', includeGuids: '1', excludeFields: EXCLUDE_FIELDS },
       { 'X-Plex-Container-Start': String(start), 'X-Plex-Container-Size': String(pageSize) },
     );
-    const mc = container(body);
-    const meta = Array.isArray(mc.Metadata) ? (mc.Metadata as PlexMetadata[]) : [];
-    const pageTotal = num(mc.totalSize) ?? num(headers.get('X-Plex-Container-Total-Size'));
-    // The largest total any page reported: a later page can't lower it.
-    if (pageTotal !== null) total = Math.max(total ?? 0, pageTotal);
+    const raw = (body as { MediaContainer?: unknown } | null)?.MediaContainer;
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new ImportError(`"${section.title}" answered without a MediaContainer; stopped without importing`);
+    }
+    const mc = raw as Record<string, unknown>;
+    if (mc.Metadata !== undefined && !Array.isArray(mc.Metadata)) {
+      throw new ImportError(`"${section.title}" answered with an unreadable movie list; stopped without importing`);
+    }
+    const meta = (mc.Metadata ?? []) as PlexMetadata[];
+    // The largest total any page reported, in the body or the header: a later
+    // or smaller one can't lower it.
+    for (const t of [num(mc.totalSize), num(headers.get('X-Plex-Container-Total-Size'))]) {
+      if (t !== null) total = Math.max(total ?? 0, t);
+    }
+    const offset = num(mc.offset);
+    if (offset !== null && offset !== start) irregular = true;
     let fresh = 0;
     for (const m of meta) {
       const key = cleanText(m?.ratingKey);
@@ -502,18 +519,20 @@ async function listMovies(
       out.push(m);
       fresh++;
     }
+    if (fresh < meta.length) irregular = true;
     // The server may ignore the requested size or not page at all: advance by
     // what came back, and stop at the reported total, on an empty page, or on
     // a page with nothing new, never on a merely short page. The read is
     // complete only when the distinct movies reach the largest reported total
     // (overlapping pages can reach it by position while missing movies), or,
-    // with no total at all, when it ended on an empty page.
+    // with no total at all, when it ended on an empty page after pages that
+    // neither overlapped nor started somewhere other than asked.
     const done = (endedEmpty: boolean): { movies: PlexMetadata[]; complete: boolean } => {
-      if (total !== null ? out.length >= total : endedEmpty) return { movies: out, complete: true };
+      if (total !== null ? out.length >= total : endedEmpty && !irregular) return { movies: out, complete: true };
       warnings.push(
         total !== null
           ? `"${section.title}" returned fewer movies than it reported (${out.length} of ${total})`
-          : `"${section.title}" repeated a page without saying how many movies it has, so the list may be incomplete`,
+          : `"${section.title}" paged irregularly without saying how many movies it has, so the list may be incomplete`,
       );
       return { movies: out, complete: false };
     };
