@@ -57,6 +57,53 @@ export function titleSuffixYear(title: string): number | null {
   return null;
 }
 
+/**
+ * The edition tags among a title's trailing suffix groups, years left out,
+ * folded and with punctuation collapsed: "director s cut" for
+ * "Title (Director's Cut)", "" for a bare title. Unlike normalization, a
+ * group may nest ("Title (Director's Cut (4K))" gives "director s cut 4k"),
+ * so a nested edition name never reads as a bare title, and trailing groups
+ * without an edition word are skipped rather than ending the scan.
+ */
+export function titleEditionTag(title: string): string {
+  let base = fold(title).trim();
+  const groups: string[] = [];
+  for (;;) {
+    const close = base.at(-1);
+    if (close !== ')' && close !== ']') break;
+    // The bracket that opens this trailing group, counting nested ones.
+    let depth = 0;
+    let open = -1;
+    for (let i = base.length - 1; i >= 0; i--) {
+      const ch = base[i] as string;
+      if (ch === ')' || ch === ']') depth++;
+      else if (ch === '(' || ch === '[') {
+        depth--;
+        if (depth === 0) {
+          open = i;
+          break;
+        }
+      }
+    }
+    if (open <= 0) break;
+    const inner = base
+      .slice(open + 1, -1)
+      .replace(/[()[\]]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const rest = base.slice(0, open).trim();
+    if (!rest) break;
+    // Other trailing groups ("[1080p]") are passed over, not a stop, so an
+    // edition tag before them still counts.
+    if (isStrippableSuffix(inner)) groups.unshift(inner);
+    base = rest;
+  }
+  return groups
+    .filter((g) => !YEAR_GROUP.test(g))
+    .map((g) => g.replace(/[^\p{L}\p{N}]+/gu, ' ').trim())
+    .join(' | ');
+}
+
 export function normalizeTitle(input: string): string {
   let s = splitSuffixes(fold(input)).base;
 

@@ -23,7 +23,7 @@ import { backupsDir } from '../home.js';
 import { LIBRARY_COLUMNS, rowToItem, WATCHED_AT_RE, type LibraryRow } from '../library.js';
 import { factsConflict, identityOf, sameMovie, type Identity } from '../identity.js';
 import { directorsConflict, directorsOf, matchOne, meaningfulCredit, SCORE, type MatchCandidate } from '../match.js';
-import { normalizeTitle } from '../normalize.js';
+import { normalizeTitle, titleEditionTag } from '../normalize.js';
 import {
   EXTERNAL_ID_KINDS,
   ITEM_SOURCES,
@@ -171,7 +171,7 @@ function validate(records: ImportRecord[]): void {
     if (r.statusIfNew !== undefined && !(STATUSES as readonly string[]).includes(r.statusIfNew)) {
       fail(`invalid new-item status "${String(r.statusIfNew)}"`);
     }
-    for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'imdbIdExact', 'clearWatchedAtIfOwn'] as const) {
+    for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'imdbIdExact', 'clearWatchedAtIfOwn'] as const) {
       if (r[flag] !== undefined && typeof r[flag] !== 'boolean') fail(`${flag} must be true or false`);
     }
     if (r.watchedAtSource != null && !(ITEM_SOURCES as readonly string[]).includes(r.watchedAtSource)) {
@@ -449,9 +449,11 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
   const linkSettlesDirectors = (e: Existing) =>
     r.fromTvApp === true && t.directorConfirmed === true && recLink !== null && itemLink(e) === recLink;
 
+  const edition = r.editionStrict === true ? titleEditionTag(title) : null;
   const conflicts = (e: Existing): boolean => {
     if (idsDiffer(e)) return true;
     if (sameApple(e)) return false;
+    if (edition !== null && titleEditionTag(e.item.sourceTitle) !== edition) return true;
     if (apple !== null && e.item.applePersistentId !== null) return true;
     if (sameIdsAs(e)) return false;
     return (

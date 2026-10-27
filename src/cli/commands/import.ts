@@ -26,6 +26,7 @@ import { applyImport, detectFormat, FORMATS, parseImportDetailed, type ImportFor
 import { listZip } from '../../core/zip.js';
 import { bool, str, strs, type Command } from '../command.js';
 import { UserError } from '../context.js';
+import { emitPlexDryRun, PLEX_OPTIONS, readPlexImport, rejectPlexFlags, type PlexParsed } from './import-plex.js';
 
 const IMDB_FLAGS_ONLY = '--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files';
 
@@ -44,11 +45,12 @@ function catalogHasTvMovies(db: Db): boolean {
 }
 
 interface Parsed extends ParsedImport {
-  format: ImportFormat | 'apple-tv';
+  format: ImportFormat | 'apple-tv' | 'plex';
   notices: string[];
   skippedByType?: Record<string, number>;
   /** Extra fields for `--json` output. */
   extra?: Record<string, unknown>;
+  plex?: PlexParsed['plex'];
 }
 
 /** `import trakt`: Trakt's data export ZIP, its folder, or single files from it. Only allow-listed files are read. */
@@ -171,6 +173,7 @@ export const importCmd: Command = {
       '), --checkin-dates uses check-in dates as watched dates, --notes-from-description keeps a list row\'s Description as notes.',
     "`import letterboxd <export.zip|folder|file.csv>...` reads the export you downloaded from letterboxd.com (Settings, Data). Watched and rated films are marked watched, with half stars stored times two (1 to 10); the watched date comes from your diary; watchlist films go in the queue only when they are new; nothing is marked owned unless you name a list with --owned-list <slug> (repeatable). --with-reviews takes your latest review as notes for movies with none; --no-watchlist leaves the watchlist out.",
     "`import trakt <export.zip|folder>` reads the data export you download from Trakt (Settings > Data > Raw export), or files from it. Only movie history, ratings, watchlist, collection and the export's error list are read. Watched movies are marked watched with the latest play's date, watchlist movies go in the queue only when they are new, and only the collection marks a movie owned. Plays logged in bulk (10 or more at the same second) lose their dates unless --keep-bulk-dates. It only merges (--replace is refused). A plain `import` of the export ZIP or one of those files does the same, and refuses the export's other files without opening them. Nothing is fetched from Trakt.",
+    "`import plex [--url <server>] [--section <name|key>]...` reads the movie libraries of your own Plex Media Server, read-only, with the token from PLEX_TOKEN (never stored). Every movie is marked owned; movies Plex counts as played are marked watched, with your Plex rating unless --no-ratings; new unwatched movies get --unwatched-status (someday by default; skip leaves them out) and existing ones keep their status. With --dry-run, plex shows the counts it read and never opens your library.",
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
     '--replace backs up your library to backups/ first, then replaces it.',
     '--dry-run reports what the import would add, update and leave for review, and changes nothing (no backup either).',
@@ -198,6 +201,7 @@ export const importCmd: Command = {
     'with-reviews': { type: 'boolean', description: 'letterboxd only: use your latest review as notes for movies with no notes' },
     'no-watchlist': { type: 'boolean', description: 'letterboxd only: leave the watchlist out' },
     'keep-bulk-dates': { type: 'boolean', description: 'trakt only: keep the dates of plays logged in bulk' },
+    ...PLEX_OPTIONS,
     'notes-from-description': { type: 'boolean', description: "imdb only: use a list row's Description as the movie's notes (fills blank notes)" },
     'dry-run': { type: 'boolean', description: 'Show what the import would do without changing anything' },
   },
@@ -216,7 +220,9 @@ export const importCmd: Command = {
     const format = str(values, 'format');
     const timeout = str(values, 'timeout');
     const appleTv = file === 'apple-tv';
-    if ((appleTv || imdb || letterboxd || trakt) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
+    const plex = file === 'plex';
+    if (!plex) rejectPlexFlags(values);
+    if ((appleTv || imdb || letterboxd || trakt || plex) && format !== undefined) throw new UserError(`--format does not apply to \`import ${file}\``);
     if (!appleTv && timeout !== undefined) throw new UserError('--timeout only applies to `import apple-tv`');
     if (format !== undefined && !(FORMATS as readonly string[]).includes(format)) {
       throw new UserError(`Unknown format "${format}" (expected ${FORMATS.join(', ')})`);
@@ -262,7 +268,7 @@ export const importCmd: Command = {
       timeoutMs = Math.round(secs * 1000);
     }
 
-    const plain = !trakt && !imdb && !letterboxd && !appleTv;
+    const plain = !trakt && !imdb && !letterboxd && !appleTv && !plex;
     // The other files of a Trakt export (account settings, other people,
     // comments, lists) are refused by name, before they are opened.
     if (plain && isExcludedTraktName(file)) {
@@ -298,6 +304,17 @@ export const importCmd: Command = {
     } else if (imdb) {
       noLbFlags();
       parsed = parseImdbFiles(ctx.db(), files, imdbOpts);
+    } else if (plex) {
+      if (imdbFlags) throw new UserError(IMDB_FLAGS_ONLY);
+      noLbFlags();
+      const res = await readPlexImport(ctx, values);
+      if (res.dryRun) return emitPlexDryRun(ctx, res);
+      if (!res.complete && bool(values, 'replace')) {
+        throw new UserError(
+          'The Plex listing may be incomplete (a library returned fewer movies than it reported, some movies could not be read, or a saved listing has no totals), so --replace could drop movies. Nothing was changed.',
+        );
+      }
+      parsed = res;
     } else if (letterboxd) {
       parsed = parseLetterboxdPaths(files, lbOpts);
     } else if (isDir(file) || looksLikeZip(readBytes(file))) {
@@ -323,8 +340,8 @@ export const importCmd: Command = {
     }
 
     // An empty IMDb export (only a header) is "no rows", never "delete everything".
-    if (parsed.format === 'imdb' && replace && parsed.records.length === 0) {
-      throw new UserError('Nothing to import from the IMDb file, so --replace would empty your library. Nothing was changed.');
+    if ((parsed.format === 'imdb' || parsed.format === 'plex') && replace && parsed.records.length === 0) {
+      throw new UserError(`Nothing to import from ${parsed.format === 'plex' ? 'Plex' : 'the IMDb file'}, so --replace would empty your library. Nothing was changed.`);
     }
     if (parsed.format === 'letterboxd' && replace && parsed.records.length === 0) {
       throw new UserError('Nothing to import from the Letterboxd export, so --replace would empty your library. Nothing was changed.');
@@ -339,7 +356,11 @@ export const importCmd: Command = {
     const dryRun = bool(values, 'dry-run');
     const summary = applyImport(db, parsed.records, { mode: replace ? 'replace' : 'merge', dryRun });
 
-    const extra = { ...(parsed.skippedByType ? { skippedByType: parsed.skippedByType } : {}), ...parsed.extra };
+    const extra = {
+      ...(parsed.skippedByType ? { skippedByType: parsed.skippedByType } : {}),
+      ...(parsed.plex ? { plex: parsed.plex } : {}),
+      ...parsed.extra,
+    };
     ctx.emit({ format: parsed.format, records: parsed.records.length, warnings: parsed.warnings, ...extra, ...summary }, () =>
       [
         dryRun ? `Dry run: nothing was changed. ${parsed.records.length} records (${parsed.format}).` : `Imported ${parsed.records.length} records (${parsed.format}).`,

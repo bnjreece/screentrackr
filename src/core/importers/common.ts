@@ -50,6 +50,14 @@ export interface ImportRecord {
    */
   fillOnly?: boolean;
   /**
+   * The record's title edition tag ("(Director's Cut)", or none) is the
+   * source's own record of which edition this is (Plex tracks each edition
+   * as its own item), so an item whose title carries a different tag, or a
+   * tag when the record has none, is another edition and never a candidate.
+   * At worst that adds an item; it never merges one edition into another.
+   */
+  editionStrict?: boolean;
+  /**
    * The source's own stable per-film ids, by kind (EXTERNAL_ID_KINDS), such
    * as `{ letterboxd: 'https://boxd.it/abc' }`. Like the Apple persistent id:
    * an item with the same id of a kind is that item whatever else differs, an
@@ -290,7 +298,7 @@ function foldGroup(group: ImportRecord[], warn: (message: string) => void): Impo
   set('watchedAt', latest);
   set('watchedAtSource', latest === undefined ? undefined : group.find((r) => r.watchedAt === latest)?.watchedAtSource);
 
-  for (const key of ['owned', 'ownedIfNew', 'fillOnly', 'fromTvApp', 'imdbIdExact', 'clearWatchedAtIfOwn'] as const) {
+  for (const key of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'fromTvApp', 'imdbIdExact', 'clearWatchedAtIfOwn'] as const) {
     const vs = group.map((r) => r[key]).filter((v): v is boolean => typeof v === 'boolean');
     set(key, vs.length ? vs.includes(true) : undefined);
   }
