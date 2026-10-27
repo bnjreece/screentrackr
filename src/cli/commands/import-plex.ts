@@ -45,7 +45,7 @@ export interface PlexParsed extends ParsedImport {
   notices: string[];
   plex: PlexCounts;
   dryRun: boolean;
-  /** False when a library returned fewer movies than it reported. */
+  /** False when a library returned fewer movies than it reported, or a saved listing can't show it is whole. */
   complete: boolean;
 }
 
@@ -107,7 +107,7 @@ export async function readPlexImport(ctx: Ctx, values: Values): Promise<PlexPars
   const url = str(values, 'url');
 
   let res: { records: ParsedImport['records']; warnings: string[]; notices: string[]; counts: PlexCounts };
-  let complete = true;
+  let complete: boolean;
   if (file !== undefined) {
     if (url !== undefined || sections || bool(values, 'include-other-videos') || bool(values, 'token-stdin')) {
       throw new UserError('--from-file reads a saved listing, so --url, --section, --include-other-videos and --token-stdin do not apply');
@@ -118,7 +118,9 @@ export async function readPlexImport(ctx: Ctx, values: Values): Promise<PlexPars
     } catch (err) {
       throw new UserError(`Could not read ${file}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
     }
-    res = mapPlexItems(parsePlexDump(text), mapOpts);
+    const dump = parsePlexDump(text);
+    res = mapPlexItems(dump.movies, mapOpts);
+    complete = dump.complete;
   } else {
     const token = readToken(values);
     const read = await readPlexLibrary({

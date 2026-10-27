@@ -66,7 +66,11 @@ beforeAll(() => {
       },
     }),
   );
-  writeFileSync(join(tmp, 'empty.json'), JSON.stringify({ MediaContainer: { size: 0, Metadata: [] } }));
+  writeFileSync(join(tmp, 'empty.json'), JSON.stringify({ MediaContainer: { size: 0, totalSize: 0, Metadata: [] } }));
+  writeFileSync(
+    join(tmp, 'partial.json'),
+    JSON.stringify({ MediaContainer: { size: 1, totalSize: 500, Metadata: [{ ratingKey: '1', type: 'movie', title: 'Lantern Season', year: 1978 }] } }),
+  );
 });
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -134,6 +138,10 @@ describe('import plex', () => {
     const r = run(['--home', home, 'import', 'plex', '--from-file', join(tmp, 'empty.json'), '--replace']);
     expect(r.code).toBe(1);
     expect(r.stderr).toMatch(/Nothing to import from Plex/);
+    expect(count(home)).toBe(2);
+    const partial = run(['--home', home, 'import', 'plex', '--from-file', join(tmp, 'partial.json'), '--replace']);
+    expect(partial.code).toBe(1);
+    expect(partial.stderr).toMatch(/may be incomplete/);
     expect(count(home)).toBe(2);
   });
 });

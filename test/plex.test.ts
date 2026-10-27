@@ -243,6 +243,25 @@ describe('reading the server', () => {
     expect(noTotal.complete).toBe(true);
   });
 
+  it('marks a listing incomplete when overlapping pages reach the total by position but miss movies', async () => {
+    const [a, b, c] = ['a', 'b', 'c'].map((k) => ({ ...lanternSeason, ratingKey: k, title: `Invented Film ${k}` }));
+    const pages = [[a, b], [b, c]];
+    const { fetch } = fakeFetch({ sections: SECTIONS.slice(0, 1), movies: {} });
+    let n = 0;
+    const overlapping = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname !== '/library/sections/3/all') return fetch(input, init);
+      const page = pages[n++] ?? [];
+      return new Response(JSON.stringify({ MediaContainer: { size: page.length, totalSize: 4, Metadata: page } }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    const res = await readPlexLibrary({ url: SERVER, token: TOKEN, clientId: 'c', version: 't', fetch: overlapping, pageSize: 2 });
+    expect(res.records).toHaveLength(3);
+    expect(res.complete).toBe(false);
+    expect(res.warnings.join('\n')).toMatch(/3 of 4/);
+  });
+
   it('keeps paging past a short page when the server caps the page size and gives no total', async () => {
     const many = Array.from({ length: 5 }, (_, i) => ({ ...lanternSeason, ratingKey: `k${i}`, title: `Invented Film ${i}` }));
     const res = await read({ sections: SECTIONS.slice(0, 1), movies: { '3': many }, serverPageSize: 2, noTotal: true }, { pageSize: 4 });
@@ -486,17 +505,70 @@ describe('mapping Plex movies', () => {
     ]);
     expect(res.records.map((r) => r.sourceRuntimeMin)).toEqual([null, 100, 140]);
   });
+
+  it('never folds editions named only in the title, or films whose title years differ', () => {
+    const editions = map([
+      { ...glassHarbor2009, title: 'The Glass Harbor (Theatrical)', viewCount: 0, userRating: undefined },
+      { ...glassHarbor2009, ratingKey: 'e2', title: 'The Glass Harbor (Extended Edition)' },
+    ]);
+    expect(editions.records.map((r) => [r.sourceTitle, r.status ?? null, r.myRating ?? null])).toEqual([
+      ['The Glass Harbor (Theatrical)', null, null],
+      ['The Glass Harbor (Extended Edition)', 'watched', 7],
+    ]);
+    const years = map([
+      { ...glassHarbor2009, title: 'The Glass Harbor (1978)' },
+      { ...glassHarbor2009, ratingKey: 'y2', title: 'The Glass Harbor (2009)', viewCount: 0, userRating: undefined },
+    ]);
+    expect(years.records).toHaveLength(2);
+  });
+
+  it('folds by every year in a group, not only the first', () => {
+    const res = map([
+      { ...glassHarbor2009, year: 2000 },
+      { ...glassHarbor2009, ratingKey: 'y1', year: 1999 },
+      { ...glassHarbor2009, ratingKey: 'y2', year: 2001 },
+    ]);
+    expect(res.records.map((r) => r.sourceYear)).toEqual([2000, 2001]);
+  });
+
+  it('counts a movie in several libraries once when looking for a bulk-marked day', () => {
+    const copies = [0, 1, 2].map((i) => ({ ...glassHarbor2009, ratingKey: `c${i}` }));
+    const others = Array.from({ length: 6 }, (_, i) => ({
+      ...lanternSeason,
+      ratingKey: `o${i}`,
+      title: `Invented Film ${i}`,
+      viewCount: 1,
+      lastViewedAt: noon(`2022-0${i + 1}-15`),
+    }));
+    const res = map([...copies, ...others]);
+    expect(res.records[0]?.watchedAt).toBe('2024-06-10');
+    expect(res.warnings.join('\n')).not.toMatch(/same day/);
+  });
 });
 
 describe('a saved listing (--from-file)', () => {
   it('reads one container, an array of containers, or a bare list', () => {
     const one = JSON.stringify({ MediaContainer: { size: 1, Metadata: [glassHarbor2009] } });
     const many = JSON.stringify([{ MediaContainer: { Metadata: [glassHarbor2009] } }, { MediaContainer: { Metadata: [lanternSeason] } }]);
-    expect(parsePlexDump(one)).toHaveLength(1);
-    expect(parsePlexDump(many)).toHaveLength(2);
-    expect(parsePlexDump(JSON.stringify([lanternSeason]))).toHaveLength(1);
+    expect(parsePlexDump(one)).toMatchObject({ movies: [glassHarbor2009], complete: false });
+    expect(parsePlexDump(many).movies).toHaveLength(2);
+    expect(parsePlexDump(JSON.stringify([lanternSeason]))).toMatchObject({ movies: [lanternSeason], complete: false });
     expect(() => parsePlexDump('<MediaContainer/>')).toThrow(ImportError);
     expect(() => parsePlexDump('{"hello":1}')).toThrow(/Plex listing/);
+  });
+
+  it('is complete only when every library holds as many distinct movies as its saved total', () => {
+    const page = (offset: number, ms: PlexMetadata[], totalSize: number, librarySectionID: number | string = 3) => ({
+      MediaContainer: { offset, size: ms.length, totalSize, librarySectionID, Metadata: ms },
+    });
+    const a = { ...lanternSeason, ratingKey: 'a' };
+    const b = { ...lanternSeason, ratingKey: 'b' };
+    const c = { ...lanternSeason, ratingKey: 'c' };
+    expect(parsePlexDump(JSON.stringify(page(0, [a, b], 2))).complete).toBe(true);
+    expect(parsePlexDump(JSON.stringify(page(0, [a], 500))).complete).toBe(false);
+    expect(parsePlexDump(JSON.stringify([page(0, [a, b], 3), page(2, [c], 3)])).complete).toBe(true);
+    expect(parsePlexDump(JSON.stringify([page(0, [a, b], 3), page(1, [b], 3)])).complete).toBe(false);
+    expect(parsePlexDump(JSON.stringify([page(0, [a], 1, 3), page(0, [b], 2, '7')])).complete).toBe(false);
   });
 });
 

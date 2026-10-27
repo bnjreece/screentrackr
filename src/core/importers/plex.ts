@@ -26,7 +26,7 @@
  * - Plex's own ids (ratingKey, plex:// guid) are not stored: a ratingKey is
  *   per server and per file, and a guid changes when the owner fixes a match.
  */
-import { normalizeTitle } from '../normalize.js';
+import { normalizeTitle, titleEditionTag, titleSuffixYear } from '../normalize.js';
 import { cleanTconst, cleanText, cleanYear, foldRecords, ImportError, type ImportRecord, type ParsedImport } from './common.js';
 
 export interface PlexTag {
@@ -232,36 +232,28 @@ export function mapPlexItems(items: PlexMetadata[], opts: PlexMapOptions = {}): 
   if (rounded) warnings.push(`${rounded} Plex rating${rounded === 1 ? ' was' : 's were'} not a whole number and ${rounded === 1 ? 'was' : 'were'} rounded`);
   if (outOfRange) warnings.push(`${outOfRange} Plex rating${outOfRange === 1 ? ' was' : 's were'} out of range (0 to 10) and left out`);
 
-  // Bulk-marked watched: one calendar day holding a large share of the dated
-  // watched movies is the day they were marked, not watched.
-  const dated = out.filter((o) => o.rec.watchedAt);
-  const byDay = new Map<string, number>();
-  for (const o of dated) byDay.set(o.rec.watchedAt as string, (byDay.get(o.rec.watchedAt as string) ?? 0) + 1);
-  for (const [day, n] of byDay) {
-    if (n >= BULK_MIN && n > dated.length * BULK_SHARE) {
-      for (const o of dated) if (o.rec.watchedAt === day) delete o.rec.watchedAt;
-      warnings.push(`${n} movies were last watched on the same day (${day}), which looks like a bulk "mark as watched"; they stay watched, without that date`);
-    }
-  }
-
   // One film in two movie libraries is one item. Records fold only when they
   // agree on everything that tells films and editions apart: the IMDb hint
-  // (unchecked, so never enough alone), the edition name, the normalized
-  // title, the year (within one) and the runtime (within 3 minutes). A
+  // (unchecked, so never enough alone), the edition (Plex's name and the
+  // title's edition tag), the normalized title, the year (a "(YYYY)" in the
+  // title first, then the year field; within one of every year in the group)
+  // and the runtime (within 3 minutes of every runtime in the group). A
   // missing year or runtime only folds with another missing one.
   const groupOf = new Map<ImportRecord, string>();
-  const groups = new Map<string, { year: number | null; runtimes: (number | null)[] }[]>();
+  const groups = new Map<string, { years: (number | null)[]; runtimes: (number | null)[] }[]>();
   const close = (a: number | null, b: number | null, tol: number) => (a === null || b === null ? a === b : Math.abs(a - b) <= tol);
   for (const o of out) {
     if (!o.rec.imdbIdHint) continue;
-    const base = `imdb:${o.rec.imdbIdHint}|${o.edition}|${normalizeTitle(o.rec.sourceTitle)}`;
-    const year = o.rec.sourceYear ?? null;
+    const t = o.rec.sourceTitle;
+    const base = `imdb:${o.rec.imdbIdHint}|${o.edition}|${titleEditionTag(t)}|${normalizeTitle(t)}`;
+    const year = titleSuffixYear(t) ?? o.rec.sourceYear ?? null;
     const list = groups.get(base) ?? [];
-    let idx = list.findIndex((g) => close(g.year, year, 1) && g.runtimes.every((rt) => close(rt, o.runtime, 3)));
+    let idx = list.findIndex((g) => g.years.every((y) => close(y, year, 1)) && g.runtimes.every((rt) => close(rt, o.runtime, 3)));
     if (idx < 0) {
-      list.push({ year, runtimes: [] });
+      list.push({ years: [], runtimes: [] });
       idx = list.length - 1;
     }
+    list[idx]?.years.push(year);
     list[idx]?.runtimes.push(o.runtime);
     groups.set(base, list);
     groupOf.set(o.rec, `${base}#${idx}`);
@@ -271,28 +263,70 @@ export function mapPlexItems(items: PlexMetadata[], opts: PlexMapOptions = {}): 
     (r) => groupOf.get(r),
     (w) => warnings.push(w),
   );
+
+  // Bulk-marked watched: one calendar day holding a large share of the dated
+  // watched movies (each counted once, after folding) is the day they were
+  // marked, not watched.
+  const dated = records.filter((r) => r.watchedAt);
+  const byDay = new Map<string, number>();
+  for (const r of dated) byDay.set(r.watchedAt as string, (byDay.get(r.watchedAt as string) ?? 0) + 1);
+  for (const [day, n] of byDay) {
+    if (n >= BULK_MIN && n > dated.length * BULK_SHARE) {
+      for (const r of dated) if (r.watchedAt === day) delete r.watchedAt;
+      warnings.push(`${n} movies were last watched on the same day (${day}), which looks like a bulk "mark as watched"; they stay watched, without that date`);
+    }
+  }
   return { records, warnings, counts, notices: [] };
 }
 
+export interface PlexDump {
+  movies: PlexMetadata[];
+  /**
+   * True only when every saved container reports a total and holds that many
+   * distinct movies per library. A bare array of items, or a container
+   * without a total, can't show that nothing is missing.
+   */
+  complete: boolean;
+}
+
 /** Movies from saved listing JSON: one MediaContainer response, an array of them, or a bare array of items. */
-export function parsePlexDump(text: string): PlexMetadata[] {
+export function parsePlexDump(text: string): PlexDump {
   let data: unknown;
   try {
     data = JSON.parse(text.replace(/^\uFEFF/, '')) as unknown;
   } catch {
     throw new ImportError('The file is not JSON. Save Plex listings as JSON (request them with Accept: application/json).');
   }
-  const fromContainer = (x: unknown): PlexMetadata[] | null => {
+  const containerOf = (x: unknown): Record<string, unknown> | null => {
     if (x === null || typeof x !== 'object' || Array.isArray(x)) return null;
     const mc = (x as { MediaContainer?: unknown }).MediaContainer ?? x;
-    const meta = (mc as { Metadata?: unknown } | null)?.Metadata;
-    return Array.isArray(meta) ? (meta as PlexMetadata[]) : null;
+    return mc !== null && typeof mc === 'object' && Array.isArray((mc as { Metadata?: unknown }).Metadata) ? (mc as Record<string, unknown>) : null;
   };
-  const one = fromContainer(data);
-  if (one) return one;
-  if (Array.isArray(data)) {
-    if (data.every((x) => fromContainer(x) !== null)) return data.flatMap((x) => fromContainer(x) as PlexMetadata[]);
-    if (data.every((x) => x !== null && typeof x === 'object' && !Array.isArray(x) && 'type' in x)) return data as PlexMetadata[];
+  const one = containerOf(data);
+  const containers = one
+    ? [one]
+    : Array.isArray(data) && data.length > 0 && data.every((x) => containerOf(x) !== null)
+      ? data.map((x) => containerOf(x) as Record<string, unknown>)
+      : null;
+  if (containers) {
+    // Coverage per library: distinct movies saved against the reported total.
+    const seen = new Map<string, Set<string>>();
+    const totals = new Map<string, number>();
+    let complete = true;
+    containers.forEach((mc, i) => {
+      const key = cleanText(mc.librarySectionID) ?? cleanText(mc.librarySectionUUID) ?? `#${i}`;
+      const total = num(mc.totalSize);
+      if (total === null) complete = false;
+      else totals.set(key, Math.max(totals.get(key) ?? 0, total));
+      const keys = seen.get(key) ?? new Set<string>();
+      (mc.Metadata as PlexMetadata[]).forEach((m, j) => keys.add(cleanText(m?.ratingKey) ?? `${i}:${j}`));
+      seen.set(key, keys);
+    });
+    for (const [key, total] of totals) if ((seen.get(key)?.size ?? 0) < total) complete = false;
+    return { movies: containers.flatMap((mc) => mc.Metadata as PlexMetadata[]), complete };
+  }
+  if (Array.isArray(data) && data.every((x) => x !== null && typeof x === 'object' && !Array.isArray(x) && 'type' in x)) {
+    return { movies: data as PlexMetadata[], complete: false };
   }
   throw new ImportError('Expected a saved Plex listing: { "MediaContainer": { "Metadata": [...] } }, an array of those, or an array of items.');
 }
@@ -446,15 +480,18 @@ async function listMovies(
     // The server may ignore the requested size or not page at all: advance by
     // what came back, and stop at the reported total, or (with no total) on
     // an empty page or one with nothing new, never on a merely short page.
-    if (meta.length === 0 || fresh === 0) {
+    // Either way, the distinct movies read must reach the reported total
+    // (overlapping pages can reach it by position while missing movies).
+    const done = (): { movies: PlexMetadata[]; complete: boolean } => {
       if (total !== null && out.length < total) {
         warnings.push(`"${section.title}" returned fewer movies than it reported (${out.length} of ${total})`);
         return { movies: out, complete: false };
       }
       return { movies: out, complete: true };
-    }
+    };
+    if (meta.length === 0 || fresh === 0) return done();
     start += meta.length;
-    if (total !== null && start >= total) return { movies: out, complete: true };
+    if (total !== null && start >= total) return done();
   }
 }
 

@@ -147,7 +147,9 @@ export const importCmd: Command = {
       const res = await readPlexImport(ctx, values);
       if (res.dryRun) return emitPlexDryRun(ctx, res);
       if (!res.complete && bool(values, 'replace')) {
-        throw new UserError('Plex returned fewer movies than it reported, so --replace would drop the rest. Nothing was changed.');
+        throw new UserError(
+          'The Plex listing may be incomplete (a library returned fewer movies than it reported, or a saved listing has no totals), so --replace could drop movies. Nothing was changed.',
+        );
       }
       parsed = res;
     } else {
