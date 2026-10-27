@@ -291,6 +291,8 @@ export function updateItem(db: Db, id: number, patch: ItemPatch): LibraryItem {
       throw new LibraryError(`Invalid watched date "${patch.watchedAt}" (expected YYYY-MM-DD or an ISO date-time)`);
     }
     set('watched_at', v);
+    // A date the user sets (or clears) is theirs: no import may clear it later.
+    set('watched_at_source', null);
   }
 
   if (patch.myRating !== undefined) {

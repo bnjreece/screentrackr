@@ -152,8 +152,11 @@ function validate(records: ImportRecord[]): void {
     if (r.statusIfNew !== undefined && !(STATUSES as readonly string[]).includes(r.statusIfNew)) {
       fail(`invalid new-item status "${String(r.statusIfNew)}"`);
     }
-    for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'imdbIdExact'] as const) {
+    for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'imdbIdExact', 'clearWatchedAtIfOwn'] as const) {
       if (r[flag] !== undefined && typeof r[flag] !== 'boolean') fail(`${flag} must be true or false`);
+    }
+    if (r.watchedAtSource != null && !(ITEM_SOURCES as readonly string[]).includes(r.watchedAtSource)) {
+      fail(`invalid watched date source "${String(r.watchedAtSource)}"`);
     }
     if (r.externalIds != null) {
       if (typeof r.externalIds !== 'object' || Array.isArray(r.externalIds)) fail('externalIds must be an object');
@@ -290,8 +293,15 @@ function canonicalIds(ids: ExternalIds | null | undefined): ExternalIds {
 
 const sameIds = (a: ExternalIds, b: ExternalIds): boolean => JSON.stringify(canonicalIds(a)) === JSON.stringify(canonicalIds(b));
 
-/** An item as the import sees it: its row plus its external ids. */
-type PoolItem = LibraryItem & { externalIds: ExternalIds };
+/**
+ * An item as the import sees it: its row plus its external ids and the source
+ * that set its watched date (null: the user, or unknown; see schema V3).
+ */
+type PoolItem = LibraryItem & { externalIds: ExternalIds; watchedAtSource: string | null };
+
+/** The library columns plus watched_at_source, for the import's own reads. */
+const POOL_COLUMNS = `${LIBRARY_COLUMNS}, watched_at_source`;
+type PoolRow = LibraryRow & { watched_at_source: string | null };
 
 function externalIdsOf(db: Db): Map<number, ExternalIds> {
   const rows = db.sql.prepare('SELECT item_id, kind, value FROM item_external_ids ORDER BY item_id, kind').all() as {
@@ -308,8 +318,14 @@ function externalIdsOf(db: Db): Map<number, ExternalIds> {
   return out;
 }
 
-const existing = (db: Db, raw: LibraryItem, ids: ExternalIds | undefined): Existing => {
-  const item: PoolItem = { ...raw, applePersistentId: blankToNull(raw.applePersistentId), externalIds: canonicalIds(ids) };
+const existing = (db: Db, row: PoolRow, ids: ExternalIds | undefined): Existing => {
+  const raw = rowToItem(row);
+  const item: PoolItem = {
+    ...raw,
+    applePersistentId: blankToNull(raw.applePersistentId),
+    externalIds: canonicalIds(ids),
+    watchedAtSource: raw.watchedAt === null ? null : row.watched_at_source,
+  };
   return { item, norm: normalizeTitle(item.sourceTitle), identity: identityOf(db, item) };
 };
 
@@ -466,11 +482,12 @@ function resolveMergeTarget(pool: Existing[], r: ImportRecord, t: Target, rec: I
   return { kind: 'update', id: first.item.id };
 }
 
-/** Whether two items hold the same data (external ids included), local ids and dates aside. */
+/** Whether two items hold the same data (external ids included), local ids, dates and the watched date's source aside. */
 function sameContent(a: PoolItem, b: PoolItem): boolean {
   const content = (x: PoolItem) => {
     const rest: Partial<PoolItem> = { ...x };
     delete rest.id;
+    delete rest.watchedAtSource;
     delete rest.addedAt;
     delete rest.updatedAt;
     return JSON.stringify(rest);
@@ -512,6 +529,12 @@ const newStatus = (r: ImportRecord) => r.status ?? r.statusIfNew ?? 'queue';
 /** Whether a new item is owned: the record's owned, else its new-item value, else owned. */
 const newOwned = (r: ImportRecord) => r.owned ?? r.ownedIfNew ?? true;
 
+/**
+ * The source recorded for a date this record writes: a JSON v1 record's own
+ * `watchedAtSource` (null when the file gives none), else the record's source.
+ */
+const dateSource = (r: ImportRecord): string | null => (r.watchedAtSource !== undefined ? r.watchedAtSource : r.source);
+
 /** mergeChanges marks an external id the item lacks with this column prefix; it is written to item_external_ids. */
 const EXT_PREFIX = 'ext:';
 
@@ -522,7 +545,8 @@ type Col = [column: string, value: string | number | null];
 
 /**
  * The column changes needed to merge `r` into `cur`. Absent or null fields
- * never clear anything. `ownedIfNew` and `statusIfNew` are never read here
+ * never clear anything, except that `clearWatchedAtIfOwn` clears a watched
+ * date the record's own source set. `ownedIfNew` and `statusIfNew` are never read here
  * (they are for new items only), and with `fillOnly` the descriptive fields
  * only fill blanks. External ids the item lacks come back as `ext:<kind>`.
  */
@@ -541,7 +565,12 @@ function mergeChanges(cur: PoolItem, r: ImportRecord, t: Target): Col[] {
   keep('collection', 'collection', true);
   keep('owned', 'owned');
   keep('sourceOwnedRaw', 'source_owned_raw');
-  keep('watchedAt', 'watched_at');
+  if (r.watchedAt != null && r.watchedAt !== cur.watchedAt) {
+    out.push(['watched_at', r.watchedAt], ['watched_at_source', dateSource(r)]);
+  } else if (r.watchedAt == null && r.clearWatchedAtIfOwn === true && cur.watchedAt !== null && cur.watchedAtSource === r.source) {
+    // The one clear an import may make: a date this same source set earlier.
+    out.push(['watched_at', null], ['watched_at_source', null]);
+  }
   keep('myRating', 'my_rating');
   keep('notes', 'notes', true);
   keep('applePersistentId', 'apple_persistent_id');
@@ -581,10 +610,10 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
   records = records.map(cleanRecord);
   const backupPath = opts.mode === 'replace' ? writeBackup(db) : null;
 
-  const select = db.sql.prepare(`SELECT ${LIBRARY_COLUMNS} FROM library_items WHERE id = ?`);
+  const select = db.sql.prepare(`SELECT ${POOL_COLUMNS} FROM library_items WHERE id = ?`);
   const insert = db.sql.prepare(
-    `INSERT INTO library_items (tconst, source_title, source_year, source_director, source_runtime_min, source_genre, collection, owned, source_owned_raw, status, watched_era, watched_at, my_rating, notes, match_status, match_score, source, apple_persistent_id, added_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${NOW_SQL}), ${NOW_SQL})`,
+    `INSERT INTO library_items (tconst, source_title, source_year, source_director, source_runtime_min, source_genre, collection, owned, source_owned_raw, status, watched_era, watched_at, watched_at_source, my_rating, notes, match_status, match_score, source, apple_persistent_id, added_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${NOW_SQL}), ${NOW_SQL})`,
   );
   const addExternalId = db.sql.prepare('INSERT OR IGNORE INTO item_external_ids (item_id, kind, value) VALUES (?, ?, ?)');
   const clearCandidates = db.sql.prepare('DELETE FROM match_candidates WHERE item_id = ?');
@@ -598,9 +627,9 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
     if (opts.mode === 'replace') db.sql.exec('DELETE FROM match_candidates; DELETE FROM item_external_ids; DELETE FROM library_items;');
 
     const ids = externalIdsOf(db);
-    const pool: Existing[] = (
-      db.sql.prepare(`SELECT ${LIBRARY_COLUMNS} FROM library_items ORDER BY id`).all() as unknown as LibraryRow[]
-    ).map((row) => existing(db, rowToItem(row), ids.get(row.id)));
+    const pool: Existing[] = (db.sql.prepare(`SELECT ${POOL_COLUMNS} FROM library_items ORDER BY id`).all() as unknown as PoolRow[]).map(
+      (row) => existing(db, row, ids.get(row.id)),
+    );
     // One import claims each existing item for at most one record, and an item
     // it adds is never a candidate for a later record: N records that fit N
     // items claim N distinct items, and a record left with no unclaimed
@@ -657,6 +686,7 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
           status,
           status === 'watched' ? (r.watchedEra ?? null) : null,
           r.watchedAt ?? null,
+          r.watchedAt != null ? dateSource(r) : null,
           r.myRating ?? null,
           r.notes ?? null,
           t.matchStatus,
@@ -686,7 +716,7 @@ export function applyImport(db: Db, records: ImportRecord[], opts: { mode: 'merg
             ext[c.slice(EXT_PREFIX.length)] = String(v);
           }
           if (changes.some(([c]) => c === 'match_status' || c === 'tconst')) storeCandidates(found.item.id, t);
-          Object.assign(found, existing(db, rowToItem(select.get(found.item.id) as unknown as LibraryRow), ext));
+          Object.assign(found, existing(db, select.get(found.item.id) as unknown as PoolRow, ext));
           summary.updated++;
         } else {
           summary.unchanged++;

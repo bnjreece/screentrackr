@@ -65,6 +65,7 @@ Only `sourceTitle` is required on import. Every other field may be omitted or `n
 | `status` | string or null | `"queue"` | One of `queue`, `priority`, `someday`, `watched`. When omitted, a new item goes in the queue and a merge keeps the existing status and watched era. |
 | `watchedEra` | string or null | null | When you watched it: `long-ago`, `2010s` or `2020s`. Only kept when `status` is `watched`. |
 | `watchedAt` | string or null | null | Watched date, `YYYY-MM-DD`. |
+| `watchedAtSource` | string, omitted when none | none | Which import source set `watchedAt` (one of the `source` values, such as `trakt`). Written only when an import set the date; omitted when you set it yourself (`set`, MCP `update_movie`), when a JSON v1 file gave it without a `watchedAtSource`, or when the date predates this field. Kept on import, so a round trip keeps it. Ignored when `watchedAt` is null. See [Clearing a watched date](#clearing-a-watched-date). |
 | `myRating` | integer or null | null | Your rating, a whole number from 1 to 10. |
 | `notes` | string or null | null | Free text notes. |
 | `matchStatus` | string | | `matched`, `ambiguous`, `unmatched` or `manual`. On import, a linked item keeps `manual` if it was manual and is otherwise `matched`; an unlinked item is matched again. |
@@ -87,6 +88,10 @@ screentrackr import my-library.json --replace  # back up, then replace the libra
 A merge adds new items and updates the fields an item has. A field that is missing or `null` never clears what your library already has, `status` and `owned` included, so a file with only titles and notes adds notes without touching statuses.
 
 Importers for sources that are not your own copy of a movie (`import imdb`) go further, with the same rules below for which item a record is. Their owned flag (not owned) and their watchlist status (`queue`) apply only to a movie the import adds, so they never change an existing item's owned flag and never move it out of `watched`. Their title year, directors, runtime, genres, collection and notes only fill fields an existing item has blank. A rating still means watched, and still updates the item's rating.
+
+### Clearing a watched date
+
+Imports never clear a field, with one exception. An importer may ask to clear the watched date of the item a record updates when the record has no date of its own, and it is cleared only when the same source set that date: the item's `watchedAtSource` equals the record's `source`. This is for a source whose earlier export carried dates that a later, complete export shows were not real (a partial Trakt export that dated plays which a full export reveals as one bulk "mark watched" second). Status, watched era and rating stay as they are. A date you set yourself, a date another source set, and a date a JSON v1 file gave without `watchedAtSource` are never cleared by an import. "The same source" means the same kind of source (`trakt`), not the same account. Items whose dates were set before this was recorded have no `watchedAtSource`, so no import clears them.
 
 ### Which item a record updates
 
