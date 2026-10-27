@@ -95,6 +95,25 @@ describe('plain import of a ZIP or folder', () => {
     writeFileSync(disguised, Buffer.from([0x50, 0x4b, 0x03, 0x04]));
     truncateSync(disguised, 1024 * 1024 * 1024 + 1);
     await expect(importCmd.run(ctx, [disguised], {})).rejects.toThrow(/too large to read/);
+    // A big archive named like a CSV export file, and an oversized loose file.
+    const named = join(tmp, 'watched.csv');
+    writeFileSync(named, Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    truncateSync(named, 1024 * 1024 * 1024 + 1);
+    await expect(importCmd.run(ctx, ['letterboxd', named], {})).rejects.toThrow(/too large to read/);
+    await expect(importCmd.run(ctx, [named], { format: 'letterboxd' })).rejects.toThrow(/too large to read/);
+    await expect(importCmd.run(ctx, [named], {})).rejects.toThrow(/too large to read/);
+    await expect(importCmd.run(ctx, ['imdb', named], {})).rejects.toThrow(/too large to read/);
+    const loose = join(tmp, 'ratings.csv');
+    writeFileSync(loose, 'Date,Name,Year,Letterboxd URI,Rating\n');
+    truncateSync(loose, 256 * 1024 * 1024 + 1);
+    await expect(importCmd.run(ctx, ['letterboxd', loose], {})).rejects.toThrow(/too large to read/);
+    await expect(importCmd.run(ctx, ['plex'], { 'from-file': loose })).rejects.toThrow(/too large to read/);
+    // An unzipped export folder with an oversized file in it.
+    const dir = join(tmp, 'lb-folder');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'watched.csv'), 'Date,Name,Year,Letterboxd URI\n');
+    truncateSync(join(dir, 'watched.csv'), 64 * 1024 * 1024 + 1);
+    await expect(importCmd.run(ctx, [dir], {})).rejects.toThrow(/too large to read/);
   });
 
   it('checks the flags shared by plex and jellyfin', async () => {

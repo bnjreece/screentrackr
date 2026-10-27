@@ -32,10 +32,21 @@ import { emitPlexDryRun, PLEX_OPTIONS, readPlexImport, rejectPlexFlags, type Ple
 
 const IMDB_FLAGS_ONLY = '--as, --collection, --include-type, --checkin-dates and --notes-from-description only apply to IMDb files';
 
-function readBytes(file: string): Buffer {
+/** The largest single file (a CSV, a JSON export, a paste) an import reads. */
+const MAX_IMPORT_FILE_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Read a whole file, after checking its size, so an oversized file (or a
+ * ZIP renamed to .csv) is refused before it is read. `maxBytes` is
+ * MAX_ZIP_BYTES for a whole export archive.
+ */
+function readBytes(file: string, maxBytes = MAX_IMPORT_FILE_BYTES): Buffer {
   try {
+    const size = statSync(file).size;
+    if (size > maxBytes) throw new UserError(`${basename(file)}: too large to read (over ${maxBytes} bytes). Nothing was imported.`);
     return readFileSync(file);
   } catch (err) {
+    if (err instanceof UserError) throw err;
     throw new UserError(`Could not read ${file}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
   }
 }
@@ -132,12 +143,10 @@ function archiveKind(path: string): 'letterboxd' | 'trakt' | null {
     };
     walk(path, 0);
   } else {
-    // Only the first bytes are read to tell a ZIP, and its size is checked
+    // Only the first bytes are read to tell a ZIP; readBytes checks its size
     // before the archive is read to list it.
     if (!looksLikeZip(readHead(path)) && !/\.zip$/i.test(path)) return null;
-    const size = statSync(path).size;
-    if (size > MAX_ZIP_BYTES) throw new UserError(`${basename(path)}: too large to read (over ${MAX_ZIP_BYTES} bytes). Nothing was imported.`);
-    names = listZip(readBytes(path))
+    names = listZip(readBytes(path, MAX_ZIP_BYTES))
       .filter((e) => !e.unsafe)
       .map((e) => basename(e.name.replace(/\\/g, '/')));
   }
@@ -166,10 +175,7 @@ function parseLetterboxdPaths(paths: string[], opts: LetterboxdOptions, detected
   const whole = isDir(first) || (!first.toLowerCase().endsWith('.csv') && looksLikeZip(readHead(first)));
   if (whole) {
     if (paths.length > 1) throw new UserError('Pass one Letterboxd export (a ZIP or a folder) at a time, or its CSV files');
-    if (!isDir(first) && statSync(first).size > MAX_ZIP_BYTES) {
-      throw new UserError(`${basename(first)}: too large to read (over ${MAX_ZIP_BYTES} bytes). Nothing was imported.`);
-    }
-    return fromLetterboxd(parseLetterboxdExport(isDir(first) ? folderSource(first) : zipSource(readBytes(first)), opts));
+    return fromLetterboxd(parseLetterboxdExport(isDir(first) ? folderSource(first) : zipSource(readBytes(first, MAX_ZIP_BYTES)), opts));
   }
   if (paths.some(isDir)) throw new UserError('Pass one Letterboxd export (a ZIP or a folder) at a time, or its CSV files');
   // Decide from the paths alone which files to open, so a glob over the

@@ -3,7 +3,7 @@
  * the per-install client id). The importer itself is core/importers/plex.ts.
  */
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import type { Db } from '../../core/db.js';
 import type { ParsedImport } from '../../core/importers/common.js';
 import {
@@ -18,6 +18,9 @@ import {
 import { bool, str, strs, type OptionSpec, type Values } from '../command.js';
 import type { Ctx } from '../context.js';
 import { UserError } from '../context.js';
+
+/** The largest saved listing `--from-file` reads. */
+const MAX_LISTING_BYTES = 256 * 1024 * 1024;
 
 export const PLEX_OPTIONS: Record<string, OptionSpec> = {
   url: { type: 'string', value: '<server>', description: `plex only: your Plex Media Server (default ${PLEX_DEFAULT_URL})` },
@@ -118,8 +121,11 @@ export async function readPlexImport(ctx: Ctx, values: Values): Promise<PlexPars
     }
     let text: string;
     try {
+      // A saved listing larger than this is not one Plex wrote; refuse it before reading.
+      if (statSync(file).size > MAX_LISTING_BYTES) throw new UserError(`${file}: too large to read (over ${MAX_LISTING_BYTES} bytes)`);
       text = readFileSync(file, 'utf8');
     } catch (err) {
+      if (err instanceof UserError) throw err;
       throw new UserError(`Could not read ${file}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
     }
     const dump = parsePlexDump(text);

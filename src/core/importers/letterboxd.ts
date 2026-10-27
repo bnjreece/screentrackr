@@ -622,7 +622,10 @@ export function folderSource(dir: string): LetterboxdSource {
     paths,
     read: (p) => {
       const full = join(dir, ...p.split('/'));
-      if (!lstatSync(full).isFile()) throw new ImportError(`${p} is not a file`);
+      const st = lstatSync(full);
+      if (!st.isFile()) throw new ImportError(`${p} is not a file`);
+      // The same cap as one ZIP entry, checked before the file is read.
+      if (st.size > DEFAULT_ZIP_LIMITS.maxEntryBytes) throw new ImportError(`${p}: too large to read (over ${DEFAULT_ZIP_LIMITS.maxEntryBytes} bytes)`);
       return readFileSync(full);
     },
   };
