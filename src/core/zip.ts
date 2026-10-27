@@ -71,6 +71,8 @@ export function listZip(buf: Buffer): ZipEntry[] {
       if (flags & 1) fail(`${name}: encrypted ZIP entries are not supported`);
       if (csize === 0xffffffff || usize === 0xffffffff || localOffset === 0xffffffff) fail(`${name}: ZIP64 entries are not supported`);
       if (usize > maxBytes) fail(`${name}: too large (${usize} bytes, the limit is ${maxBytes})`);
+      // A stored entry is copied as is, so its sizes must agree and fit before anything is allocated.
+      if (method === 0 && (csize !== usize || csize > maxBytes)) fail(`${name}: the ZIP entry is damaged (sizes disagree)`);
       if (localOffset + 30 > buf.length || buf.readUInt32LE(localOffset) !== LOCAL) fail(`${name}: the ZIP entry is damaged`);
       const start = localOffset + 30 + buf.readUInt16LE(localOffset + 26) + buf.readUInt16LE(localOffset + 28);
       if (start + csize > buf.length) fail(`${name}: the ZIP entry is damaged`);

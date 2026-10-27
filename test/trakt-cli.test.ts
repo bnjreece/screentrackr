@@ -77,6 +77,27 @@ describe('import trakt', () => {
     expect(JSON.parse(merge.stdout)).toMatchObject({ exportErrors: 1, incomplete: ['watchlist'] });
   });
 
+  it('refuses --replace for a damaged page, for single files and for a plain import of one page; allows it for a whole export', () => {
+    const damaged = run(['import', 'trakt', zip({ ...exportFiles(), 'watched-history-2.json': '[{' }), '--replace']);
+    expect(damaged.code).toBe(1);
+    expect(damaged.stderr).toMatch(/incomplete \(watch history\)/);
+    const dir = join(tmp, `pages-${++n}`);
+    mkdirSync(dir);
+    const page = join(dir, 'watched-history.json');
+    writeFileSync(page, '[]');
+    const single = run(['import', 'trakt', page, '--replace']);
+    expect(single.code).toBe(1);
+    expect(single.stderr).toMatch(/Nothing to import|not the whole export/);
+    writeFileSync(page, toBytes(exportFiles())['watched-history.json'] as Buffer);
+    expect(run(['import', 'trakt', page, '--replace']).stderr).toMatch(/not the whole export/);
+    const plain = run(['import', page, '--format', 'trakt', '--replace']);
+    expect(plain.code).toBe(1);
+    expect(plain.stderr).toMatch(/not the whole export/);
+    const whole = run(['import', 'trakt', zip(exportFiles()), '--replace', '--json']);
+    expect(whole.code, whole.stderr).toBe(0);
+    expect(JSON.parse(whole.stdout)).toMatchObject({ added: 6 });
+  });
+
   it('refuses a ZIP with nothing it reads, flags for other importers, and --keep-bulk-dates elsewhere', () => {
     const empty = run(['import', 'trakt', zip({ 'user-settings.json': {} })]);
     expect(empty.code).toBe(1);
@@ -88,8 +109,13 @@ describe('import trakt', () => {
   });
 
   it('a plain import detects a single Trakt page', () => {
-    const path = join(tmp, `ratings-${++n}.json`);
+    const dir = join(tmp, `page-${++n}`);
+    mkdirSync(dir);
+    const path = join(dir, 'ratings-movies.json');
     writeFileSync(path, toBytes(exportFiles())['ratings-movies.json'] as Buffer);
+    const renamed = join(dir, 'my-ratings.json');
+    writeFileSync(renamed, toBytes(exportFiles())['ratings-movies.json'] as Buffer);
+    expect(run(['import', renamed]).stderr).toMatch(/under their export names/);
     const r = run(['import', path, '--json']);
     expect(r.code, r.stderr).toBe(0);
     expect(JSON.parse(r.stdout)).toMatchObject({ format: 'trakt', added: 2 });

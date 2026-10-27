@@ -3,7 +3,7 @@
  * to, or single files from it). Every title, person, username and id in the
  * fixtures is invented.
  */
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -127,10 +127,25 @@ describe('which files are read', () => {
     expect(single.files.map((f) => f.name)).toEqual(['ratings-movies.json', 'lists-watchlist.json']);
   });
 
-  it('refuses a single file that is not one of the files it reads', () => {
-    const dir = folder(exportFiles());
-    expect(() => readTraktExport([join(dir, 'user-settings.json')])).toThrow(ImportError);
+  it('refuses a single file that is not one of the files it reads, without opening it', () => {
+    const dir = folder({ ...exportFiles(), 'lists-favorites.json': (exportFiles()['lists-watchlist.json'] as unknown[]).slice(0, 1) });
+    // Unreadable files: an attempt to open one would fail with EACCES instead.
+    chmodSync(join(dir, 'user-settings.json'), 0o000);
+    chmodSync(join(dir, 'lists-favorites.json'), 0o000);
+    expect(() => readTraktExport([join(dir, 'user-settings.json')])).toThrow(/not a Trakt export file/);
+    expect(() => readTraktExport([join(dir, 'lists-favorites.json')])).toThrow(/not a Trakt export file/);
     expect(() => readTraktExport([join(dir, 'watched-playback.json')])).toThrow(/not a Trakt export file/);
+    // A folder read never opens them either.
+    expect(readTraktExport([dir]).files).toHaveLength(6);
+    chmodSync(join(dir, 'user-settings.json'), 0o600);
+    chmodSync(join(dir, 'lists-favorites.json'), 0o600);
+  });
+
+  it('says whether the input was a whole export or files picked from one', () => {
+    const dir = folder(exportFiles());
+    expect(readTraktExport([dir]).wholeExport).toBe(true);
+    expect(readTraktExport([zipFile(exportFiles())]).wholeExport).toBe(true);
+    expect(readTraktExport([join(dir, 'ratings-movies.json')]).wholeExport).toBe(false);
   });
 
   it('refuses an archive or folder with nothing it reads, or the same file twice', () => {
@@ -163,6 +178,14 @@ describe('the ZIP reader', () => {
     expect(entry?.name).toBe('ratings-movies.json');
     expect(entry?.read(10_000).length).toBe(5000);
     expect(() => entry?.read(1000)).toThrow(/too large/i);
+  });
+
+  it('checks a stored entry\'s sizes before copying it', () => {
+    const zip = makeZip({ 'ratings-movies.json': Buffer.alloc(5000, 0x20) }, { store: true });
+    const cd = zip.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    zip.writeUInt32LE(10, cd + 24); // claim 10 bytes uncompressed
+    const [entry] = listZip(zip);
+    expect(() => entry?.read(100)).toThrow(/sizes disagree/);
   });
 
   it('rejects a corrupted entry', () => {
@@ -325,6 +348,30 @@ describe('parsing', () => {
     expect(res.warnings.join('\n')).toMatch(/lists-watchlist\.json/);
   });
 
+  it('a timestamp past year 9998 is an unknown date, never a broken one', () => {
+    const res = parse({ 'watched-history.json': [{ id: 1, watched_at: '+010000-01-01T00:00:00.000Z', action: 'watch', type: 'movie', movie: GLASS }] });
+    expect(rec(res.records, 101)).toMatchObject({ status: 'watched' });
+    expect(rec(res.records, 101)).not.toHaveProperty('watchedAt');
+    expect(() => applyImport(db, res.records, { mode: 'merge' })).not.toThrow();
+  });
+
+  it('a damaged page marks its part of the export incomplete', () => {
+    const res = parse({ ...exportFiles(), 'watched-history-2.json': '[{"id":', 'collection-movies.json': { rows: [] } });
+    expect(res.incomplete.sort()).toEqual(['collection', 'watch history']);
+    expect(res.warnings.join('\n')).toMatch(/watched-history-2\.json.*incomplete/);
+  });
+
+  it('a later row fills a year or IMDb id an earlier row lacked', () => {
+    const bare = { title: 'Harbor Lights', year: null, ids: { trakt: 702, imdb: null } };
+    const full = { title: 'Harbor Lights', year: 2020, ids: { trakt: 702, imdb: 'tt9000777' } };
+    const res = parse({
+      'watched-history.json': [{ id: 1, watched_at: '2023-01-01T12:00:00.000Z', action: 'watch', type: 'movie', movie: bare }],
+      'ratings-movies.json': [{ rated_at: '2023-01-02T00:00:00.000Z', rating: 7, type: 'movie', movie: full }],
+    });
+    expect(res.records).toHaveLength(1);
+    expect(res.records[0]).toMatchObject({ sourceYear: 2020, imdbIdHint: 'tt9000777', status: 'watched', myRating: 7 });
+  });
+
   it('ignores a malformed IMDb id but keeps the movie', () => {
     const res = parse({
       'ratings-movies.json': [{ rated_at: '2023-01-01T00:00:00.000Z', rating: 6, type: 'movie', movie: { title: 'Odd Id', year: 2003, ids: { trakt: 55, imdb: 'nm123' } } }],
@@ -384,14 +431,19 @@ describe('partial exports (_errors.json)', () => {
 });
 
 describe('detecting a single Trakt file in a plain import', () => {
-  it('recognizes a Trakt array by its movie.ids.trakt shape and reads it by name or shape', () => {
+  it('recognizes a Trakt array by its movie.ids.trakt shape, and reads it only under its export name', () => {
     const files = toBytes(exportFiles());
     const ratings = (files['ratings-movies.json'] as Buffer).toString('utf8');
     expect(detectFormat(ratings, 'ratings-movies.json')).toBe('trakt');
     expect(detectFormat(ratings, 'renamed.json')).toBe('trakt');
-    const res = parseImportDetailed(ratings, undefined, 'renamed.json');
+    const res = parseImportDetailed(ratings, undefined, 'ratings-movies.json');
     expect(res.format).toBe('trakt');
     expect(res.records.map((r) => r.sourceTitle).sort()).toEqual(['Dune Static', 'The Glass Harbor']);
+    // A favorites list has the watchlist's shape: never read as one.
+    const watchlist = (files['lists-watchlist.json'] as Buffer).toString('utf8');
+    expect(() => parseImportDetailed(watchlist, undefined, 'lists-favorites.json')).toThrow(/only .* are read/);
+    expect(() => parseImportDetailed(ratings, undefined, 'renamed.json')).toThrow(ImportError);
+    expect(() => parseImportDetailed(ratings, 'trakt')).toThrow(ImportError);
     expect(() => parseImportDetailed('[{"progress":1,"movie":{"title":"X","ids":{"trakt":1}}}]', 'trakt', 'watched-playback.json')).toThrow(
       ImportError,
     );
@@ -453,6 +505,21 @@ describe('applying a Trakt import', () => {
     expect(byTitle('Lantern Road')[0]).toMatchObject({ owned: true, status: 'someday' });
     // A second run is a no-op.
     expect(applyImport(db, parse(exportFiles()).records, { mode: 'merge' })).toMatchObject({ added: 0, updated: 0 });
+  });
+
+  it('a year from a later file keeps a same-titled older film untouched', () => {
+    applyImport(db, [{ sourceTitle: 'Harbor Lights', sourceYear: 1980, status: 'queue', myRating: 4, owned: true, source: 'paste' }], { mode: 'merge' });
+    const bare = { title: 'Harbor Lights', year: null, ids: { trakt: 702, imdb: null } };
+    const full = { title: 'Harbor Lights', year: 2020, ids: { trakt: 702, imdb: null } };
+    const res = parse({
+      'watched-history.json': [{ id: 1, watched_at: '2023-01-01T12:00:00.000Z', action: 'watch', type: 'movie', movie: bare }],
+      'ratings-movies.json': [{ rated_at: '2023-01-02T00:00:00.000Z', rating: 9, type: 'movie', movie: full }],
+    });
+    expect(applyImport(db, res.records, { mode: 'merge' })).toMatchObject({ added: 1, updated: 0 });
+    expect(items().map((i) => [i.sourceYear, i.status, i.myRating])).toEqual([
+      [1980, 'queue', 4],
+      [2020, 'watched', 9],
+    ]);
   });
 
   it('a Trakt id tells two films with the same title apart, and finds a film again after a retitle', () => {

@@ -36,19 +36,30 @@ interface Parsed extends ParsedImport {
   skippedByType?: Record<string, number>;
   /** Extra fields for `--json` output. */
   extra?: Record<string, unknown>;
+  /** Why `--replace` is refused for this input, if it is. */
+  replaceRefused?: string;
 }
 
 /** `import trakt`: Trakt's data export ZIP, its folder, or single files from it. Only allow-listed files are read. */
 function parseTraktExport(paths: string[], keepBulkDates: boolean): Parsed {
-  const { files, skippedFiles } = readTraktExport(paths);
+  const { files, skippedFiles, wholeExport } = readTraktExport(paths);
   const res = parseTrakt(files, { keepBulkDates });
   const notices = [...res.notices];
   if (skippedFiles) notices.push(`Left ${skippedFiles} other file${skippedFiles === 1 ? '' : 's'} in the export unread (only movie history, ratings, watchlist and collection are read).`);
+  const replaceRefused =
+    res.records.length === 0
+      ? 'Nothing to import from the Trakt export, so --replace would empty your library. Nothing was changed.'
+      : !wholeExport
+        ? 'Single files from a Trakt export are not the whole export, so --replace could drop movies. Nothing was changed. Merge them instead, or pass the export ZIP or folder.'
+        : res.exportErrors > 0 || res.incomplete.length > 0
+          ? `The Trakt export is incomplete (${res.incomplete.join(', ') || 'see its _errors.json'}), so --replace could drop movies. Nothing was changed. Merge it instead, or export again on Trakt.`
+          : undefined;
   return {
     format: 'trakt',
     records: res.records,
     warnings: res.warnings,
     notices,
+    ...(replaceRefused ? { replaceRefused } : {}),
     extra: { skippedTv: res.skippedTv, skippedFiles, exportErrors: res.exportErrors, incomplete: res.incomplete, bulkDated: res.bulkDated },
   };
 }
@@ -181,13 +192,12 @@ export const importCmd: Command = {
     if (parsed.format === 'imdb' && replace && parsed.records.length === 0) {
       throw new UserError('Nothing to import from the IMDb file, so --replace would empty your library. Nothing was changed.');
     }
-    // A partial Trakt export would drop the movies Trakt failed to export.
-    if (trakt && replace && (parsed.records.length === 0 || Number(parsed.extra?.exportErrors ?? 0) > 0)) {
-      throw new UserError(
-        parsed.records.length === 0
-          ? 'Nothing to import from the Trakt export, so --replace would empty your library. Nothing was changed.'
-          : `The Trakt export is incomplete (${(parsed.extra?.incomplete as string[] | undefined)?.join(', ') || 'see its _errors.json'}), so --replace could drop movies. Nothing was changed. Merge it instead, or export again on Trakt.`,
-      );
+    // A partial Trakt export, or a page of one, would drop the movies it lacks.
+    if (replace && parsed.format === 'trakt') {
+      const reason =
+        parsed.replaceRefused ??
+        (trakt ? undefined : 'One page of a Trakt export is not the whole export, so --replace could drop movies. Nothing was changed. Use `screentrackr import trakt <the export ZIP>`.');
+      if (reason) throw new UserError(reason);
     }
 
     const db = ctx.db();
