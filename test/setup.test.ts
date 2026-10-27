@@ -4,9 +4,9 @@
  * from dist/ (built by global-setup) against a cache pre-filled with the
  * synthetic fixtures, so nothing is downloaded.
  */
-import { spawn, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir, uptime } from 'node:os';
+import { spawn } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -17,7 +17,7 @@ import { DATASETS, datasetFile } from '../src/core/catalog/download.js';
 import { catalogReady, openDb, type Db } from '../src/core/db.js';
 import { cacheDir } from '../src/core/home.js';
 import { getItem } from '../src/core/library.js';
-import { acquireSetupLock, IMDB_CREDIT, matchingPending, SETUP_LOCK_FILE, SetupBusyError, setupLockHolder, type SetupResult } from '../src/core/setup.js';
+import { acquireSetupLock, IMDB_CREDIT, matchingPending, SetupBusyError, setupRunning, type SetupResult } from '../src/core/setup.js';
 import { createMcpServer, SETUP_HINT } from '../src/mcp/server.js';
 import { inProcessRunner, PROGRESS_LINES, SetupJob, workerRunner, type SetupRunner } from '../src/mcp/setup-job.js';
 
@@ -56,12 +56,6 @@ afterEach(async () => {
 function seedCache(h: string): void {
   mkdirSync(cacheDir(h), { recursive: true });
   for (const d of DATASETS) copyFileSync(join(FIXTURES, datasetFile(d)), join(cacheDir(h), datasetFile(d)));
-}
-
-/** A pid that is certainly not running: a child that has already exited. */
-function deadPid(): number {
-  const r = spawnSync(process.execPath, ['-e', '0']);
-  return r.pid as number;
 }
 
 async function connect(job?: SetupJob): Promise<(name: string, args?: Record<string, unknown>) => Promise<ToolResult>> {
@@ -126,74 +120,64 @@ const FAKE_RESULT: SetupResult = {
   credit: IMDB_CREDIT,
 };
 
+/** Run `code` in a child Node process with `acquireSetupLock` and `home` in scope; resolves with its stdout once it exits. */
+function child(code: string, opts: { onStdout?: (out: string, kill: () => void) => void } = {}): Promise<string> {
+  const script = [`const { acquireSetupLock } = await import(process.argv[1]);`, `const home = process.argv[2];`, code].join('\n');
+  const mod = pathToFileURL(join(ROOT, 'dist', 'core', 'setup.js')).href;
+  return new Promise<string>((resolve) => {
+    const c = spawn(process.execPath, ['--input-type=module', '-e', script, mod, home]);
+    let out = '';
+    c.stdout.on('data', (d) => {
+      out += d;
+      opts.onStdout?.(out, () => c.kill('SIGKILL'));
+    });
+    c.on('exit', () => resolve(out));
+  });
+}
+
 describe('setup lock', () => {
   it('is exclusive while held and free once released', () => {
     const release = acquireSetupLock(home);
-    expect(setupLockHolder(home)).toBe(process.pid);
+    expect(setupRunning(home)).toBe(process.pid);
     expect(() => acquireSetupLock(home)).toThrow(SetupBusyError);
+    expect(() => acquireSetupLock(home)).toThrow(`Setup is already running (process ${process.pid})`);
     release();
-    expect(existsSync(join(home, SETUP_LOCK_FILE))).toBe(false);
-    expect(setupLockHolder(home)).toBeNull();
+    release(); // Twice is harmless.
+    expect(setupRunning(home)).toBeUndefined();
     acquireSetupLock(home)();
   });
 
-  it('replaces a lock left by a dead process, one from before a reboot, an empty one and a garbled one', () => {
-    const path = join(home, SETUP_LOCK_FILE);
-    const booted = Date.now() - uptime() * 1000;
-    for (const content of [
-      JSON.stringify({ pid: deadPid(), token: 'x', bootedAt: booted }),
-      JSON.stringify({ pid: process.pid, token: 'x', bootedAt: booted - 24 * 60 * 60 * 1000 }),
-      '',
-      '{not json',
-    ]) {
-      writeFileSync(path, content);
-      expect(setupLockHolder(home)).toBeNull();
-      const release = acquireSetupLock(home);
-      expect(setupLockHolder(home)).toBe(process.pid);
-      release();
-      expect(existsSync(path)).toBe(false);
-    }
-    // No temporary or moved-aside files are left behind.
-    expect(readdirSync(home)).toEqual([]);
-  });
-
-  it('keeps a live lock however old it is', () => {
-    const booted = Date.now() - uptime() * 1000;
-    writeFileSync(join(home, SETUP_LOCK_FILE), JSON.stringify({ pid: process.pid, token: 'x', bootedAt: booted }));
-    expect(setupLockHolder(home)).toBe(process.pid);
-    expect(() => acquireSetupLock(home)).toThrow(SetupBusyError);
-  });
-
-  it('release removes only its own lock', () => {
-    const path = join(home, SETUP_LOCK_FILE);
+  it('is exclusive across processes', async () => {
     const release = acquireSetupLock(home);
-    // Someone else's lock replaced ours (ours was judged abandoned, say).
-    rmSync(path);
-    const other = JSON.stringify({ pid: process.pid, token: 'other', bootedAt: Date.now() - uptime() * 1000 });
-    writeFileSync(path, other);
-    release();
-    expect(readFileSync(path, 'utf8')).toBe(other);
+    try {
+      const out = await child("try { acquireSetupLock(home); process.stdout.write('won'); } catch (e) { process.stdout.write(e.name); }");
+      expect(out).toBe('SetupBusyError');
+    } finally {
+      release();
+    }
+    const out = await child("acquireSetupLock(home)(); process.stdout.write('won');");
+    expect(out).toBe('won');
   });
 
-  it('only one of many simultaneous contenders gets it, also over an abandoned lock', async () => {
-    const path = join(home, SETUP_LOCK_FILE);
-    writeFileSync(path, JSON.stringify({ pid: deadPid(), token: 'stale', bootedAt: Date.now() - uptime() * 1000 }));
-    const script = [
-      'const { acquireSetupLock } = await import(process.argv[1]);',
-      "try { acquireSetupLock(process.argv[2]); process.stdout.write('won'); setTimeout(() => {}, 1500); }",
-      'catch (e) { process.stdout.write(e.name); }',
-    ].join('\n');
-    const mod = pathToFileURL(join(ROOT, 'dist', 'core', 'setup.js')).href;
+  it('is freed by the operating system when its holder is killed', async () => {
+    let killedWhileHeld = false;
+    await child("globalThis.held = acquireSetupLock(home); process.stdout.write('held'); setInterval(() => {}, 1000);", {
+      onStdout: (out, kill) => {
+        if (out === 'held') {
+          killedWhileHeld = setupRunning(home) !== undefined;
+          kill();
+        }
+      },
+    });
+    expect(killedWhileHeld).toBe(true);
+    expect(setupRunning(home)).toBeUndefined();
+    expect(() => acquireSetupLock(home)()).not.toThrow();
+  });
+
+  it('only one of many simultaneous contenders gets it', async () => {
     const results = await Promise.all(
-      Array.from(
-        { length: 8 },
-        () =>
-          new Promise<string>((resolve) => {
-            const c = spawn(process.execPath, ['--input-type=module', '-e', script, mod, home]);
-            let out = '';
-            c.stdout.on('data', (d) => (out += d));
-            c.on('exit', () => resolve(out));
-          }),
+      Array.from({ length: 8 }, () =>
+        child("try { globalThis.held = acquireSetupLock(home); process.stdout.write('won'); setTimeout(() => {}, 1500); } catch (e) { process.stdout.write(e.name); }"),
       ),
     );
     expect(results.filter((r) => r === 'won')).toHaveLength(1);
@@ -212,7 +196,7 @@ describe('SetupJob', () => {
     expect(started.state).toBe('running');
     expect(m.calls).toEqual([{ home, refresh: false, withCast: false, includeTvMovies: true, matchOnly: false }]);
     // The job holds the setup lock while the work runs.
-    expect(setupLockHolder(home)).toBe(process.pid);
+    expect(setupRunning(home)).toBe(process.pid);
     for (let i = 1; i <= PROGRESS_LINES + 3; i++) m.progress(`step ${i}`);
     clock += 42_000;
     const mid = job.status();
@@ -226,7 +210,7 @@ describe('SetupJob', () => {
     m.resolve(FAKE_RESULT);
     await job.settled();
     expect(job.status()).toMatchObject({ state: 'succeeded', result: FAKE_RESULT, error: null, elapsedSeconds: 42 });
-    expect(setupLockHolder(home)).toBeNull();
+    expect(setupRunning(home)).toBeUndefined();
   });
 
   it('reports a failure and can be started again', async () => {
@@ -236,7 +220,7 @@ describe('SetupJob', () => {
     m.reject(new Error('Download of title.basics.tsv.gz failed: HTTP 503'));
     await job.settled();
     expect(job.status()).toMatchObject({ state: 'failed', error: 'Download of title.basics.tsv.gz failed: HTTP 503' });
-    expect(setupLockHolder(home)).toBeNull();
+    expect(setupRunning(home)).toBeUndefined();
 
     job.start({ ...FULL, refresh: true });
     expect(job.status()).toMatchObject({ state: 'running', error: null, options: { refresh: true } });
@@ -252,7 +236,7 @@ describe('SetupJob', () => {
     job.start(FULL);
     await job.settled();
     expect(job.status()).toMatchObject({ state: 'failed', error: 'no worker' });
-    expect(setupLockHolder(home)).toBeNull();
+    expect(setupRunning(home)).toBeUndefined();
   });
 
   it('stop() ends a running setup and releases the lock', async () => {
@@ -262,7 +246,7 @@ describe('SetupJob', () => {
     await job.stop();
     expect(m.stops()).toBe(1);
     expect(job.status().state).toBe('failed');
-    expect(setupLockHolder(home)).toBeNull();
+    expect(setupRunning(home)).toBeUndefined();
     await job.stop(); // Idle: nothing to do.
   });
 
@@ -298,7 +282,7 @@ describe('SetupJob', () => {
     await job.settled();
     expect(job.status()).toMatchObject({ state: 'failed', progress: ['Downloading'] });
     expect(job.status().error).toMatch(/exit code 7/);
-    expect(setupLockHolder(home)).toBeNull();
+    expect(setupRunning(home)).toBeUndefined();
     expect(() => acquireSetupLock(home)()).not.toThrow();
   });
 
@@ -310,7 +294,7 @@ describe('SetupJob', () => {
     expect(job.isRunning).toBe(true);
     await job.stop();
     expect(job.status().state).toBe('failed');
-    expect(setupLockHolder(home)).toBeNull();
+    expect(setupRunning(home)).toBeUndefined();
   });
 });
 
@@ -421,7 +405,7 @@ describe('setup_catalog and catalog_status tools', () => {
     expect(status.structuredContent, text(status)).toMatchObject({ catalog: { ready: true, withCast: true }, setup: { state: 'succeeded' } });
     expect(text(status)).toContain(IMDB_CREDIT);
     expect(catalogReady(db!)).toBe(true);
-    expect(existsSync(join(home, SETUP_LOCK_FILE))).toBe(false);
+    expect(setupRunning(home)).toBeUndefined();
     // Setup refreshed matching, and left the status alone.
     expect(getItem(db!, itemId)).toMatchObject({ tconst: 'tt9000003', matchStatus: 'matched', status: 'watched' });
 
