@@ -31,13 +31,45 @@ const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
 
 /**
- * The key a name is unique by: NFC, trimmed and case-folded. Folding goes
- * through upper case and back (so "ß" meets "SS"), writes a sharp s left
- * over (from a capital sharp s) as "ss", and treats a final sigma as a
- * sigma, which lowercasing alone does not.
+ * Unicode full case folding beyond lowercasing: the letters whose fold
+ * differs from their lowercase (CaseFolding.txt, status C and F, for the
+ * scripts a list name is likely to use).
+ */
+const FOLD: Record<string, string> = {
+  '\u00df': 'ss', // sharp s (a capital sharp s lowercases to it)
+  '\u017f': 's', // long s
+  '\u03c2': '\u03c3', // final sigma
+  '\u03d0': '\u03b2',
+  '\u03d1': '\u03b8',
+  '\u03d5': '\u03c6',
+  '\u03d6': '\u03c0',
+  '\u03f0': '\u03ba',
+  '\u03f1': '\u03c1',
+  '\u03f5': '\u03b5',
+  '\u1e9b': '\u1e61',
+  '\u1e9e': 'ss',
+  '\ufb00': 'ff',
+  '\ufb01': 'fi',
+  '\ufb02': 'fl',
+  '\ufb03': 'ffi',
+  '\ufb04': 'ffl',
+  '\ufb05': 'st',
+  '\ufb06': 'st',
+};
+const FOLD_RE = new RegExp(`[${Object.keys(FOLD).join('')}]`, 'gu');
+
+/**
+ * The key a name is unique by: NFC, trimmed and case-folded (lowercase, then
+ * the letters whose fold differs, such as a sharp s to "ss" and a final
+ * sigma to a sigma). A dotless i stays its own letter, as in Unicode folding.
  */
 export function normListName(name: string): string {
-  return name.normalize('NFC').trim().toUpperCase().toLowerCase().replace(/\u03c2/g, '\u03c3').replace(/\u00df/g, 'ss').normalize('NFC');
+  return name
+    .normalize('NFC')
+    .trim()
+    .toLowerCase()
+    .replace(FOLD_RE, (c) => FOLD[c] as string)
+    .normalize('NFC');
 }
 
 /** A list name as stored: NFC and trimmed. Throws LibraryError when empty, too long or holding control characters. */

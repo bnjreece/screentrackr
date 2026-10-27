@@ -50,6 +50,10 @@ describe('lists', () => {
     expect(normListName('ΟΣ')).toBe(normListName('οσ'));
     expect(normListName('Straße')).toBe(normListName('STRASSE'));
     expect(normListName('STRA\u1E9EE')).toBe(normListName('Straße'));
+    // Folding, not upper-then-lower: a dotless i is its own letter; a long s is an s.
+    expect(normListName('\u0131')).not.toBe(normListName('i'));
+    expect(normListName('I')).toBe(normListName('i'));
+    expect(normListName('\u017Fun')).toBe(normListName('Sun'));
   });
 
   it('creates, finds case-insensitively, and refuses a duplicate', () => {
