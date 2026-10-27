@@ -14,7 +14,7 @@ import { parseTrakt, readTraktExport, traktFileOf, type TraktFile, type TraktOpt
 import { LIBRARY_COLUMNS, rowToItem, type LibraryRow } from '../src/core/library.js';
 import type { LibraryItem } from '../src/core/types.js';
 import { listZip } from '../src/core/zip.js';
-import { COMETS, DUNE, exportFiles, GLASS, makeZip, SALT, toBytes } from './fixtures/trakt-export.js';
+import { COMETS, COPPER, DUNE, exportFiles, GLASS, makeZip, SALT, toBytes } from './fixtures/trakt-export.js';
 
 const IMDB = join(import.meta.dirname, 'fixtures', 'imdb');
 
@@ -438,6 +438,43 @@ describe('parsing', () => {
     expect(res.records.every((r) => r.watchedAt === undefined)).toBe(true);
     const nine = parse({ 'watched-history.json': plays, 'watched-movies.json': [...others.slice(0, 4), ...again] });
     expect(nine.bulkDated).toBe(0);
+  });
+
+  it('every distinct history play counts toward a bulk log, also several of one movie', () => {
+    const at = '2017-07-07T07:07:07.000Z';
+    const plays = bulkPlays(9, at);
+    const res = parse({ 'watched-history.json': [...plays, { ...(plays[0] as object), id: 99_999 }] });
+    expect(res.bulkDated).toBe(9);
+  });
+
+  it('history, ratings and watchlist rows must say they are a movie', () => {
+    const res = parse({
+      'watched-history.json': [{ id: 1, watched_at: '2023-01-01T12:00:00.000Z', action: 'watch', movie: GLASS }],
+      'ratings-movies.json': [{ rated_at: '2023-01-01T00:00:00.000Z', rating: 6, movie: SALT }],
+      'lists-watchlist.json': [{ rank: 1, id: 5, listed_at: '2024-01-01T00:00:00.000Z', notes: null, movie: DUNE }],
+      // These two files have no type.
+      'watched-movies.json': [{ plays: 1, last_watched_at: '2015-06-01T12:00:00.000Z', movie: COMETS }],
+      'collection-movies.json': [{ collected_at: '2020-01-01T00:00:00.000Z', movie: COPPER }],
+    });
+    expect(res.records.map((r) => r.sourceTitle).sort()).toEqual(['Copper Tide', 'Paper Comets']);
+    expect(res.warnings.filter((w) => /no row type/.test(w))).toHaveLength(3);
+  });
+
+  it('a deeply nested value in a row is described, never serialized, and the rest still imports', () => {
+    const deep = '['.repeat(12_000) + ']'.repeat(12_000);
+    const good = JSON.stringify({ rated_at: '2023-01-01T00:00:00.000Z', rating: 7, type: 'movie', movie: SALT });
+    const res = parseTrakt(
+      [
+        {
+          name: 'ratings-movies.json',
+          text: `[{"rated_at":"2023-01-01T00:00:00.000Z","rating":${deep},"type":"movie","movie":${JSON.stringify(GLASS)}},{"rated_at":"x","rating":6,"type":${deep},"movie":${JSON.stringify(DUNE)}},${good}]`,
+        },
+      ],
+      { timeZone: 'UTC' },
+    );
+    expect(res.records.map((r) => r.sourceTitle)).toEqual(['Salt & Signal']);
+    expect(res.warnings.join('\n')).toMatch(/rating a list/);
+    expect(res.warnings.join('\n')).toMatch(/unknown row type a list/);
   });
 
   it('a row with an unexpected type is skipped with a warning, not imported and not counted as TV', () => {

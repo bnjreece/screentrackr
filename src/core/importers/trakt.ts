@@ -199,6 +199,13 @@ export function readTraktExport(paths: string[]): TraktExport {
   return { files, skippedFiles };
 }
 
+/** A short, safe description of a value for a warning (never serializes a nested value). */
+function describe(v: unknown): string {
+  if (typeof v === 'string') return JSON.stringify(v.length > 60 ? `${v.slice(0, 60)}...` : v);
+  if (typeof v === 'number' || typeof v === 'boolean' || v === null || v === undefined) return String(v);
+  return Array.isArray(v) ? 'a list' : 'an object';
+}
+
 const yearOf = (v: unknown): number | null => (typeof v === 'number' && Number.isInteger(v) && v >= 1000 && v <= 9999 ? v : null);
 
 /** One movie, gathered across every file. */
@@ -322,15 +329,19 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   const accs = new Map<number, Acc>();
   const seenPlays = new Set<number>();
 
-  /** The movie a row is about, or null (TV, deleted, malformed: counted or warned). */
-  const movieOf = (row: unknown, where: string, deleted: { n: number }): Acc | null => {
+  /**
+   * The movie a row is about, or null (TV, deleted, malformed: counted or
+   * warned). History, ratings and watchlist rows carry a `type`, which must
+   * be `movie`; watched-movies and collection rows have none.
+   */
+  const movieOf = (row: unknown, where: string, deleted: { n: number }, typed: boolean): Acc | null => {
     if (!isObj(row)) {
       warnings.push(`${where}: not a Trakt row, skipped`);
       return null;
     }
-    if (row.type !== undefined && row.type !== 'movie') {
+    if (typed ? row.type !== 'movie' : row.type !== undefined && row.type !== 'movie') {
       if (row.type === 'episode' || row.type === 'show' || row.type === 'season') skippedTv++;
-      else warnings.push(`${where}: unknown row type ${JSON.stringify(row.type)}, skipped`);
+      else warnings.push(`${where}: ${row.type === undefined ? 'no row type' : `unknown row type ${describe(row.type)}`}, skipped`);
       return null;
     }
     const m = row.movie;
@@ -343,7 +354,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
     const ids = isObj(m) && isObj(m.ids) ? m.ids : {};
     const traktId = ids.trakt;
     if (!title || typeof traktId !== 'number' || !Number.isSafeInteger(traktId) || traktId <= 0) {
-      warnings.push(`${where}${title ? ` ("${title}")` : ''}: no title or Trakt id, skipped`);
+      warnings.push(`${where}${title ? ` (${describe(title)})` : ''}: no title or Trakt id, skipped`);
       return null;
     }
     let acc = accs.get(traktId);
@@ -391,7 +402,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
         const where = `${page.name} row ${i + 1}`;
         if (kind === 'watched-history') {
           // The movie first, so even a repeated row can fill a year or IMDb id.
-          const acc = movieOf(row, where, deleted);
+          const acc = movieOf(row, where, deleted, true);
           if (!acc) return;
           // A repeated play (the export can fetch past the last page) counts once.
           const id = (row as Row).id;
@@ -403,7 +414,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
         } else if (kind === 'watched-movies') {
           const plays = isObj(row) ? row.plays : undefined;
           if (typeof plays !== 'number' || !(plays > 0)) return;
-          const acc = movieOf(row, where, deleted);
+          const acc = movieOf(row, where, deleted, false);
           if (!acc) return;
           acc.wmPlays += plays;
           const last = playTime((row as Row).last_watched_at);
@@ -411,21 +422,21 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
         } else if (kind === 'ratings-movies') {
           const rating = isObj(row) ? row.rating : undefined;
           const valid = typeof rating === 'number' && Number.isInteger(rating) && rating >= 1 && rating <= 10;
-          if (!valid && isObj(row) && row.movie && (row.type === undefined || row.type === 'movie')) {
-            const t = isObj(row.movie) && typeof row.movie.title === 'string' ? ` ("${row.movie.title}")` : '';
-            warnings.push(`${where}${t}: rating ${JSON.stringify(rating)} is not a whole number from 1 to 10, skipped`);
+          if (!valid && isObj(row) && row.movie && row.type === 'movie') {
+            const t = isObj(row.movie) && typeof row.movie.title === 'string' ? ` (${describe(row.movie.title)})` : '';
+            warnings.push(`${where}${t}: rating ${describe(rating)} is not a whole number from 1 to 10, skipped`);
             return;
           }
-          const acc = movieOf(row, where, deleted);
+          const acc = movieOf(row, where, deleted, true);
           if (acc && valid) acc.ratings.push(rating);
         } else if (kind === 'lists-watchlist') {
-          const acc = movieOf(row, where, deleted);
+          const acc = movieOf(row, where, deleted, true);
           if (!acc) return;
           acc.watchlist = true;
           const notes = (row as Row).notes;
           if (acc.notes === null && typeof notes === 'string' && notes.trim()) acc.notes = notes.trim();
         } else {
-          const acc = movieOf(row, where, deleted);
+          const acc = movieOf(row, where, deleted, false);
           if (acc) acc.collected = true;
         }
       });
@@ -438,12 +449,20 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   // Bulk logs: 10 or more plays (or last-watched times) at the same second.
   const bulk = new Set<number>();
   if (!opts.keepBulkDates) {
-    // Each movie counts once per second, whether the time is a history play
-    // or watched-movies' last play (the same play often appears in both).
+    // Every distinct history play counts, plus watched-movies' last play
+    // when the movie has no history play at that second (the same play
+    // usually appears in both).
     const n = new Map<number, number>();
+    const bump = (sec: number) => n.set(sec, (n.get(sec) ?? 0) + 1);
     for (const a of accs.values()) {
-      const secs = new Set([...a.plays, a.wmLast].filter((t): t is number => t !== null).map((t) => Math.floor(t / 1000)));
-      for (const sec of secs) n.set(sec, (n.get(sec) ?? 0) + 1);
+      const secs = new Set<number>();
+      for (const t of a.plays) {
+        if (t === null) continue;
+        const sec = Math.floor(t / 1000);
+        secs.add(sec);
+        bump(sec);
+      }
+      if (a.wmLast !== null && !secs.has(Math.floor(a.wmLast / 1000))) bump(Math.floor(a.wmLast / 1000));
     }
     for (const [sec, c] of n) if (c >= BULK_PLAYS) bulk.add(sec);
   }
