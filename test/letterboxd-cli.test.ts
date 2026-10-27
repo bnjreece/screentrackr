@@ -101,10 +101,13 @@ describe('import letterboxd', () => {
     for (const f of closed) chmodSync(join(copy, f), 0o000);
     try {
       const all = ['watched.csv', 'ratings.csv', 'diary.csv', 'watchlist.csv', 'lists/my-blu-rays.csv', ...closed].map((f) => join(copy, f));
-      const r = run(['import', 'letterboxd', ...all, '--owned-list', 'my-blu-rays', '--json']);
-      expect(r.code, r.stderr).toBe(0);
-      expect(r.stderr).toMatch(/deleted\/ are never imported/);
-      expect(r.stderr).toMatch(/profile\.csv: not a file this import reads/);
+      const r = run(['import', 'letterboxd', ...all, '--owned-list', 'my-blu-rays', '--owned-list', 'profile', '--owned-list', 'comments', '--dry-run', '--json']);
+      expect(r.code, r.stderr).toBe(1); // lists/profile.csv is not in the export
+      expect(r.stderr).toMatch(/pass its file/);
+      const ok = run(['import', 'letterboxd', ...all, '--owned-list', 'my-blu-rays', '--json']);
+      expect(ok.code, ok.stderr).toBe(0);
+      expect(ok.stderr).toMatch(/deleted\/ are never imported/);
+      expect(ok.stderr).toMatch(/profile\.csv: not a file this import reads/);
       const db = openDb(home);
       try {
         const ferry = db.sql.prepare("SELECT status, watched_at AS w FROM library_items WHERE source_title = 'Night Ferry'").get() as { status: string; w: string | null };

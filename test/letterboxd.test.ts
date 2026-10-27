@@ -315,6 +315,25 @@ describe('loose files and detection', () => {
     expect(() => chooseLooseFiles(['profile.csv'])).toThrow(/None of the files/);
   });
 
+  it('admits a named list only from a lists/ folder, so a list name can never open a private file', () => {
+    expect(() => chooseLooseFiles(['x/profile.csv', 'x/comments.csv'], { ownedLists: ['profile', 'comments'] })).toThrow(/None of the files/);
+    expect(chooseLooseFiles(['x/profile.csv', 'x/lists/profile.csv', 'x/watched.csv'], { ownedLists: ['profile'] }).open).toEqual(['x/lists/profile.csv', 'x/watched.csv']);
+  });
+
+  it('takes the latest diary entry rating as is: a blank one never brings back an older rating', () => {
+    const res = parseLetterboxdFiles([
+      { name: 'watched.csv', text: 'Date,Name,Year,Letterboxd URI\n2024-01-01,Night Ferry,2002,https://boxd.it/zZ0n\n' },
+      {
+        name: 'diary.csv',
+        text: 'Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date\n2020-01-01,Night Ferry,2002,https://boxd.it/aB0000,1,,,2020-01-01\n2025-01-01,Night Ferry,2002,https://boxd.it/aB0001,,Yes,,2025-01-01\n',
+      },
+    ]);
+    expect(res.records[0]?.myRating).toBeUndefined();
+    applyImport(db, [{ sourceTitle: 'Night Ferry', sourceYear: 2002, status: 'watched', myRating: 9, source: 'paste' }], { mode: 'merge' });
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(item('Night Ferry')[0]?.myRating).toBe(9);
+  });
+
   it('matches a loose list file to --owned-list without case', () => {
     const res = parseLetterboxdFiles([{ name: 'My-Blu-Rays.csv', text: text('lists/my-blu-rays.csv') }], { ownedLists: ['my-blu-rays'] });
     expect(res.records.some((r) => r.owned === true)).toBe(true);

@@ -22,7 +22,8 @@
  *   (`statusIfNew`), so it never moves an existing item.
  * - Ratings are half stars from 0.5 to 5, stored times two (1 to 10), which
  *   is Letterboxd's own 10-point conversion. ratings.csv wins; the latest
- *   diary rating is used only for a film with no ratings row.
+ *   diary entry's rating (blank: none) is used only for a film with no
+ *   ratings row.
  * - The watched date and era come from the latest diary Watched Date only,
  *   never from watched.csv's Date (when the row was logged). When the diary
  *   was read and a watched film has no entry in it, the record asks to clear
@@ -383,8 +384,9 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
     } else rec.statusIfNew = 'queue';
 
     // ratings.csv decides when the film has a row there, even a blank one;
-    // only a film with no ratings row takes its latest diary rating.
-    const rating = f.ratingsRow ? f.rating : entries.find((e) => e.rating !== undefined)?.rating;
+    // only a film with no ratings row takes its latest diary entry's rating,
+    // and a blank one there means no rating, never an older entry's.
+    const rating = f.ratingsRow ? f.rating : entries[0]?.rating;
     if (rating !== undefined) rec.myRating = rating;
 
     if (opts.withReviews) {
@@ -493,8 +495,10 @@ export function chooseLooseFiles(paths: string[], opts: LetterboxdOptions = {}, 
       notices.push(`${path}: --no-watchlist, so it was not opened`);
       continue;
     }
-    if (byName && !LOOSE_NAMES.has(base) && !owned.has(base.replace(/\.csv$/, ''))) {
-      warnings.push(`${path}: not a file this import reads (watched.csv, ratings.csv, diary.csv, watchlist.csv, reviews.csv or a list named with --owned-list), so it was not opened`);
+    // A list counts only inside a lists/ folder, so --owned-list profile can never open profile.csv.
+    const namedList = parts[parts.length - 1]?.toLowerCase() === 'lists' && owned.has(base.replace(/\.csv$/, ''));
+    if (byName && !LOOSE_NAMES.has(base) && !namedList) {
+      warnings.push(`${path}: not a file this import reads (watched.csv, ratings.csv, diary.csv, watchlist.csv, reviews.csv or a lists/ file named with --owned-list), so it was not opened`);
       continue;
     }
     open.push(path);
