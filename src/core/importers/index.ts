@@ -41,7 +41,7 @@ import { isImdbHeader, parseImdb } from './imdb.js';
 import { isJsonV1, parseJsonV1 } from './json-v1.js';
 import { isLegacyExport, parseLegacy } from './legacy.js';
 import { isNeonRows, parseNeonRows } from './neon-legacy-rows.js';
-import { isTraktJson, parseTraktFile } from './trakt.js';
+import { isTraktJson, parseTraktFile, traktFileOf } from './trakt.js';
 
 export { FORMATS, ImportError, type ImportFormat, type ImportRecord, type ParsedImport };
 
@@ -65,7 +65,7 @@ export function detectFormat(text: string, filename?: string): ImportFormat {
     if (isJsonV1(data)) return 'json-v1';
     if (isLegacyExport(data)) return 'legacy';
     if (isNeonRows(data)) return 'neon-rows';
-    if (isTraktJson(data)) return 'trakt';
+    if (isTraktJson(data) || (Array.isArray(data) && filename && traktFileOf(filename))) return 'trakt';
     throw new ImportError(
       'Unrecognized JSON. Expected a ScreenTrackr export, an old web app export (movieList), old library rows ({ title, metadata }), or a page of a Trakt export.',
     );

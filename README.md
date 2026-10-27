@@ -98,7 +98,9 @@ screentrackr import trakt trakt-export-yourname.zip
 - **Ratings:** each movie gets your rating, a whole number from 1 to 10. A rating alone never marks a movie watched, so a new movie that is only rated (or only collected) arrives in the queue, and one you have keeps its status.
 - **Owned:** only your Trakt collection marks a movie owned. Nothing else in the export changes whether a movie is owned, and a new movie that is not in your collection is not owned.
 - All rows for one movie, across every file and page, become one movie. Trakt's movie id is kept, so importing a newer export updates the same movies, and importing the same export again changes nothing. Trakt's IMDb id is a match hint, checked against the catalog; the title and year only fill blanks. No Trakt catalog data (overviews, images, genres) is stored.
-- If the export could not fetch everything, Trakt lists that in `_errors.json`. Every entry is shown as a warning, saying which part (history, ratings, watchlist, collection) is incomplete, and so is a damaged file. Movies missing from it are left as they are. `--replace` only works with a whole export (the ZIP or its folder) that is complete; it is refused for an incomplete export and for single files. Single files are read only under their export names (such as `ratings-movies.json`), also by plain `screentrackr import`.
+- If the export could not fetch everything, Trakt lists that in `_errors.json`. Every entry is shown as a warning, saying which part (history, ratings, watchlist, collection) is incomplete, and so is a damaged file. Movies missing from it are left as they are.
+- A Trakt import only merges. An export can't show that it is complete (a missing file may mean you have none, or that it failed), so `--replace` is refused.
+- Single files are read only under their export names (such as `ratings-movies.json`), also by plain `screentrackr import`.
 
 ### ScreenTrackr JSON
 

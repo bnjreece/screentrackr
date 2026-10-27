@@ -44,7 +44,11 @@ export function listZip(buf: Buffer): ZipEntry[] {
     }
   }
   if (end < 0) fail('not a ZIP archive (or a damaged one)');
+  const disk = buf.readUInt16LE(end + 4);
+  const cdDisk = buf.readUInt16LE(end + 6);
+  const onDisk = buf.readUInt16LE(end + 8);
   const count = buf.readUInt16LE(end + 10);
+  if (disk !== 0 || cdDisk !== 0 || onDisk !== count) fail('multi-part ZIP archives are not supported');
   const cdSize = buf.readUInt32LE(end + 12);
   const cdOffset = buf.readUInt32LE(end + 16);
   if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) fail('ZIP64 archives are not supported');
@@ -64,8 +68,11 @@ export function listZip(buf: Buffer): ZipEntry[] {
     const extraLen = buf.readUInt16LE(p + 30);
     const commentLen = buf.readUInt16LE(p + 32);
     const localOffset = buf.readUInt32LE(p + 42);
-    const name = buf.toString('utf8', p + 46, p + 46 + nameLen);
-    p += 46 + nameLen + extraLen + commentLen;
+    const next = p + 46 + nameLen + extraLen + commentLen;
+    if (next > cdOffset + cdSize) fail('the ZIP directory is damaged');
+    const nameBytes = buf.subarray(p + 46, p + 46 + nameLen);
+    const name = nameBytes.toString('utf8');
+    p = next;
     if (name.endsWith('/')) continue;
     const read = (maxBytes: number): Buffer => {
       if (flags & 1) fail(`${name}: encrypted ZIP entries are not supported`);
@@ -73,9 +80,14 @@ export function listZip(buf: Buffer): ZipEntry[] {
       if (usize > maxBytes) fail(`${name}: too large (${usize} bytes, the limit is ${maxBytes})`);
       // A stored entry is copied as is, so its sizes must agree and fit before anything is allocated.
       if (method === 0 && (csize !== usize || csize > maxBytes)) fail(`${name}: the ZIP entry is damaged (sizes disagree)`);
-      if (localOffset + 30 > buf.length || buf.readUInt32LE(localOffset) !== LOCAL) fail(`${name}: the ZIP entry is damaged`);
-      const start = localOffset + 30 + buf.readUInt16LE(localOffset + 26) + buf.readUInt16LE(localOffset + 28);
-      if (start + csize > buf.length) fail(`${name}: the ZIP entry is damaged`);
+      if (localOffset + 30 > cdOffset || buf.readUInt32LE(localOffset) !== LOCAL) fail(`${name}: the ZIP entry is damaged`);
+      const localNameLen = buf.readUInt16LE(localOffset + 26);
+      // The local header must name the same entry as the directory.
+      if (localOffset + 30 + localNameLen > cdOffset || !buf.subarray(localOffset + 30, localOffset + 30 + localNameLen).equals(nameBytes)) {
+        fail(`${name}: the ZIP entry is damaged (its names disagree)`);
+      }
+      const start = localOffset + 30 + localNameLen + buf.readUInt16LE(localOffset + 28);
+      if (start + csize > cdOffset) fail(`${name}: the ZIP entry is damaged`);
       const raw = buf.subarray(start, start + csize);
       let data: Buffer;
       if (method === 0) data = Buffer.from(raw);
@@ -92,5 +104,7 @@ export function listZip(buf: Buffer): ZipEntry[] {
     };
     entries.push({ name, size: usize, unsafe: isUnsafe(name), read });
   }
+  // The directory must hold exactly the entries it declares, so none is silently left out.
+  if (p !== cdOffset + cdSize) fail('the ZIP directory is damaged (its size and entry count disagree)');
   return entries;
 }

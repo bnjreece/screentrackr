@@ -30,7 +30,7 @@
  * - A movie that is only rated or only collected arrives in the queue when
  *   it is new (the importer's default status); an existing one keeps its own.
  */
-import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { Status, WatchedEra } from '../types.js';
 import { listZip } from '../zip.js';
@@ -80,25 +80,27 @@ export function traktFileOf(name: string): { kind: TraktKind | 'errors'; page: n
 type Row = Record<string, unknown>;
 const isObj = (v: unknown): v is Row => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-/** Which export file a page of rows is, from the first row's fields, or null. */
-function kindOfRows(rows: unknown[]): TraktKind | null {
-  const r = rows.find(isObj);
-  if (!r) return null;
-  if ('watched_at' in r && 'action' in r) return 'watched-history';
-  if ('plays' in r && 'last_watched_at' in r) return 'watched-movies';
-  if ('rating' in r && 'rated_at' in r) return 'ratings-movies';
-  if ('listed_at' in r && 'rank' in r) return 'lists-watchlist';
-  if ('collected_at' in r) return 'collection-movies';
-  return null;
-}
-
 const hasTraktId = (v: unknown) => isObj(v) && isObj(v.ids) && typeof v.ids.trakt === 'number';
 
-/** Whether parsed JSON is a page of a Trakt export this importer reads (rows with `movie.ids.trakt` and a known shape). */
+/** Whether a row has the shape of one of the export files this reads. */
+const knownShape = (r: Row) =>
+  ('watched_at' in r && 'action' in r) ||
+  ('plays' in r && 'last_watched_at' in r) ||
+  ('rating' in r && 'rated_at' in r) ||
+  ('listed_at' in r && 'rank' in r) ||
+  'collected_at' in r;
+
+/**
+ * Whether parsed JSON looks like a page of a Trakt export: some row (among
+ * the first few hundred, so a few odd rows don't hide it) has a Trakt id on
+ * its movie, show or episode and the shape of a file this reads. Detection
+ * only: the page is read only under its export name.
+ */
 export function isTraktJson(data: unknown): boolean {
-  if (!Array.isArray(data) || data.length === 0) return false;
-  const sample = data.slice(0, 20).filter(isObj);
-  return sample.some((r) => hasTraktId(r.movie) || hasTraktId(r.show) || hasTraktId(r.episode)) && kindOfRows(data) !== null;
+  if (!Array.isArray(data)) return false;
+  return data
+    .slice(0, 500)
+    .some((r) => isObj(r) && knownShape(r) && (hasTraktId(r.movie) || hasTraktId(r.show) || hasTraktId(r.episode)));
 }
 
 /** Bytes per file, and in all, this reads from an export. Trakt pages are 250 rows, far below either. */
@@ -110,8 +112,6 @@ export interface TraktExport {
   files: TraktFile[];
   /** Files (or archive entries) skipped because they are not on the allow-list. */
   skippedFiles: number;
-  /** Every path was a whole export (a ZIP or a folder), not single files picked from one. */
-  wholeExport: boolean;
 }
 
 const ALLOWED_NAMES = `${TRAKT_KINDS.join(', ')} (.json, also as numbered pages) and _errors.json`;
@@ -127,7 +127,6 @@ export function readTraktExport(paths: string[]): TraktExport {
   let skippedFiles = 0;
   let total = 0;
   const seen = new Set<string>();
-  let wholeExport = true;
   const add = (where: string, name: string, data: Buffer) => {
     const key = basename(name).toLowerCase();
     if (seen.has(key)) throw new ImportError(`${where}: ${basename(name)} appears more than once, so it is not clear which one to read`);
@@ -172,9 +171,9 @@ export function readTraktExport(paths: string[]): TraktExport {
       };
       readDir(path, 0);
     } else if (st.isFile()) {
-      // Decide from the name (and a ZIP's first 4 bytes) before reading:
-      // a file that is not on the allow-list is never opened for its contents.
-      if (path.toLowerCase().endsWith('.zip') || startsWithZipMagic(path)) {
+      // Decided from the name alone: a file that is neither a .zip nor on the
+      // allow-list is never opened.
+      if (path.toLowerCase().endsWith('.zip')) {
         if (st.size > MAX_ZIP_BYTES) throw new ImportError(`${path}: too large to read (over ${MAX_ZIP_BYTES} bytes)`);
         for (const entry of listZip(readFile(path))) {
           if (entry.unsafe || !traktFileOf(entry.name)) {
@@ -184,9 +183,10 @@ export function readTraktExport(paths: string[]): TraktExport {
           add(path, entry.name, entry.read(Math.min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total)));
         }
       } else {
-        wholeExport = false;
         if (!traktFileOf(path)) {
-          throw new ImportError(`${basename(path)}: not a Trakt export file this reads (expected ${ALLOWED_NAMES}, under their export names)`);
+          throw new ImportError(
+            `${basename(path)}: not a Trakt export file this reads (expected the export's .zip, its folder, or ${ALLOWED_NAMES}, under their export names)`,
+          );
         }
         if (st.size > MAX_FILE_BYTES) throw new ImportError(`${path}: too large to read (over ${MAX_FILE_BYTES} bytes)`);
         add(path, path, readFile(path));
@@ -196,21 +196,7 @@ export function readTraktExport(paths: string[]): TraktExport {
     }
     if (files.length === before) throw new ImportError(`${path}: no Trakt export files found (expected ${ALLOWED_NAMES})`);
   }
-  return { files, skippedFiles, wholeExport };
-}
-
-/** Whether a file starts with a ZIP local header (reads 4 bytes only). */
-function startsWithZipMagic(path: string): boolean {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, 'r');
-    const head = Buffer.alloc(4);
-    return readSync(fd, head, 0, 4, 0) === 4 && head.readUInt32LE(0) === 0x04034b50;
-  } catch {
-    return false;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
+  return { files, skippedFiles };
 }
 
 const yearOf = (v: unknown): number | null => (typeof v === 'number' && Number.isInteger(v) && v >= 1000 && v <= 9999 ? v : null);
@@ -273,16 +259,6 @@ const CATEGORIES: [RegExp, string][] = [
   [/\/collection\/movies$/, 'collection'],
 ];
 
-/** The endpoint without the username or query, as `users/<you>/history`. */
-function redactEndpoint(endpoint: string): string {
-  return endpoint
-    .split('?')[0]!
-    .replace(/^\/+/, '')
-    .replace(/^users\/[^/]+/i, 'users/<you>')
-    .replace(/[^\w/<>.-]/g, '')
-    .slice(0, 80);
-}
-
 /**
  * Parse a Trakt export's files (already limited to the allow-list) into one
  * record per movie. See the module comment for the rules.
@@ -333,9 +309,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
               : 'Movies missing from it are left as they are; export again later to bring in the rest.';
           warnings.push(`Your Trakt export's ${category} is incomplete: Trakt could not export all of it${howMuch}. ${then}`);
         } else {
-          warnings.push(
-            `Trakt could not export one section of your data (${redactEndpoint(endpoint) || 'unnamed'}${howMuch}). screentrackr does not read that section, so this import is not affected.`,
-          );
+          warnings.push(`Trakt could not export one section of your data${howMuch}. screentrackr does not read that section, so this import is not affected.`);
         }
       }
       continue;

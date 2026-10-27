@@ -141,11 +141,12 @@ describe('which files are read', () => {
     chmodSync(join(dir, 'lists-favorites.json'), 0o600);
   });
 
-  it('says whether the input was a whole export or files picked from one', () => {
-    const dir = folder(exportFiles());
-    expect(readTraktExport([dir]).wholeExport).toBe(true);
-    expect(readTraktExport([zipFile(exportFiles())]).wholeExport).toBe(true);
-    expect(readTraktExport([join(dir, 'ratings-movies.json')]).wholeExport).toBe(false);
+  it('never opens a single file that is not a .zip and not on the allow-list, even a ZIP in disguise', () => {
+    const disguised = join(tmp, `export-${++n}.dat`);
+    writeFileSync(disguised, makeZip(toBytes(exportFiles())));
+    chmodSync(disguised, 0o000);
+    expect(() => readTraktExport([disguised])).toThrow(/not a Trakt export file/);
+    chmodSync(disguised, 0o600);
   });
 
   it('refuses an archive or folder with nothing it reads, or the same file twice', () => {
@@ -186,6 +187,21 @@ describe('the ZIP reader', () => {
     zip.writeUInt32LE(10, cd + 24); // claim 10 bytes uncompressed
     const [entry] = listZip(zip);
     expect(() => entry?.read(100)).toThrow(/sizes disagree/);
+  });
+
+  it('refuses a directory that declares fewer entries than it holds', () => {
+    const zip = makeZip({ 'ratings-movies.json': Buffer.from('[]'), 'lists-watchlist.json': Buffer.from('[]') });
+    const end = zip.length - 22;
+    zip.writeUInt16LE(1, end + 8);
+    zip.writeUInt16LE(1, end + 10);
+    expect(() => listZip(zip)).toThrow(/damaged/);
+  });
+
+  it('refuses an entry whose local name differs from the directory', () => {
+    const zip = makeZip({ 'ratings-movies.json': Buffer.from('[]') });
+    zip.write('x', 30); // first byte of the local header's name
+    const [entry] = listZip(zip);
+    expect(() => entry?.read(100)).toThrow(/names disagree/);
   });
 
   it('rejects a corrupted entry', () => {
@@ -402,7 +418,7 @@ describe('partial exports (_errors.json)', () => {
     files['_errors.json'] = [
       { endpoint: 'users/orrin-vale/history?extended=gdpr', error: 'HTTP 429 for orrin-vale', fetchedPages: 3, totalPages: 9 },
       { endpoint: 'users/orrin-vale/ratings', error: 'HTTP 500', fetchedPages: 0, totalPages: 1 },
-      { endpoint: 'users/orrin-vale/comments', error: 'HTTP 500', fetchedPages: 0, totalPages: 1 },
+      { endpoint: 'https://api.trakt.tv/users/orrin-vale/comments?page=2', error: 'HTTP 500', fetchedPages: 0, totalPages: 1 },
     ];
     const res = parse(files);
     expect(res.exportErrors).toBe(3);
@@ -444,6 +460,11 @@ describe('detecting a single Trakt file in a plain import', () => {
     expect(() => parseImportDetailed(watchlist, undefined, 'lists-favorites.json')).toThrow(/only .* are read/);
     expect(() => parseImportDetailed(ratings, undefined, 'renamed.json')).toThrow(ImportError);
     expect(() => parseImportDetailed(ratings, 'trakt')).toThrow(ImportError);
+    // One odd row first doesn't hide a Trakt page, and its export name is enough.
+    const rows = JSON.parse(ratings) as unknown[];
+    expect(detectFormat(JSON.stringify([{}, null, ...rows]), 'x.json')).toBe('trakt');
+    expect(detectFormat('[]', 'ratings-movies.json')).toBe('trakt');
+    expect(() => detectFormat('[]', 'other.json')).toThrow(ImportError);
     expect(() => parseImportDetailed('[{"progress":1,"movie":{"title":"X","ids":{"trakt":1}}}]', 'trakt', 'watched-playback.json')).toThrow(
       ImportError,
     );

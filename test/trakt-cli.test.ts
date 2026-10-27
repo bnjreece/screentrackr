@@ -67,9 +67,6 @@ describe('import trakt', () => {
   it('warns about a partial export and refuses --replace for it', () => {
     const files = { ...exportFiles(), '_errors.json': [{ endpoint: 'users/orrin-vale/watchlist', error: 'HTTP 429', fetchedPages: 1, totalPages: 4 }] };
     const path = zip(files);
-    const replace = run(['import', 'trakt', path, '--replace']);
-    expect(replace.code).toBe(1);
-    expect(replace.stderr).toMatch(/incomplete \(watchlist\)/);
     const merge = run(['import', 'trakt', path, '--json']);
     expect(merge.code, merge.stderr).toBe(0);
     expect(merge.stderr).toMatch(/watchlist is incomplete/);
@@ -77,25 +74,36 @@ describe('import trakt', () => {
     expect(JSON.parse(merge.stdout)).toMatchObject({ exportErrors: 1, incomplete: ['watchlist'] });
   });
 
-  it('refuses --replace for a damaged page, for single files and for a plain import of one page; allows it for a whole export', () => {
-    const damaged = run(['import', 'trakt', zip({ ...exportFiles(), 'watched-history-2.json': '[{' }), '--replace']);
-    expect(damaged.code).toBe(1);
-    expect(damaged.stderr).toMatch(/incomplete \(watch history\)/);
+  it('never replaces a library: every Trakt route refuses --replace before reading anything', () => {
+    const before = run(['import', 'trakt', zip(exportFiles()), '--json']);
+    expect(before.code, before.stderr).toBe(0);
     const dir = join(tmp, `pages-${++n}`);
     mkdirSync(dir);
-    const page = join(dir, 'watched-history.json');
-    writeFileSync(page, '[]');
-    const single = run(['import', 'trakt', page, '--replace']);
-    expect(single.code).toBe(1);
-    expect(single.stderr).toMatch(/Nothing to import|not the whole export/);
-    writeFileSync(page, toBytes(exportFiles())['watched-history.json'] as Buffer);
-    expect(run(['import', 'trakt', page, '--replace']).stderr).toMatch(/not the whole export/);
-    const plain = run(['import', page, '--format', 'trakt', '--replace']);
-    expect(plain.code).toBe(1);
-    expect(plain.stderr).toMatch(/not the whole export/);
-    const whole = run(['import', 'trakt', zip(exportFiles()), '--replace', '--json']);
-    expect(whole.code, whole.stderr).toBe(0);
-    expect(JSON.parse(whole.stdout)).toMatchObject({ added: 6 });
+    const page = join(dir, 'ratings-movies.json');
+    writeFileSync(page, toBytes(exportFiles())['ratings-movies.json'] as Buffer);
+    for (const args of [
+      ['import', 'trakt', zip(exportFiles()), '--replace'],
+      ['import', 'trakt', page, '--replace'],
+      ['import', page, '--format', 'trakt', '--replace'],
+      ['import', page, '--replace'],
+      ['import', 'trakt', join(dir, 'missing.zip'), '--replace'],
+    ]) {
+      const r = run(args);
+      expect(r.code, args.join(' ')).toBe(1);
+      expect(r.stderr).toMatch(/only merges/);
+    }
+    const after = JSON.parse(run(['import', 'trakt', zip(exportFiles()), '--json']).stdout) as Record<string, unknown>;
+    expect(after).toMatchObject({ added: 0, unchanged: 6 });
+  });
+
+  it('--format trakt goes through the allow-list too', () => {
+    const dir = join(tmp, `fmt-${++n}`);
+    mkdirSync(dir);
+    const other = join(dir, 'lists-favorites.json');
+    writeFileSync(other, toBytes(exportFiles())['lists-watchlist.json'] as Buffer);
+    const r = run(['import', other, '--format', 'trakt']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/not a Trakt export file/);
   });
 
   it('refuses a ZIP with nothing it reads, flags for other importers, and --keep-bulk-dates elsewhere', () => {

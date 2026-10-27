@@ -36,30 +36,19 @@ interface Parsed extends ParsedImport {
   skippedByType?: Record<string, number>;
   /** Extra fields for `--json` output. */
   extra?: Record<string, unknown>;
-  /** Why `--replace` is refused for this input, if it is. */
-  replaceRefused?: string;
 }
 
 /** `import trakt`: Trakt's data export ZIP, its folder, or single files from it. Only allow-listed files are read. */
 function parseTraktExport(paths: string[], keepBulkDates: boolean): Parsed {
-  const { files, skippedFiles, wholeExport } = readTraktExport(paths);
+  const { files, skippedFiles } = readTraktExport(paths);
   const res = parseTrakt(files, { keepBulkDates });
   const notices = [...res.notices];
   if (skippedFiles) notices.push(`Left ${skippedFiles} other file${skippedFiles === 1 ? '' : 's'} in the export unread (only movie history, ratings, watchlist and collection are read).`);
-  const replaceRefused =
-    res.records.length === 0
-      ? 'Nothing to import from the Trakt export, so --replace would empty your library. Nothing was changed.'
-      : !wholeExport
-        ? 'Single files from a Trakt export are not the whole export, so --replace could drop movies. Nothing was changed. Merge them instead, or pass the export ZIP or folder.'
-        : res.exportErrors > 0 || res.incomplete.length > 0
-          ? `The Trakt export is incomplete (${res.incomplete.join(', ') || 'see its _errors.json'}), so --replace could drop movies. Nothing was changed. Merge it instead, or export again on Trakt.`
-          : undefined;
   return {
     format: 'trakt',
     records: res.records,
     warnings: res.warnings,
     notices,
-    ...(replaceRefused ? { replaceRefused } : {}),
     extra: { skippedTv: res.skippedTv, skippedFiles, exportErrors: res.exportErrors, incomplete: res.incomplete, bulkDated: res.bulkDated },
   };
 }
@@ -93,7 +82,7 @@ export const importCmd: Command = {
     "`import imdb <file.csv>...` reads IMDb CSV exports you downloaded from imdb.com (Your Ratings, your watchlist, check-ins or a list). Rated movies are marked watched with your rating; watchlist movies go in the queue only when they are new; nothing is marked owned. Several files are read together. --as says what a list export is (watchlist by default), --collection names a list's collection, --include-type brings in more than movies (repeatable or comma-separated: " +
       IMDB_INCLUDE_TYPES.join(', ') +
       '), --checkin-dates uses check-in dates as watched dates.',
-    "`import trakt <export.zip|folder>` reads the data export you download from Trakt (Settings > Data > Raw export), or files from it. Only movie history, ratings, watchlist, collection and the export's error list are read. Watched movies are marked watched with the latest play's date, watchlist movies go in the queue only when they are new, and only the collection marks a movie owned. Plays logged in bulk (10 or more at the same second) lose their dates unless --keep-bulk-dates. Nothing is fetched from Trakt.",
+    "`import trakt <export.zip|folder>` reads the data export you download from Trakt (Settings > Data > Raw export), or files from it. Only movie history, ratings, watchlist, collection and the export's error list are read. Watched movies are marked watched with the latest play's date, watchlist movies go in the queue only when they are new, and only the collection marks a movie owned. Plays logged in bulk (10 or more at the same second) lose their dates unless --keep-bulk-dates. It only merges (--replace is refused). Nothing is fetched from Trakt.",
     '--merge adds new movies and updates fields the file has; it never clears a status or rating the file lacks. A record that fits more than one item is not imported and is listed with the candidate item ids.',
     '--replace backs up your library to backups/ first, then replaces it.',
   ].join('\n'),
@@ -164,10 +153,17 @@ export const importCmd: Command = {
 
     const keepBulkDates = bool(values, 'keep-bulk-dates');
     if (keepBulkDates && !trakt) throw new UserError('--keep-bulk-dates only applies to `import trakt`');
+    const replace = bool(values, 'replace');
+    // A Trakt export can't show that it is complete (a missing file may mean
+    // "none" or "failed"), so it never replaces a library: it only merges.
+    const traktReplace =
+      'A Trakt import only merges: an export cannot show that it is complete, so --replace could drop movies. Nothing was changed. Run it without --replace.';
+    if (replace && (trakt || format === 'trakt')) throw new UserError(traktReplace);
 
     let parsed: Parsed;
-    if (trakt) {
+    if (trakt || format === 'trakt') {
       if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
+      // The bounded reader checks each name against the allow-list before opening it.
       parsed = parseTraktExport(files, keepBulkDates);
     } else if (appleTv) {
       if (imdbFlags) throw new UserError('--as, --collection, --include-type and --checkin-dates only apply to IMDb files');
@@ -187,18 +183,12 @@ export const importCmd: Command = {
       }
     }
 
-    const replace = bool(values, 'replace');
     // An empty IMDb export (only a header) is "no rows", never "delete everything".
     if (parsed.format === 'imdb' && replace && parsed.records.length === 0) {
       throw new UserError('Nothing to import from the IMDb file, so --replace would empty your library. Nothing was changed.');
     }
-    // A partial Trakt export, or a page of one, would drop the movies it lacks.
-    if (replace && parsed.format === 'trakt') {
-      const reason =
-        parsed.replaceRefused ??
-        (trakt ? undefined : 'One page of a Trakt export is not the whole export, so --replace could drop movies. Nothing was changed. Use `screentrackr import trakt <the export ZIP>`.');
-      if (reason) throw new UserError(reason);
-    }
+    // Detected from the file's contents (it was read to tell its format).
+    if (replace && parsed.format === 'trakt') throw new UserError(traktReplace);
 
     const db = ctx.db();
     for (const n of parsed.notices) ctx.log(n);
