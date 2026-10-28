@@ -404,13 +404,6 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
       `${unplaced} diary entr${unplaced === 1 ? 'y has' : 'ies have'} no film with the same name and year in watched.csv, ratings.csv or the watchlist, so ${unplaced === 1 ? 'it was' : 'they were'} not used, and no Letterboxd play was removed (any film could be ${unplaced === 1 ? 'its' : 'theirs'}). Import the whole export to include ${unplaced === 1 ? 'it' : 'them'}.`,
     );
   }
-  let noLink = 0;
-  for (const list of entriesOf.values()) noLink += list.filter((e) => e.uri === null).length;
-  if (noLink) {
-    warnings.push(
-      `${noLink} diary entr${noLink === 1 ? 'y has' : 'ies have'} no entry link (Letterboxd URI), so ${noLink === 1 ? 'it is' : 'they are'} told apart by date only: entries of one film on one day without a link count as one play.`,
-    );
-  }
 
   // Reviews join diary entries by the entry's URI, never by title.
   const reviewOf = new Map<string, string>();
@@ -449,10 +442,11 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
 
     if (f.watched || entries.length) rec.status = 'watched';
     else rec.statusIfNew = 'queue';
-    // An entry with neither a link nor a Watched Date has nothing to tell it
-    // by, so it is not kept as a play (the same entry seen later with its
-    // link could not be matched to it); the film is still watched.
-    const kept = entries.filter((e) => e.uri !== null || e.watchedDate !== null);
+    // An entry with no link (entry URI) has nothing of its own to tell it
+    // by, so it is not kept as a play: the same entry seen later with its
+    // link (and maybe a corrected date) could not be matched to it. The film
+    // is still watched, and it gets no complete set.
+    const kept = entries.filter((e) => e.uri !== null);
     unidentified += entries.length - kept.length;
     if (entries.length) {
       rec.viewings = kept.map(
@@ -493,7 +487,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
   }
   if (unidentified) {
     warnings.push(
-      `${unidentified} diary entr${unidentified === 1 ? 'y has' : 'ies have'} neither an entry link nor a Watched Date, so ${unidentified === 1 ? 'it was' : 'they were'} not kept as plays (${unidentified === 1 ? 'its film is' : 'their films are'} still watched, and no Letterboxd play of ${unidentified === 1 ? 'it' : 'them'} was removed)`,
+      `${unidentified} diary entr${unidentified === 1 ? 'y has' : 'ies have'} no entry link (Letterboxd URI), so ${unidentified === 1 ? 'it was' : 'they were'} not kept as plays (${unidentified === 1 ? 'its film is' : 'their films are'} still watched, and no Letterboxd play of ${unidentified === 1 ? 'it' : 'them'} was removed)`,
     );
   }
   return { records, lists: [...lists.values()] };

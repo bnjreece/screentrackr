@@ -109,6 +109,13 @@ describe('dropFutureDates', () => {
     ]);
   });
 
+  it('leaves a date it cannot read for the import to refuse (Astra r6)', () => {
+    const res = dropFutureDates([{ sourceTitle: 'Pale Rooftops', source: 'csv', watchedAt: 'tomorrow' }], now);
+    expect(res.records[0]?.watchedAt).toBe('tomorrow');
+    expect(res.warnings).toEqual([]);
+    expect(() => applyImport(db, res.records, { mode: 'merge' })).toThrow(/invalid watched date/);
+  });
+
   it('leaves records without future dates as they are', () => {
     const recs: ImportRecord[] = [{ sourceTitle: 'Pale Rooftops', source: 'csv', watchedAt: '2020-01-01' }];
     const res = dropFutureDates(recs, now);

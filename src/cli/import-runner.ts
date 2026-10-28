@@ -25,7 +25,7 @@ import { isExcludedTraktName, MAX_ZIP_BYTES, parseTrakt, readTraktExport, traktF
 import { jellyfinDeviceId, mapJellyfinItems, readJellyfinItems, type JellyfinAuth } from '../core/importers/jellyfin.js';
 import { applyImport, detectFormat, parseImportDetailed, type ImportFormat, type ImportRecord, type ImportSummary, type ParsedImport } from '../core/importers/index.js';
 import { getList, normListName } from '../core/lists.js';
-import { isFutureDate } from '../core/viewings.js';
+import { isFutureDate, isReadableWatchedAt } from '../core/viewings.js';
 import { listZip } from '../core/zip.js';
 import { readPlexImport, type PlexImportOptions, type PlexParsed } from './commands/import-plex.js';
 import { UserError, type Ctx } from './context.js';
@@ -380,7 +380,8 @@ export async function readAppleTvImport(ctx: Ctx, opts: AppleTvImportOptions = {
 export function dropFutureDates(records: ImportRecord[], now: Date = new Date()): { records: ImportRecord[]; warnings: string[] } {
   const warnings: string[] = [];
   const out = records.map((r) => {
-    const future = (d: string | null | undefined) => typeof d === 'string' && d.trim() !== '' && isFutureDate(d.trim(), now);
+    // Only a date the import can read: anything else is left for the import's own check to refuse.
+    const future = (d: string | null | undefined) => typeof d === 'string' && isReadableWatchedAt(d.trim()) && isFutureDate(d.trim(), now);
     const dropped: string[] = [];
     let next = r;
     if (Array.isArray(r.viewings) && r.viewings.some((v) => future(v?.watchedAt))) {
