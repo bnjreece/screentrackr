@@ -11,6 +11,8 @@ import { toId, toInt } from '../args.js';
 import { bool, str, type Command } from '../command.js';
 import { UserError, type Ctx } from '../context.js';
 import { itemLine, keyValues, num, statusLabel, votes } from '../format.js';
+import { whereFor, whereForItem } from '../../core/where.js';
+import { cliCountry } from './where.js';
 
 const TCONST = /^tt\d{7,}$/i;
 
@@ -99,11 +101,12 @@ function historyLines(h: ShowHistory, rewatch: Map<number, boolean>): [string, s
   return lines;
 }
 
-function showText(item: LibraryItem | null, movie: CatalogMovie | null, history: ShowHistory | null, rewatch: Map<number, boolean>): string {
+function showText(item: LibraryItem | null, movie: CatalogMovie | null, history: ShowHistory | null, rewatch: Map<number, boolean>, whereToWatch: string): string {
   const blocks: string[] = [];
-  if (movie) blocks.push(keyValues(movieLines(movie)));
+  if (movie) blocks.push(keyValues([...movieLines(movie), ['Where to watch', whereToWatch]]));
   if (item) blocks.push(keyValues([...itemLines(item), ...(history ? historyLines(history, rewatch) : [])]));
   else blocks.push('Not in your library. Add it with `screentrackr add ' + (movie?.tconst ?? '') + '`.');
+  if (!movie) blocks.push(keyValues([['Where to watch', whereToWatch]]));
   return blocks.join('\n\n');
 }
 
@@ -133,7 +136,9 @@ export const show: Command = {
       history = { viewings, plays: countPlays(viewings), lists: listsOfItem(db, item.id) };
       rewatch = rewatchFlags(db, item, viewings);
     }
-    ctx.emit({ item, movie, ...(history ?? {}) }, () => showText(item, movie, history, rewatch));
+    const { country } = cliCountry(ctx);
+    const whereToWatch = (movie ? whereFor(movie.title, country) : whereForItem(db, item as LibraryItem, country)).url;
+    ctx.emit({ item, movie, ...(history ?? {}), whereToWatch }, () => showText(item, movie, history, rewatch, whereToWatch));
   },
 };
 

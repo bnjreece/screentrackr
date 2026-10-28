@@ -194,7 +194,17 @@ Output is a readable table. Every command takes `--json` for machine-readable ou
 
 ### Discovery
 
-<!-- 0.4.0: searching the catalog by decade, vote range and what you have not watched. Written with the feature. -->
+With `--scope all`, search is a way to find movies you haven't seen in the whole catalog. `--exclude-watched` leaves out every movie you have watched or played (in any edition) but, unlike `--not-in-library`, keeps the ones on your shelf you haven't seen yet. `--decade` (repeatable, ORed together) narrows by release decade, and `--max-votes` with `--min-votes` finds well-rated titles few people have rated.
+
+```sh
+# Well-loved horror from the 1970s and 80s you haven't seen, owned or not
+screentrackr search --scope all --genre Horror --decade 1970s --decade 1980s --min-rating 7.3 --min-votes 25000 --exclude-watched --sort votes
+
+# Under-seen gems: rated well, few votes
+screentrackr search --scope all --min-rating 7.8 --min-votes 2000 --max-votes 15000 --exclude-watched
+```
+
+Movies with no IMDb rating are left out by any rating or vote bound. In your library, `--owned` and `--not-owned` filter on what you own, `--list <name>` (repeatable; any of them, or all with `--all-lists`) on your own lists, and `--never-seen` keeps movies with no recorded play and a status other than watched.
 
 ## Watch history
 
@@ -207,20 +217,41 @@ screentrackr history [<id|tconst|title>] [--year <yyyy>] [--from <date>] [--to <
 
 ## Pick a movie
 
-<!-- 0.4.0: what to watch tonight. Written with the feature. -->
+`pick` answers "what should I watch tonight?" with a random movie from your library that you haven't watched (status queue, priority or someday). Every search filter works, so you can narrow it first.
 
 ```text
 screentrackr pick [filters] [-n <1-10>] [--seed <n>] [--priority-first] [--any-status]
 ```
 
+```sh
+screentrackr pick                                   # one random unwatched movie from your library
+screentrackr pick --owned --max-runtime 110 --genre Horror --decade 1980s -n 3
+screentrackr pick --list Halloween --never-seen
+screentrackr pick --scope all --min-rating 7.5 --min-votes 20000 --exclude-watched
+```
+
+- `-n, --count` picks up to 10 different movies. Editions of one film count once, as in search.
+- `--priority-first` picks from your priority movies when any fit the filters, and from all of them otherwise.
+- `--any-status` includes movies you have watched. With `--scope all`, the default is catalog movies you haven't watched or played.
+- `--seed <n>` repeats a pick: the same seed gives the same movies as long as your library hasn't changed.
+- It prints the picks, how many movies it picked from and a where-to-watch link for each. When nothing fits it says so and exits 0 (`--json` gives `{"total": 0, "picks": []}`).
+
 ## Where to watch
 
-<!-- 0.4.0: a JustWatch search link per movie, and the saved country. Written with the feature. -->
+`where` prints a JustWatch search link for a movie, so you can see which services carry it in your country. It's only a link: screentrackr never fetches JustWatch or any other site. `--open` asks your browser to open it (on macOS and Linux). `show`, `pick` and the MCP `get_movie` tool include the same link.
 
 ```text
 screentrackr where <id|tconst|title> [--country <cc>] [--open]
 screentrackr config <get|set|unset> <key> [<value>]
 ```
+
+```sh
+screentrackr where "The Glass Harbor (1978)"
+screentrackr where tt9000001 --country uk --open
+screentrackr config set country uk
+```
+
+The country is `--country`, else the one you saved with `config set country`, else your system locale's region, else the US. Use two letters; GB becomes `uk`, the code JustWatch uses for the United Kingdom. The search uses the catalog's title for a movie matched to IMDb, and your own title without edition tags or a year otherwise. Settings live in `config.json` in your data directory, readable only by you.
 
 ## Lists
 
@@ -400,6 +431,12 @@ Search filters:
 | `--unwatched` | Only `queue`, `priority` or `someday` |
 | `--my-rating-min <1-10>` | Minimum personal rating |
 | `--not-in-library` | With `--scope all`: only movies you don't have |
+| `--max-votes <n>` | Maximum IMDb votes, for under-seen titles |
+| `--decade <1980s>` | Release decade (repeatable; any of them) |
+| `--owned`, `--not-owned` | Library movies you own, or don't |
+| `--list <name>`, `--all-lists` | In your list (repeatable; any of them, or all with `--all-lists`) |
+| `--never-seen` | No recorded play and a status other than watched |
+| `--exclude-watched` | Leave out movies you've watched or played (any edition); owned ones you haven't seen stay |
 | `-t, --text <words>` | Title search |
 | `--sort <field>` | `rating` (default), `votes`, `year`, `runtime`, `title`, `my_rating` or `random` |
 | `--order asc\|desc` | Sort direction |
@@ -423,11 +460,11 @@ screentrackr makes network calls in only three cases:
 - `screentrackr import plex` sends read-only requests to the Plex Media Server address you give it, and nowhere else.
 - `screentrackr import jellyfin` sends read-only requests to the Jellyfin server address you give it, and nowhere else (plus a sign-in and sign-out there when you use a password).
 
-The Letterboxd, IMDb, Trakt, Apple TV, CSV and JSON imports only read files and apps on your machine; they never sign in to those services or fetch anything from them. screentrackr itself never sends anything about your library anywhere. (Through an MCP client, the answers to what you ask go to that client, which may pass them to its AI model provider; that is between you and the client.) Plex and Jellyfin requests carry only what the server needs to answer (your token, or your Jellyfin user name and password when you sign in) and go only to the address you give. Tokens and passwords are never stored or printed. There's no telemetry, no account and no server. Your library stays in a SQLite file on your machine.
+The Letterboxd, IMDb, Trakt, Apple TV, CSV and JSON imports only read files and apps on your machine; they never sign in to those services or fetch anything from them. screentrackr itself never sends anything about your library anywhere. (Through an MCP client, the answers to what you ask go to that client, which may pass them to its AI model provider; that is between you and the client.) `screentrackr where --open` asks your browser to open a JustWatch search page; the browser makes that request, not screentrackr, and `where` without `--open` only prints the link. Plex and Jellyfin requests carry only what the server needs to answer (your token, or your Jellyfin user name and password when you sign in) and go only to the address you give. Tokens and passwords are never stored or printed. There's no telemetry, no account and no server. Your library stays in a SQLite file on your machine.
 
 ## Not affiliated
 
-screentrackr is an independent project. It's not affiliated with IMDb or Apple, or endorsed by either. It's not affiliated with or endorsed by Plex, Jellyfin, Letterboxd or Trakt either.
+screentrackr is an independent project. It's not affiliated with IMDb or Apple, or endorsed by either. It's not affiliated with or endorsed by Plex, Jellyfin, Letterboxd, Trakt or JustWatch either.
 
 ## Development
 

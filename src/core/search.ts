@@ -58,6 +58,8 @@ export interface MovieResult {
 type Param = string | number | null;
 
 export interface CompiledSearch {
+  /** The `WITH ... page AS (...)` prefix both queries share: `page` holds every match, one row per film. Its parameters are `countParams`. */
+  withSql: string;
   sql: string;
   /** Parameters for `sql`; the last two are limit and offset. */
   params: Param[];
@@ -236,7 +238,7 @@ function orderBy(f: Filter): string {
 
 const where = (conds: string[]) => (conds.length ? `WHERE ${conds.join(' AND ')}` : '');
 
-const RESULT_COLS =
+export const RESULT_COLS =
   'tconst, title, year, runtime_min, genres_csv, source_director, rating, votes, item_id, status, watched_era, my_rating, owned, match_status';
 
 /**
@@ -319,6 +321,7 @@ export function compileSearch(f: Filter, ctx: { fts: boolean; catalog: boolean }
 
   const countParams = [...params];
   return {
+    withSql,
     sql: `${withSql}\nSELECT ${RESULT_COLS} FROM page ORDER BY ${orderBy(f)} LIMIT ? OFFSET ?`,
     params: [...params, f.limit, f.offset],
     countSql: `${withSql}\nSELECT COUNT(*) AS n FROM page`,
@@ -334,7 +337,8 @@ export function parseFilter(input: unknown): Filter {
   throw new FilterError(`Invalid search: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}`, issues);
 }
 
-interface PageRow {
+/** One row of `page`, selected with RESULT_COLS. */
+export interface PageRow {
   tconst: string | null;
   title: string;
   year: number | null;
@@ -353,19 +357,23 @@ interface PageRow {
 
 const placeholders = (n: number) => Array.from({ length: n }, () => '?').join(', ');
 
-/** Run a search. `input` is parsed with FilterSchema. */
 /** Throws LibraryError for a list name the filter uses that no list has. */
 export function assertFilterLists(db: Db, f: Pick<Filter, 'lists'>): void {
   for (const name of f.lists ?? []) if (!getList(db, name)) throw new LibraryError(`No list named "${name}"`);
 }
 
+/** Run a search. `input` is parsed with FilterSchema. */
 export function searchMovies(db: Db, input: unknown): { total: number; results: MovieResult[] } {
   const f = parseFilter(input);
   assertFilterLists(db, f);
   const q = compileSearch(f, { fts: db.fts, catalog: f.scope === 'all' ? catalogReady(db) : true });
   const total = Number((db.sql.prepare(q.countSql).get(...q.countParams) as { n: number }).n);
   const rows = db.sql.prepare(q.sql).all(...q.params) as unknown as PageRow[];
+  return { total, results: toMovieResults(db, rows) };
+}
 
+/** Page rows as results, with directors, top cast and edition counts filled in. Keeps the rows' order. */
+export function toMovieResults(db: Db, rows: PageRow[]): MovieResult[] {
   const linked = [...new Set(rows.map((r) => r.tconst).filter((t): t is string => t !== null))];
   const directors = new Map<string, string[]>();
   const cast = new Map<string, string[]>();
@@ -392,7 +400,7 @@ export function searchMovies(db: Db, input: unknown): { total: number; results: 
     for (const c of counts) editions.set(c.tconst, Number(c.n));
   }
 
-  const results = rows.map((r): MovieResult => {
+  return rows.map((r): MovieResult => {
     const catDirectors = r.tconst ? directors.get(r.tconst) : undefined;
     return {
       tconst: r.tconst,
@@ -421,5 +429,4 @@ export function searchMovies(db: Db, input: unknown): { total: number; results: 
             },
     };
   });
-  return { total, results };
 }

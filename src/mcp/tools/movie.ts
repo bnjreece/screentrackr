@@ -7,6 +7,8 @@ import { getCatalogMovie, type CatalogMovie } from '../../core/movie.js';
 import { CatalogMissingError } from '../../core/search.js';
 import { STATUSES, WATCHED_ERAS, type LibraryItem } from '../../core/types.js';
 import { countPlays, viewingsOf, type Viewing } from '../../core/viewings.js';
+import { whereFor, whereForItem } from '../../core/where.js';
+import { mcpCountry } from './where.js';
 import { ambiguousError, exactlyOne, handler, id, itemLine, LINKED, ok, tconst, ToolInputError, yearPart, type RegisterTools } from './common.js';
 
 /** A library item as get_movie returns it: the item, every play (newest first), the play count and its lists. */
@@ -46,7 +48,7 @@ export const register: RegisterTools = (server, { db }) => {
     {
       title: 'Get one movie',
       description:
-        'One movie by library id or IMDb tconst (exactly one). Returns the catalog record (genres, directors, cast, IMDb rating) and every library item matched or linked to it: a tconst can have more than one edition. Each library item carries its plays (viewings, newest first, with date, rewatch flag, rating and source), a play count and the names of your lists it is in.',
+        'One movie by library id or IMDb tconst (exactly one). Returns the catalog record (genres, directors, cast, IMDb rating) and every library item matched or linked to it: a tconst can have more than one edition. Each library item carries its plays (viewings, newest first, with date, rewatch flag, rating and source), a play count and the names of your lists it is in. whereToWatch is a JustWatch search link for the movie (only a link; nothing is fetched).',
       inputSchema: { id: id.optional(), tconst: tconst.optional() },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -69,7 +71,10 @@ export const register: RegisterTools = (server, { db }) => {
         }
       }
       const library = items.map((i) => withHistory(db, i));
-      return ok({ movie, library }, movieText(movie, library));
+      const country = mcpCountry(db.home);
+      const first = items[0];
+      const whereToWatch = movie ? whereFor(movie.title, country).url : first ? whereForItem(db, first, country).url : null;
+      return ok({ movie, library, whereToWatch }, `${movieText(movie, library)}${whereToWatch ? `\nWhere to watch: ${whereToWatch}` : ''}`);
     }),
   );
 

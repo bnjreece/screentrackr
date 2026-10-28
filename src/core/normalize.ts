@@ -44,6 +44,26 @@ function splitSuffixes(folded: string): { base: string; groups: string[] } {
 }
 
 /**
+ * A title without its trailing edition, format and year groups, with its own
+ * case and punctuation kept: "The Glass Harbor (1978) (4K)" gives "The Glass
+ * Harbor". The same groups normalization drops (`splitSuffixes`), for display
+ * and for links such as the JustWatch search.
+ */
+export function stripTitleSuffixes(title: string): string {
+  let base = title.trim();
+  for (;;) {
+    // Full-width brackets read as ASCII ones (as NFKD folds them for normalization).
+    // Each is one UTF-16 unit either way, so match indexes still fit `base`.
+    const m = TRAILING_GROUP.exec(base.replace(/[\uff08\uff3b\uff09\uff3d]/g, (c) => ({ '\uff08': '(', '\uff3b': '[', '\uff09': ')', '\uff3d': ']' })[c] as string));
+    if (!m || !isStrippableSuffix(fold(m[1] ?? ''))) break;
+    const rest = base.slice(0, m.index).trim();
+    if (!rest) break;
+    base = rest;
+  }
+  return base;
+}
+
+/**
  * The year a title names among its trailing suffix groups, e.g. 1978 for
  * "Title (1978)" and "Title (1978) (4K)". When several groups are years, the
  * outermost wins. Null when no trailing group is a year.
