@@ -375,8 +375,9 @@ export async function readAppleTvImport(ctx: Ctx, opts: AppleTvImportOptions = {
 /**
  * Plays dated more than a day ahead (a clock or export error) are dropped,
  * with one warning per movie, so no future date ever reaches the library.
- * A record that loses a play is no longer a complete set (it removes no
- * stored play). Returns the records with those plays (and such a watchedAt) left out.
+ * A complete set that loses a play writes none of its plays and removes
+ * none (as a history that can't be shown whole); any other record keeps the
+ * rest. Returns the records with those plays (and such a watchedAt) left out.
  */
 export function dropFutureDates(records: ImportRecord[], now: Date = new Date()): { records: ImportRecord[]; warnings: string[] } {
   const warnings: string[] = [];
@@ -388,7 +389,11 @@ export function dropFutureDates(records: ImportRecord[], now: Date = new Date())
     if (Array.isArray(r.viewings) && r.viewings.some((v) => future(v?.watchedAt))) {
       dropped.push(...r.viewings.filter((v) => future(v?.watchedAt)).map((v) => v.watchedAt as string));
       next = { ...next, viewings: r.viewings.filter((v) => !future(v?.watchedAt)) };
-      // A set with a play left out is no longer the source's whole set, so it removes nothing.
+      // A complete set with a play left out is no longer the source's whole
+      // history, so, as with any history that can't be shown whole, none of
+      // its plays is written (one could be a stored play under another date)
+      // and none is removed.
+      if (r.viewingsComplete === true) next.viewings = [];
       delete next.viewingsComplete;
       delete next.clearWatchedAtIfOwn;
     }
@@ -398,7 +403,12 @@ export function dropFutureDates(records: ImportRecord[], now: Date = new Date())
       delete next.watchedAt;
       delete next.watchedAtSource;
     }
-    if (dropped.length) warnings.push(`"${r.sourceTitle}": left out ${dropped.length === 1 ? 'a play' : `${dropped.length} plays`} dated in the future (${[...new Set(dropped)].join(', ')})`);
+    if (dropped.length) {
+      const held = r.viewingsComplete === true && Array.isArray(r.viewings) && r.viewings.length > dropped.length;
+      warnings.push(
+        `"${r.sourceTitle}": left out ${dropped.length === 1 ? 'a play' : `${dropped.length} plays`} dated in the future (${[...new Set(dropped)].join(', ')})${held ? ', so its other plays were not imported either and none was removed' : ''}`,
+      );
+    }
     return next;
   });
   return { records: out, warnings };

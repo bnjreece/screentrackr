@@ -116,10 +116,31 @@ describe('dropFutureDates', () => {
     expect(() => applyImport(db, res.records, { mode: 'merge' })).toThrow(/invalid watched date/);
   });
 
-  it('a complete set that loses a future play removes nothing (Astra r7)', () => {
-    const res = dropFutureDates([{ sourceTitle: 'Pale Rooftops', source: 'trakt', viewings: [{ watchedAt: '2099-01-01', sourceRef: '12345' }], viewingsComplete: true }], now);
+  it('a complete set that loses a future play writes and removes no play (Astra r7, r8)', () => {
+    const res = dropFutureDates(
+      [{ sourceTitle: 'Pale Rooftops', source: 'trakt', viewings: [{ watchedAt: '2024-01-02', sourceRef: '1' }, { watchedAt: '2099-01-01', sourceRef: '12345' }], viewingsComplete: true }],
+      now,
+    );
     expect(res.records[0]?.viewings).toEqual([]);
     expect(res.records[0]).not.toHaveProperty('viewingsComplete');
+  });
+
+  it('end to end: a whole history with a future play neither duplicates nor deletes a migrated play', () => {
+    merge([{ sourceTitle: 'Pale Rooftops', sourceYear: 1994, status: 'watched', source: 'trakt', externalIds: { trakt: '77' } }]);
+    db.sql.prepare("INSERT INTO viewings (item_id, watched_at, source) VALUES (?, '2024-01-01', 'trakt')").run(only().id);
+    const incoming: ImportRecord[] = [
+      {
+        sourceTitle: 'Pale Rooftops',
+        sourceYear: 1994,
+        status: 'watched',
+        source: 'trakt',
+        externalIds: { trakt: '77' },
+        viewings: [{ watchedAt: '2024-01-02', sourceRef: '1' }, { watchedAt: '2099-01-01', sourceRef: '2' }],
+        viewingsComplete: true,
+      },
+    ];
+    merge(dropFutureDates(incoming, now).records);
+    expect(plays()).toEqual([['2024-01-01', 'trakt', null]]);
   });
 
   it('leaves records without future dates as they are', () => {
