@@ -81,7 +81,9 @@ Showing 1-4 of 4.</code></pre>
       <li>Fincher or Villeneuve thrillers rated 7.5+ I haven't watched, under two hours.</li>
       <li>Which Villeneuve movies do I own that I haven't watched?</li>
       <li>What highly rated thrillers under two hours should I rent?</li>
-      <li>We watched The Glass Harbor tonight. Mark it watched and give it an 8.</li>
+      <li>We watched The Glass Harbor tonight. Log it and give it an 8.</li>
+      <li>Pick me a horror movie from the 1980s I own and haven't seen.</li>
+      <li>How many movies did I watch this year, and how many were rewatches?</li>
     </ul>
   </section>
 
@@ -97,21 +99,32 @@ Showing 1-4 of 4.</code></pre>
         <dt>IMDb</dt>
         <dd>Your ratings, watchlist, check-ins or a list, from the CSV files IMDb lets you download.</dd>
         <dt>Letterboxd</dt>
-        <dd>The export ZIP from Settings, Data: watched films, ratings, diary dates and the watchlist.</dd>
+        <dd>The export ZIP from Settings, Data: watched films, ratings, every diary entry as a play, the watchlist, and your lists if you ask.</dd>
         <dt>Trakt</dt>
-        <dd>The raw data export ZIP: movie history, ratings, watchlist and collection. Nothing else in it is opened.</dd>
+        <dd>The raw data export ZIP: every play in your movie history, ratings, watchlist and collection. Nothing else in it is opened.</dd>
         <dt>Plex and Jellyfin</dt>
-        <dd>Read the movies on your own media server with <code>screentrackr import plex</code> or <code>import jellyfin</code>, read only.</dd>
+        <dd>Read the movies on your own media server with <code>screentrackr import plex</code> or <code>import jellyfin</code>, read only. Save them once with <code>sync add</code> and <code>screentrackr sync</code> keeps the library current.</dd>
         <dt>CSV</dt>
         <dd>Title, year, director, status, your rating, IMDb id, in any column order.</dd>
         <dt>ScreenTrackr JSON</dt>
         <dd>Export and re-import with nothing lost, for backups and moving machines.</dd>
       </dl>
+      <h2 class="h2-next">Every play, and what to watch next</h2>
+      <dl class="sources">
+        <dt>Watch history</dt>
+        <dd>Every play is kept, with its date, rating and rewatch flag. <code>log</code> records one by hand and <code>history</code> lists them.</dd>
+        <dt>Pick and where to watch</dt>
+        <dd><code>pick</code> chooses at random within any search filters. <code>where</code> prints a JustWatch search link for a movie.</dd>
+        <dt>Stats and lists</dt>
+        <dd><code>stats --watched</code> counts what you watched by year, decade, genre, director and rating. Make your own lists, like Halloween, and filter by them.</dd>
+        <dt>Export</dt>
+        <dd>Write files for Letterboxd's and Trakt's importers, built to their published formats. You upload them yourself.</dd>
+      </dl>
     </div>
 
     <div class="block">
       <h2>Stays on your machine</h2>
-      <p>Your library lives in a SQLite file in <code>~/.screentrackr/</code>. There's no account, no server and no telemetry. screentrackr goes online only to download IMDb's dataset files from datasets.imdbws.com during <code>setup</code>, and, when you import from Plex or Jellyfin, to talk to your own server at the address you give. The IMDb, Letterboxd and Trakt imports only read the export files you downloaded. Tokens and passwords are never stored.</p>
+      <p>Your library lives in a SQLite file in <code>~/.screentrackr/</code>. There's no account, no server and no telemetry. screentrackr goes online only to download IMDb's dataset files from datasets.imdbws.com during <code>setup</code>, and, when you import or sync from Plex or Jellyfin, to talk to your own server at the address you give. The IMDb, Letterboxd and Trakt imports only read the export files you downloaded, and the exports only write files. Tokens and passwords are never stored.</p>
       <h2 class="h2-next">Installing for good</h2>
       <pre class="cmd"><code><span class="prompt" aria-hidden="true">$ </span><span class="sel">npm install -g screentrackr</span>
 <span class="prompt" aria-hidden="true">$ </span><span class="sel">screentrackr setup</span></code></pre>
@@ -122,7 +135,7 @@ Showing 1-4 of 4.</code></pre>
   <section class="data" aria-labelledby="data-title">
     <h2 id="data-title">About the data</h2>
     <p>No movie data ships with screentrackr. Each install downloads its own copy of IMDb's non-commercial datasets for that person's own personal use, under <a href="https://help.imdb.com/article/imdb/general-information/can-i-use-imdb-data-in-my-software/G5JTRESSHJBBHTGX">IMDb's terms</a>. Don't redistribute the database it builds.</p>
-    <p>Information courtesy of IMDb (<a href="https://www.imdb.com">imdb.com</a>). Used with permission. screentrackr is an independent project, not affiliated with or endorsed by IMDb, Apple, Letterboxd, Trakt, Plex or Jellyfin.</p>
+    <p>Information courtesy of IMDb (<a href="https://www.imdb.com">imdb.com</a>). Used with permission. screentrackr is an independent project, not affiliated with or endorsed by IMDb, Apple, Letterboxd, Trakt, Plex, Jellyfin or JustWatch.</p>
   </section>
 </main>
 

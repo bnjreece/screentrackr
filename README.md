@@ -356,7 +356,7 @@ screentrackr sync status       # each source's last run
 screentrackr sync [add <plex|jellyfin|apple-tv> | list | remove <kind> | status | launchd [--every <interval>] [--wrapper]] [--only <kind>] [--dry-run]
 ```
 
-- `sync add` takes the options of the matching `import` (`--section`, `--include-other-videos`, `--unwatched-status`, `--no-ratings` and `--history` for Plex; `--user`, `--user-id`, `--ratings`, `--strict-played` and `--timeout` for Jellyfin; `--timeout` for the TV app), checks them the same way, and saves them in `config.json` in the data home (owner-only, mode `0600`). One source per kind; adding a kind again replaces it. `sync list` shows them and `sync remove <kind>` drops one.
+- `sync add` takes the options of the matching `import` (`--section`, `--include-other-videos`, `--unwatched-status` and `--no-ratings` for Plex; `--user`, `--user-id`, `--ratings`, `--strict-played` and `--timeout` for Jellyfin; `--timeout` for the TV app), checks them the same way, and saves them in `config.json` in the data home (owner-only, mode `0600`). One source per kind; adding a kind again replaces it. `sync list` shows them and `sync remove <kind>` drops one.
 - Tokens are never saved. Plex reads `PLEX_TOKEN` and Jellyfin `JELLYFIN_TOKEN` when the sync runs. A sync never prompts, so Jellyfin needs the token (there is no password sign-in under sync), and a missing token fails that source with the same message `import` gives. `config.json` refuses any key that looks like a secret.
 - Every run is a merge import, never `--replace`. Each source prints its own block, then a total. A source that fails (a server that is down, a missing token) is reported and the others still run. `sync` exits 0 when every source succeeded and 1 when any failed. `--only <kind>` runs one source.
 - Only one sync runs at a time (`sync.lock` in the data home). A sync and `setup` never overlap: a sync started while `setup` runs exits 1 and says to try again, and a `setup` started during a sync refuses to start until it ends (its message says setup is already running, naming the sync's process). `--dry-run` changes nothing, not even by creating or upgrading the library (a library from an older screentrackr is upgraded by any normal command first, such as `screentrackr doctor`).
@@ -374,7 +374,7 @@ When a saved source needs a token, the plist runs a small wrapper script instead
 claude mcp add screentrackr -- npx -y screentrackr mcp
 ```
 
-Then ask in plain words: "Which Villeneuve movies do I own that I haven't watched?" or "What highly rated thrillers under two hours should I rent?" The MCP tools are `search_movies`, `get_movie`, `library_stats`, `update_movie`, `add_to_library` and `remove_from_library`. They share the CLI's filters and query code, so both always give the same answers. Two more, `setup_catalog` and `catalog_status`, build the catalog from inside the chat when you haven't run `setup` in a terminal (see below).
+Then ask in plain words: "Which Villeneuve movies do I own that I haven't watched?" or "What highly rated thrillers under two hours should I rent?" The MCP tools are `search_movies`, `pick_movie`, `get_movie`, `where_to_watch`, `library_stats`, `watch_stats`, `update_movie`, `add_to_library` and `remove_from_library`, plus `log_viewing`, `list_viewings` and `remove_viewing` for your watch history and `list_lists`, `create_list`, `delete_list`, `list_add` and `list_remove` for your lists. They share the CLI's filters and query code, so both always give the same answers. There is no MCP tool for imports or `sync`, so server tokens never reach an AI client. Two more, `setup_catalog` and `catalog_status`, build the catalog from inside the chat when you haven't run `setup` in a terminal (see below).
 
 ## Claude Desktop
 
@@ -421,15 +421,23 @@ screentrackr setup [--refresh] [--no-cast] [--include-tv-movies]
 screentrackr import <file|apple-tv|imdb <file.csv>...|letterboxd <export.zip|folder|file.csv>...|trakt <export.zip|folder>...|plex|jellyfin> [--format <format>] [--merge | --replace] [--dry-run]
 screentrackr import plex [--url <server>] [--section <name|key>]... [--include-other-videos] [--unwatched-status <someday|queue|skip>] [--no-ratings] [--token-stdin] [--from-file <file.json>] [--merge | --replace] [--dry-run]
 screentrackr import jellyfin --url <server> [--user <name>] [--user-id <id>] [--token-stdin | --password-stdin] [--ratings] [--strict-played] [--timeout <seconds>] [--dry-run]
+screentrackr sync [add <plex|jellyfin|apple-tv> | list | remove <kind> | status | launchd [--every <interval>] [--wrapper]] [--only <kind>] [--dry-run]
 screentrackr search [filters]
+screentrackr pick [filters] [-n <1-10>] [--seed <n>] [--priority-first] [--any-status]
 screentrackr show <id|tconst|title>
+screentrackr where <id|tconst|title> [--country <cc>] [--open]
 screentrackr add <tconst|title> [--year <yyyy>] [--status <status>] [--new-edition]
 screentrackr remove <id>
 screentrackr set <id|tconst|title> [--status <s>] [--era <e>] [--rating <1-10> | --clear-rating] [--watched-at <date> | --clear-watched-at] [--notes <text>]
+screentrackr log <id|tconst|title> [--on <date>] [--rewatch] [--rating <1-10>] [--keep-status]
+screentrackr history [<id|tconst|title>] [--year <yyyy>] [--from <date>] [--to <date>] [--source <source>] [-n <limit>] [--remove <viewing-id>]
+screentrackr lists
+screentrackr list <create|add|remove|show|rename|delete> <name> [<id|tconst|title>...]
 screentrackr match [--review] [--all]
 screentrackr link <id> <tconst>
 screentrackr stats [--watched] [--year <yyyy>] [--by <year|decade|genre|director|rating>] [-n <n>] [--list <name>]... [--all-lists]
 screentrackr export [--format json-v1|letterboxd|trakt] [--out <file>] [--out-dir <dir>] [--what <what>] [--list <name>] [--lists-as-tags]
+screentrackr config <get|set|unset> <key> [<value>]
 screentrackr mcp
 screentrackr doctor
 ```
@@ -437,16 +445,23 @@ screentrackr doctor
 | Command | What it does |
 |---|---|
 | `setup` | Downloads the IMDb datasets and builds the catalog. `--refresh` checks for newer files. Afterwards it refreshes automatic matches; your statuses, ratings, notes and manual links are never changed. |
-| `import` | Brings in a library file, the Apple TV app's library with `import apple-tv`, IMDb CSV exports with `import imdb` (`--as`, `--collection`, `--include-type`, `--checkin-dates`, `--notes-from-description`), a Letterboxd export with `import letterboxd` (`--owned-list`, `--with-reviews`, `--no-watchlist`), a Trakt export with `import trakt` (`--keep-bulk-dates`), or your own Plex or Jellyfin server with `import plex` or `import jellyfin` (see [Import your library](#import-your-library)). `--dry-run` shows what an import would add, update and leave for review without changing anything (`import plex --dry-run` shows only what it read). |
+| `import` | Brings in a library file, the Apple TV app's library with `import apple-tv`, IMDb CSV exports with `import imdb` (`--as`, `--collection`, `--to-list`, `--include-type`, `--checkin-dates`, `--notes-from-description`), a Letterboxd export with `import letterboxd` (`--owned-list`, `--lists`, `--list`, `--tags-as-lists`, `--with-reviews`, `--no-watchlist`), a Trakt export with `import trakt` (`--keep-bulk-dates`), or your own Plex or Jellyfin server with `import plex` or `import jellyfin` (see [Import your library](#import-your-library)). `--dry-run` shows what an import would add, update and leave for review without changing anything (`import plex --dry-run` shows only what it read). |
+| `sync` | Re-imports your saved Plex, Jellyfin and TV app sources as merge imports (see [Sync](#sync)). |
 | `search` | The main query. Filters are listed below. |
+| `pick` | Picks movies at random within any search filters, unwatched ones from your library by default (see [Pick a movie](#pick-a-movie)). |
 | `show` | The full record for one movie, by library id, IMDb id or title. An IMDb id or catalog title only finds items that are matched or linked by hand; an unmatched item (one imported with an unchecked IMDb id before `setup`, say) is reached by its id or its own title. A year in a title, as in `"The Glass Harbor (2009)"` or `"The Glass Harbor (2009) (4K)"`, only finds items of that year (within one); `set` works the same way. |
+| `where` | Prints a JustWatch search link for a movie; `--open` hands it to your browser (see [Where to watch](#where-to-watch)). |
 | `add` | Adds a catalog movie to your library. An ambiguous title lists the candidates instead of guessing. A year in the title, like `--year`, only finds movies of that year (within one), and a title year that disagrees with `--year` finds nothing. A movie you already have is refused unless you pass `--new-edition`. |
 | `remove` | Removes one library item by id. |
 | `set` | Changes status, watched era (`long-ago`, `2010s`, `2020s`), your rating, watched date or notes. `--watched-at` records a play on that date (a date earlier than a play the movie already has is refused, since the watched date is the latest play); `--clear-watched-at` removes every play of the movie and says how many. A reference that matches more than one item never writes; it lists the ids to use. References resolve as for `show`, and the MCP `get_movie` and `update_movie` tools do the same. |
+| `log` | Records a play, today unless `--on` says otherwise (see [Watch history](#watch-history)). |
+| `history` | Lists your plays newest first; `--remove <viewing-id>` deletes one. |
+| `lists`, `list` | Shows your lists, and creates, fills, shows, renames or deletes one (see [Lists](#lists)). |
 | `match` | Retries matching for items that need it. `--review` lists them with candidates. |
 | `link` | Matches a library item to an IMDb id by hand. Manual links are never changed by later matching. |
 | `stats` | Counts by status, genre, decade and director, how many items are unmatched, and a short block on this year. `--watched` is the full watch report (see [Stats](#stats)). |
 | `export` | Writes ScreenTrackr JSON v1 to stdout or `--out <file>`, or with `--format letterboxd` or `--format trakt` files for those services' importers (see [Export to Letterboxd and Trakt](#export-to-letterboxd-and-trakt)). |
+| `config` | Gets, sets or unsets a saved setting (today only `country`, for `where`). |
 | `mcp` | Starts the MCP server on stdio. |
 | `doctor` | Checks Node, the database, the catalog and the library. |
 
@@ -489,13 +504,14 @@ The code is MIT licensed. See [LICENSE](LICENSE).
 
 ## Privacy
 
-screentrackr makes network calls in only three cases:
+screentrackr makes network calls in only these cases:
 
 - `setup` (or the `setup_catalog` MCP tool, which runs the same thing) downloads IMDb's datasets from datasets.imdbws.com.
 - `screentrackr import plex` sends read-only requests to the Plex Media Server address you give it, and nowhere else.
 - `screentrackr import jellyfin` sends read-only requests to the Jellyfin server address you give it, and nowhere else (plus a sign-in and sign-out there when you use a password).
+- `screentrackr sync` runs the same Plex and Jellyfin imports against the addresses you saved with `sync add`, and contacts nothing else. Its saved settings in `config.json` never hold a token or password.
 
-The Letterboxd, IMDb, Trakt, Apple TV, CSV and JSON imports only read files and apps on your machine; they never sign in to those services or fetch anything from them. screentrackr itself never sends anything about your library anywhere. (Through an MCP client, the answers to what you ask go to that client, which may pass them to its AI model provider; that is between you and the client.) `screentrackr where --open` asks your browser to open a JustWatch search page; the browser makes that request, not screentrackr, and `where` without `--open` only prints the link. Plex and Jellyfin requests carry only what the server needs to answer (your token, or your Jellyfin user name and password when you sign in) and go only to the address you give. Tokens and passwords are never stored or printed. There's no telemetry, no account and no server. Your library stays in a SQLite file on your machine.
+The Letterboxd, IMDb, Trakt, Apple TV, CSV and JSON imports only read files and apps on your machine, and the Letterboxd and Trakt exports only write files there (you upload them yourself); they never sign in to those services or fetch anything from them. screentrackr itself never sends anything about your library anywhere. (Through an MCP client, the answers to what you ask go to that client, which may pass them to its AI model provider; that is between you and the client.) `screentrackr where --open` asks your browser to open a JustWatch search page; the browser makes that request, not screentrackr, and `where` without `--open` only prints the link. Plex and Jellyfin requests carry only what the server needs to answer (your token, or your Jellyfin user name and password when you sign in) and go only to the address you give. Tokens and passwords are never stored or printed. There's no telemetry, no account and no server. Your library stays in a SQLite file on your machine.
 
 ## Not affiliated
 

@@ -135,16 +135,21 @@ const rows = () => (ctx.db().sql.prepare('SELECT source_title FROM library_items
 
 describe('sync add, list, remove', () => {
   it('saves each kind with the options its import takes, owner-only', async () => {
-    await run(['add', 'plex'], { url: PLEX_URL, section: ['Movies'], 'no-ratings': true, 'unwatched-status': 'skip', history: true });
+    await run(['add', 'plex'], { url: PLEX_URL, section: ['Movies'], 'no-ratings': true, 'unwatched-status': 'skip' });
     await run(['add', 'jellyfin'], { url: JF_URL, user: 'orrin', ratings: true, timeout: '45' });
     await run(['add', 'apple-tv'], { timeout: '90' });
     expect(loadConfig(home).sync?.sources).toEqual([
-      { kind: 'plex', url: PLEX_URL, sections: ['Movies'], includeOtherVideos: false, unwatchedStatus: 'skip', ratings: false, history: true },
+      { kind: 'plex', url: PLEX_URL, sections: ['Movies'], includeOtherVideos: false, unwatchedStatus: 'skip', ratings: false },
       { kind: 'jellyfin', url: JF_URL, user: 'orrin', ratings: true, strictPlayed: false, timeoutSec: 45 },
       { kind: 'apple-tv', timeoutSec: 90 },
     ]);
     expect(statSync(configPath(home)).mode & 0o777).toBe(0o600);
     expect(out.join('\n')).toMatch(/Saved the plex source/);
+  });
+
+  it('refuses --history for Plex, since 0.4.0 does not read Plex play history', async () => {
+    await expect(run(['add', 'plex'], { url: PLEX_URL, history: true })).rejects.toThrow(/play history is not read/);
+    expect(loadConfig(home).sync?.sources ?? []).toEqual([]);
   });
 
   it('defaults the Plex address, and replaces a saved source of the same kind', async () => {

@@ -72,7 +72,7 @@ const OPTIONS = {
     description: 'add plex: status for new unwatched movies (default someday; skip leaves them out)',
   },
   'no-ratings': { type: 'boolean', description: 'add plex: do not read Plex star ratings' },
-  history: { type: 'boolean', description: "add plex: also read Plex's play history" },
+  history: { type: 'boolean', description: 'add plex: refused; this version does not read Plex play history' },
   user: { type: 'string', value: '<name>', description: 'add jellyfin: whose library to read' },
   'user-id': { type: 'string', value: '<id>', description: 'add jellyfin, with an admin API key: the user id whose library to read' },
   ratings: { type: 'boolean', description: 'add jellyfin: also import your Jellyfin ratings' },
@@ -115,6 +115,9 @@ function timeoutSec(values: Values): number | undefined {
 function sourceFromFlags(kind: SyncKind, values: Values): SyncSource {
   onlyFlags(values, ADD_FLAGS[kind], kind);
   if (kind === 'plex') {
+    if (bool(values, 'history')) {
+      throw new UserError("Plex play history is not read in this version, so --history is refused. Sync reads each movie's last-played date, as `import plex` does.");
+    }
     const url = str(values, 'url') ?? PLEX_DEFAULT_URL;
     plexBaseUrl(url);
     const unwatched = str(values, 'unwatched-status');
@@ -129,7 +132,6 @@ function sourceFromFlags(kind: SyncKind, values: Values): SyncSource {
       includeOtherVideos: bool(values, 'include-other-videos'),
       ...(unwatched !== undefined ? { unwatchedStatus: unwatched as PlexUnwatchedStatus } : {}),
       ratings: !bool(values, 'no-ratings'),
-      history: bool(values, 'history'),
     };
     return s;
   }
@@ -163,7 +165,6 @@ function describeSource(s: SyncSource): string {
       s.includeOtherVideos ? 'other videos' : '',
       s.unwatchedStatus ? `new unwatched: ${s.unwatchedStatus}` : '',
       s.ratings === false ? 'no ratings' : 'ratings',
-      s.history ? 'history' : '',
     ].filter(Boolean);
     return `${s.url}  (${bits.join('; ')})`;
   }
@@ -189,15 +190,13 @@ function tokenNote(kind: SyncKind): string {
 async function runSource(ctx: Ctx, s: SyncSource, dryRun: boolean): Promise<SourceRunOutput> {
   let outcome;
   if (s.kind === 'plex') {
-    // `history` is passed on for the Plex history reader (it is ignored until that reader exists).
-    const opts: PlexImportOptions & { history?: boolean } = {
+    const opts: PlexImportOptions = {
       url: s.url,
       ...(s.sections ? { sections: s.sections } : {}),
       includeOtherVideos: s.includeOtherVideos === true,
       ...(s.unwatchedStatus ? { unwatchedStatus: s.unwatchedStatus } : {}),
       ratings: s.ratings !== false,
       tokenStdin: false,
-      ...(s.history ? { history: true } : {}),
     };
     outcome = await runPlexImport(ctx, { ...opts, dryRun });
   } else if (s.kind === 'jellyfin') {
@@ -471,7 +470,7 @@ export const sync: Command = {
   usage: `sync [add <${KINDS}> | list | remove <kind> | status | launchd [--every <interval>] [--wrapper]] [--only <kind>] [--dry-run]`,
   details: [
     'Save a source once, with the options its `import` takes, then run them all with `screentrackr sync`:',
-    '  screentrackr sync add plex --url http://127.0.0.1:32400 [--section Movies] [--history] [--no-ratings] [--unwatched-status someday]',
+    '  screentrackr sync add plex --url http://127.0.0.1:32400 [--section Movies] [--no-ratings] [--unwatched-status someday]',
     '  screentrackr sync add jellyfin --url http://localhost:8096 [--user <name>] [--ratings]',
     '  screentrackr sync add apple-tv [--timeout 120]',
     'Sources are saved in config.json in the data home (owner-only). Tokens never are: Plex reads PLEX_TOKEN and Jellyfin JELLYFIN_TOKEN when the sync runs, and a sync never prompts, so a missing token fails that source.',
