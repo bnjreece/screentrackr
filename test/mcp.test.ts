@@ -75,19 +75,25 @@ afterEach(async () => {
 });
 
 describe('tools/list', () => {
-  it('returns the 8 tools with their annotations', async () => {
+  it('returns the tools with their annotations', async () => {
     const { tools } = await client.listTools();
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
     expect(Object.keys(byName).sort()).toEqual(
       [
         'add_to_library',
         'catalog_status',
+        'create_list',
+        'delete_list',
         'get_movie',
         'library_stats',
+        'list_add',
+        'list_lists',
+        'list_remove',
         'remove_from_library',
         'search_movies',
         'setup_catalog',
         'update_movie',
+        'watch_stats',
       ].sort(),
     );
     expect(byName.catalog_status!.annotations).toMatchObject({ readOnlyHint: true });
@@ -339,7 +345,7 @@ describe('stdio session (Review Focus #1)', () => {
     for (const m of msgs) expect(m.jsonrpc).toBe('2.0');
     expect(msgs.map((m) => m.id)).toEqual([1, 2, 3]);
     expect((msgs[0]!.result as { serverInfo: { name: string } }).serverInfo.name).toBe('screentrackr');
-    expect((msgs[1]!.result as { tools: unknown[] }).tools).toHaveLength(8);
+    expect((msgs[1]!.result as { tools: unknown[] }).tools).toHaveLength(14);
     expect((msgs[2]!.result as { isError?: boolean }).isError).toBeFalsy();
   }, 30_000);
 });

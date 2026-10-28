@@ -1,0 +1,82 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`stats --watched text > renders every block at 80 columns 1`] = `
+"Watched, all time
+Plays          6, 2 rewatches
+Films          5
+No known date  2 films
+Rated          4 films, average 7.5
+Versus IMDb    -0.3 (yours 8.0, IMDb 8.3, over 3 films)
+
+By year watched
+YEAR  PLAYS  FILMS  REWATCHES
+2025      2      2          1
+2024      1      1          0
+2023      2      1          1
+
+By release decade
+DECADE  FILMS
+1980s       1
+1990s       2
+2000s       1
+2010s       1
+
+Top genres
+GENRE     FILMS  RATED  AVERAGE
+Crime         2      2      8.0
+Drama         2      2      8.5
+Mystery       2      2      7.5
+Thriller      2      2      8.0
+Comedy        1      1      6.0
+Horror        1      0
+Music         1      1      6.0
+Sci-Fi        1      1      8.0
+
+Top directors
+DIRECTOR           FILMS  RATED  AVERAGE
+Dana Fincher           2      2      8.0
+Lena Holt              2      1      6.0
+Denise Villeneuve      1      1      8.0
+
+Your ratings
+10  0
+ 9  ████████████████████████████████████████ 1
+ 8  ████████████████████████████████████████ 1
+ 7  ████████████████████████████████████████ 1
+ 6  ████████████████████████████████████████ 1
+ 5  0
+ 4  0
+ 3  0
+ 2  0
+ 1  0"
+`;
+
+exports[`stats --watched text > renders every block at 80 columns 2`] = `
+"Watched, all time
+
+Your ratings
+10  0
+ 9  ████████████████████████████████████████ 1
+ 8  ████████████████████████████████████████ 1
+ 7  ████████████████████████████████████████ 1
+ 6  ████████████████████████████████████████ 1
+ 5  0
+ 4  0
+ 3  0
+ 2  0
+ 1  0"
+`;
+
+exports[`stats --watched text > renders every block at 80 columns 3`] = `
+"Movies         7
+By status      queue 1, priority 0, someday 0, watched 6
+Ambiguous      0
+Unmatched      2
+Top genres     Drama 4, Thriller 4, Crime 3, Mystery 3, Comedy 1, Horror 1, Music 1, Sci-Fi 1
+Top directors  Dana Fincher 4, Lena Holt 2, Denise Villeneuve 1
+By decade      1980s 1, 1990s 3, 2000s 1, 2010s 2
+Plays in 2025  2 (1 rewatch)
+Films in 2025  2
+Plays in 2024  1
+Rated          4 films, average 7.5"
+`;
