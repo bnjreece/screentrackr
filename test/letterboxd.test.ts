@@ -626,3 +626,17 @@ describe('a diary row without a name (0.4.0, Astra r2)', () => {
     expect(viewingsOf(db, (item('Quiet Ledger')[0] as LibraryItem).id)).toHaveLength(1);
   });
 });
+
+describe('a diary entry with nothing to tell it by (0.4.0)', () => {
+  it('is not kept as a play, so the same entry with its link later is one play', () => {
+    const head = 'Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date';
+    const watched = { name: 'watched.csv', text: 'Date,Name,Year,Letterboxd URI\n2024-04-02,Quiet Ledger,1999,https://boxd.it/zZ5e\n' };
+    const bare = parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,Quiet Ledger,1999,,3,,,\n` }]);
+    expect(bare.warnings.join('\n')).toMatch(/neither an entry link nor a Watched Date/);
+    expect(bare.records[0]).toMatchObject({ status: 'watched', viewings: [] });
+    expect(bare.records[0]?.viewingsComplete).toBeUndefined();
+    applyImport(db, bare.records, { mode: 'merge' });
+    applyImport(db, parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,3,,,\n` }]).records, { mode: 'merge' });
+    expect(viewingsOf(db, (item('Quiet Ledger')[0] as LibraryItem).id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([[null, 'https://boxd.it/e1']]);
+  });
+});

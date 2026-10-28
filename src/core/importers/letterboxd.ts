@@ -437,6 +437,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
   };
 
   const records: ImportRecord[] = [];
+  let unidentified = 0;
   for (const f of films.values()) {
     const entries = [...(entriesOf.get(f.uri) ?? [])].sort(latestFirst);
     const rec: ImportRecord = { sourceTitle: f.title, source: 'letterboxd', fillOnly: true, externalIds: { letterboxd: f.uri } };
@@ -448,8 +449,13 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
 
     if (f.watched || entries.length) rec.status = 'watched';
     else rec.statusIfNew = 'queue';
+    // An entry with neither a link nor a Watched Date has nothing to tell it
+    // by, so it is not kept as a play (the same entry seen later with its
+    // link could not be matched to it); the film is still watched.
+    const kept = entries.filter((e) => e.uri !== null || e.watchedDate !== null);
+    unidentified += entries.length - kept.length;
     if (entries.length) {
-      rec.viewings = entries.map(
+      rec.viewings = kept.map(
         (e): ImportViewing => ({ watchedAt: e.watchedDate, rewatch: e.rewatch, rating: e.rating ?? null, sourceRef: e.uri }),
       );
     }
@@ -459,7 +465,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
     // the film). Plays you logged and other sources' plays stay.
     // An entry that could not be attached anywhere may be this film's
     // (renamed since), so then no film gets a complete set.
-    if (inp.diary && !unsure.has(f.uri) && unplaced === 0) {
+    if (inp.diary && !unsure.has(f.uri) && unplaced === 0 && kept.length === entries.length) {
       rec.viewings ??= [];
       rec.viewingsComplete = true;
     }
@@ -484,6 +490,11 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
       if (review) rec.notes = review;
     }
     records.push(rec);
+  }
+  if (unidentified) {
+    warnings.push(
+      `${unidentified} diary entr${unidentified === 1 ? 'y has' : 'ies have'} neither an entry link nor a Watched Date, so ${unidentified === 1 ? 'it was' : 'they were'} not kept as plays (${unidentified === 1 ? 'its film is' : 'their films are'} still watched, and no Letterboxd play of ${unidentified === 1 ? 'it' : 'them'} was removed)`,
+    );
   }
   return { records, lists: [...lists.values()] };
 }

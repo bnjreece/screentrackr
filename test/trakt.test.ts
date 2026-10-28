@@ -222,9 +222,10 @@ describe('parsing', () => {
     expect(rec(res.records, 104)).toMatchObject({ owned: true, sourceOwnedRaw: 'trakt:collection', sourceYear: 2011 });
     expect(rec(res.records, 104)?.ownedIfNew).toBeUndefined();
     // watched-movies alone: watched with its last date; a null year is left out.
-    expect(rec(res.records, 105)).toMatchObject({ status: 'watched', viewings: [{ watchedAt: '2015-06-01' }] });
-    // Not in the history, so its one play is not a complete set.
+    // Not in the history: watched, with no play (watched-movies' last play has no id to match it by later; Astra r5).
+    expect(rec(res.records, 105)).toMatchObject({ status: 'watched', viewings: [] });
     expect(rec(res.records, 105)?.viewingsComplete).toBeUndefined();
+    expect(res.notices.join('\n')).toMatch(/1 watched movie has no play in the history/);
     expect(rec(res.records, 105)).not.toHaveProperty('sourceYear');
     // An epoch-zero play is watched with no date.
     expect(rec(res.records, 106)).toMatchObject({ status: 'watched', sourceYear: 1994 });
@@ -402,10 +403,12 @@ describe('parsing', () => {
     // The history movies also appear in watched-movies at the same second: still one each.
     const again = plays.map((p) => ({ plays: 1, last_watched_at: at, movie: p.movie }));
     const res = parse({ 'watched-history.json': plays, 'watched-movies.json': [...others, ...again] });
-    expect(res.bulkDated).toBe(10);
+    // The five history movies lose their bulk dates (the five others have no history play at all).
+    expect(res.bulkDated).toBe(5);
     expect(res.records.every((r) => latest(r) === undefined)).toBe(true);
     const nine = parse({ 'watched-history.json': plays, 'watched-movies.json': [...others.slice(0, 4), ...again] });
     expect(nine.bulkDated).toBe(0);
+    expect(nine.records.filter((r) => latest(r) === '2018-03-03')).toHaveLength(5);
   });
 
   it('every distinct history play counts toward a bulk log, also several of one movie', () => {
@@ -506,11 +509,11 @@ describe('partial exports (_errors.json)', () => {
     const text = res.warnings.join('\n');
     expect(text).not.toMatch(/orrin-vale|429/);
     expect(text).toMatch(/watch history.*incomplete/i);
-    expect(text).toMatch(/watched-movies/);
+    expect(text).toMatch(/watched-movies\.json lists are still marked watched/);
     expect(text).toMatch(/ratings.*incomplete/i);
     expect(res.warnings.filter((w) => /export/i.test(w)).length).toBeGreaterThanOrEqual(3);
-    // History failed, so watched comes from watched-movies, its last play included, and nothing is a complete set.
-    expect(rec(res.records, 101)).toMatchObject({ status: 'watched', viewings: [{ watchedAt: '2024-02-10' }] });
+    // History failed, so watched comes from watched-movies (without a play: Astra r5), and nothing is a complete set.
+    expect(rec(res.records, 101)).toMatchObject({ status: 'watched', viewings: [] });
     expect(res.records.some((r) => r.viewingsComplete)).toBe(false);
   });
 
@@ -754,21 +757,38 @@ describe('history plays (0.4.0)', () => {
     ]);
   });
 
-  it('with the history incomplete, adds the plays it has plus last_watched_at and removes nothing', () => {
+  // Astra r5: watched-movies' last_watched_at is no longer a play (it has no id; see trakt.ts).
+  it('with the history incomplete, adds the plays it has and removes nothing', () => {
     applyImport(db, parse({ 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z'), play(2, '2022-02-02T12:00:00.000Z')] }).records, { mode: 'merge' });
     const partial = parse({
       'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z')],
       'watched-movies.json': [{ plays: 3, last_watched_at: '2024-05-05T12:00:00.000Z', movie: GLASS }],
       '_errors.json': [{ endpoint: 'users/someone/history', error: 'HTTP 500', fetchedPages: 1, totalPages: 2 }],
     });
-    expect(rec(partial.records, 101)).toMatchObject({ viewings: [{ watchedAt: '2018-04-04', sourceRef: '1' }, { watchedAt: '2024-05-05' }] });
+    expect(rec(partial.records, 101)).toMatchObject({ viewings: [{ watchedAt: '2018-04-04', sourceRef: '1' }] });
     expect(rec(partial.records, 101)?.viewingsComplete).toBeUndefined();
     applyImport(db, partial.records, { mode: 'merge' });
     expect(glassPlays()).toEqual([
-      ['2024-05-05', 'trakt', null],
       ['2022-02-02', 'trakt', '2'],
       ['2018-04-04', 'trakt', '1'],
     ]);
+  });
+
+  it('a later partial export never adds a play beside one a whole history kept without its bulk date', () => {
+    // Ten movies bulk-logged at one second, nine of them watched again later.
+    const at = '2019-01-01T00:00:00.000Z';
+    const bulk = bulkPlays(10, at) as { id: number; movie: { ids: { trakt: number } } }[];
+    const later = bulk.slice(1).map((p, i) => ({ ...p, id: 50_000 + i, watched_at: '2023-03-03T12:00:00.000Z' }));
+    applyImport(db, parse({ 'watched-history.json': [...bulk, ...later] }).records, { mode: 'merge' });
+    const id = (byTitle('Bulk Reel 1')[0] as LibraryItem).id;
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([[null, '20000']]);
+    const wm = [
+      { plays: 1, last_watched_at: at, movie: bulk[0]?.movie },
+      ...later.map((p) => ({ plays: 2, last_watched_at: '2023-03-03T12:00:00.000Z', movie: p.movie })),
+    ];
+    const partial = parse({ 'watched-history.json': later.slice(0, 2), 'watched-movies.json': wm, '_errors.json': [{ endpoint: 'users/someone/history', error: 'HTTP 500' }] });
+    applyImport(db, partial.records, { mode: 'merge' });
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([[null, '20000']]);
   });
 });
 

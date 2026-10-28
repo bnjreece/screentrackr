@@ -27,9 +27,9 @@
  *   unless the export cannot show it is whole (loose files, a missing page, a
  *   row or error list that can't be read, or `_errors.json` naming the
  *   history): then the plays it does have are added and nothing is removed.
- *   When a whole export's `_errors.json` names the history, watched-movies'
- *   last_watched_at adds one play (dated, not bulk-logged) per movie too. A
- *   history row with no play id is not kept as a play (it could never be
+ *   watched-movies says a movie was watched, but its last_watched_at never
+ *   becomes a play (it has no play id, so the same play seen later in the
+ *   history could not be told from it). A history row with no play id is not kept as a play (it could never be
  *   told from the same play once it has one).
  * - The watchlist puts a NEW movie in the queue (`statusIfNew`), so it never
  *   moves an existing item, a watched one included. Watched beats watchlist.
@@ -374,7 +374,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
           incomplete.add(category);
           const then =
             category === 'watch history'
-              ? 'Watched movies and dates also come from watched-movies.json, where it has them.'
+              ? 'Movies watched-movies.json lists are still marked watched; their plays come in with a complete export.'
               : 'Movies missing from it are left as they are; export again later to bring in the rest.';
           warnings.push(`Your Trakt export's ${category} is incomplete: Trakt could not export all of it${howMuch}. ${then}`);
         } else {
@@ -562,9 +562,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   if (historyRead && !historyComplete && !incomplete.has('watch history')) {
     notices.push('The Trakt history may not be whole (loose files, a missing page, or rows or an error list that could not be read), so its plays were added and none were removed.');
   }
-  // watched-movies' last play stands in only in a whole export whose watched-movies is whole, and
-  // only for a history the export says is incomplete, or (in a whole history) a movie it has no play of.
-  const fallbackOk = opts.wholeExport !== false && !incomplete.has('watched movies');
+  let noHistoryPlay = 0;
   let bulkDated = 0;
   let bulkLeftOut = 0;
   const records: ImportRecord[] = [];
@@ -588,24 +586,16 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       const keep = (p: { t: number | null }) => historyComplete || p.t === null || !bulk.has(Math.floor(p.t / 1000));
       bulkLeftOut += a.plays.filter((p) => !keep(p)).length;
       const viewings: ImportViewing[] = a.plays.filter(keep).map((p) => ({ watchedAt: day(p.t), sourceRef: p.ref }));
-      if (fallbackOk && (incomplete.has('watch history') || (historyComplete && !a.plays.length))) {
-        // The export says its history is incomplete (or has no play of this
-        // movie, which watched-movies says was watched): watched-movies' last play
-        // stands in (once per day; the history's play of that day, when it has
-        // one, is it). Only then, and only from a whole export whose
-        // watched-movies is whole, since this play has no ref: the same play
-        // seen later with its ref can only meet it on its day, so a bulk-logged
-        // last play (which the history keeps without a date) and one with no
-        // usable date are left out too.
-        const last = day(a.wmLast);
-        const bulkLast = a.wmLast !== null && bulk.has(Math.floor(a.wmLast / 1000));
-        if (bulkLast && a.wmPlays > 0 && !a.plays.length) bulkLeftOut++;
-        else if (a.wmPlays > 0 && last !== null && !viewings.some((v) => v.watchedAt === last)) viewings.push({ watchedAt: last });
-      }
+      // watched-movies' last play never becomes a play: it has no play id,
+      // so the same play seen later in the history (with its id, maybe
+      // without its bulk date) could not be told from it and would count
+      // twice. The movie is watched; its plays come from the history.
+      if (!a.plays.length && a.wmPlays > 0) noHistoryPlay++;
       rec.viewings = viewings;
       if (historyComplete && a.plays.length) rec.viewingsComplete = true;
-      const anyKnown = a.wmLast !== null || a.plays.some((p) => p.t !== null);
-      if (anyKnown && !viewings.some((v) => v.watchedAt !== null)) bulkDated++;
+      // Its dates were all left out as bulk-logged (counted once per movie).
+      const known = a.plays.filter((p) => p.t !== null);
+      if (known.length && !viewings.some((v) => v.watchedAt !== null) && known.every((p) => bulk.has(Math.floor((p.t as number) / 1000)))) bulkDated++;
     } else {
       if (a.watchlist) rec.statusIfNew = 'queue';
       // In the export but with no play in a whole history: no Trakt play of it is left.
@@ -628,6 +618,11 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   if (bulkDated) {
     notices.push(
       `${bulkDated} watched movie${bulkDated === 1 ? ' was' : 's were'} logged in bulk on Trakt (${BULK_PLAYS} or more plays at the same second), so ${bulkDated === 1 ? 'its watch date was' : 'their watch dates were'} left out. --keep-bulk-dates keeps them.`,
+    );
+  }
+  if (noHistoryPlay) {
+    notices.push(
+      `${noHistoryPlay} watched movie${noHistoryPlay === 1 ? ' has' : 's have'} no play in the history this export holds, so ${noHistoryPlay === 1 ? 'it is' : 'they are'} marked watched with no play or date. A complete export brings the plays in.`,
     );
   }
   if (bulkLeftOut) {
