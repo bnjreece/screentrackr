@@ -209,6 +209,8 @@ describe('parsing', () => {
         { watchedAt: '2023-05-01', sourceRef: '9002' },
       ],
       viewingsComplete: true,
+      // The fixture's history row for a title deleted from Trakt: a complete set never removes that play.
+      keepRefs: ['9004'],
       myRating: 8,
     });
     // Watchlist only: a new item goes in the queue, an existing one keeps its status.
@@ -939,5 +941,36 @@ describe('plays with nothing to match them by later (0.4.0, Astra r4)', () => {
     applyImport(db, parse({ 'watched-history.json': [row(123)] }).records, { mode: 'merge' });
     const id = (byTitle('The Glass Harbor')[0] as LibraryItem).id;
     expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([[null, '123']]);
+  });
+});
+
+describe('history rows that name a play but no film it can place (0.4.0 release review, Astra r1)', () => {
+  const play = (id: number, at: string, m: unknown = GLASS) => ({ id, watched_at: at, action: 'watch', type: 'movie', movie: m });
+  const glassRefs = () => viewingsOf(db, (byTitle('The Glass Harbor')[0] as LibraryItem).id).map((v) => v.sourceRef);
+  const saltRefs = () => viewingsOf(db, (byTitle('Salt & Signal')[0] as LibraryItem).id).map((v) => v.sourceRef);
+
+  it('a play whose title was deleted from Trakt is kept, though the rest of the history is whole', () => {
+    applyImport(db, parse({ 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z'), play(2, '2022-02-02T12:00:00.000Z')] }).records, { mode: 'merge' });
+    expect(glassRefs()).toEqual(['2', '1']);
+    const res = parse({ 'watched-history.json': [{ ...play(1, '2018-04-04T12:00:00.000Z'), movie: null }, play(2, '2022-02-02T12:00:00.000Z')] });
+    expect(rec(res.records, 101)).toMatchObject({ viewingsComplete: true });
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(glassRefs()).toEqual(['2', '1']);
+    // A play the history no longer lists at all still goes.
+    applyImport(db, parse({ 'watched-history.json': [play(2, '2022-02-02T12:00:00.000Z')] }).records, { mode: 'merge' });
+    expect(glassRefs()).toEqual(['2']);
+  });
+
+  it('one play id listed for two films makes the history doubtful, so no play is removed', () => {
+    applyImport(db, parse({ 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z', SALT)] }).records, { mode: 'merge' });
+    expect(saltRefs()).toEqual(['1']);
+    const res = parse({
+      'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z', GLASS), play(1, '2018-04-04T12:00:00.000Z', SALT)],
+      'ratings-movies.json': [{ rated_at: '2024-01-01T00:00:00.000Z', rating: 7, type: 'movie', movie: SALT }],
+    });
+    expect(res.records.some((r) => r.viewingsComplete)).toBe(false);
+    expect(res.warnings.join('\n')).toMatch(/listed for two different movies/);
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(saltRefs()).toEqual(['1']);
   });
 });

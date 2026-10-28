@@ -33,7 +33,12 @@ const decade = z
   .trim()
   .regex(DECADE_RE, 'Expected a decade such as 1980s')
   .refine((d) => Number(d.slice(0, 4)) >= MIN_DECADE && Number(d.slice(0, 4)) <= MAX_DECADE, `Decades run from ${MIN_DECADE}s to ${MAX_DECADE}s`);
-const listName = z.string().trim().min(1).max(100);
+// Measured as list create measures a name: in characters, after NFC (MAX_LIST_NAME in lists.ts).
+const listName = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((s) => [...s.normalize('NFC')].length <= 100, 'A list name can be at most 100 characters');
 
 /**
  * The raw field shape, for callers (such as an MCP tool definition) that need

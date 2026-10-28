@@ -444,9 +444,10 @@ export function planViewingSync(
   stored: readonly Viewing[],
   incoming: readonly NewViewing[],
   complete: ReadonlySet<string>,
-  opts: { exact?: boolean } = {},
+  opts: { exact?: boolean; keepRefs?: ReadonlySet<string> } = {},
 ): ViewingPlan {
   const exact = opts.exact === true;
+  const keepRefs = opts.keepRefs ?? new Set<string>();
   const plan: ViewingPlan = { inserts: [], updates: [], deletes: [] };
   // Inserts keep the incoming order across sources, so a restore adds plays in
   // the order the file lists them and same-day ties resolve as they did.
@@ -540,7 +541,10 @@ export function planViewingSync(
       if (hit) update(hit, exact ? {} : v, 'day');
       else insert(v);
     }
-    if (complete.has(source) && source !== 'manual') for (const s of mine) if (!used.has(s.id)) plan.deletes.push(s.id);
+    if (complete.has(source) && source !== 'manual') {
+      // A play the source still lists, though it could not say for which film, stays.
+      for (const s of mine) if (!used.has(s.id) && !(s.sourceRef !== null && keepRefs.has(s.sourceRef))) plan.deletes.push(s.id);
+    }
   }
   plan.inserts.sort((x, y) => (insertedFrom.get(x) ?? 0) - (insertedFrom.get(y) ?? 0));
   return plan;

@@ -67,6 +67,12 @@ const tconsts = (rs: MovieResult[]) => rs.map((r) => r.tconst).sort();
 beforeEach(() => seedLibrary());
 
 describe('FilterSchema', () => {
+  it('measures a list name the way list create does, after NFC (release review, Astra r1)', () => {
+    const decomposed = 'e\u0301'.repeat(60); // 120 code units, 60 characters once composed
+    expect(FilterSchema.safeParse({ lists: [decomposed] }).success).toBe(true);
+    expect(FilterSchema.safeParse({ lists: ['x'.repeat(101)] }).success).toBe(false);
+  });
+
   it('applies defaults', () => {
     const f = FilterSchema.parse({});
     expect(f.scope).toBe('library');

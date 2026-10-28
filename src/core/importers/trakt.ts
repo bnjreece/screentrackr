@@ -390,7 +390,10 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   }
 
   const accs = new Map<number, Acc>();
-  const seenPlays = new Set<string>();
+  /** Each play id seen in the history, with the Trakt id of its film. */
+  const seenPlays = new Map<string, number>();
+  /** Play ids of history rows whose title was deleted from Trakt: a complete set never removes them. */
+  const unplaced = new Set<string>();
   let historyRead = false;
 
   /**
@@ -483,6 +486,10 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       rows.forEach((row, i) => {
         const where = `${page.name} row ${i + 1}`;
         if (kind === 'watched-history') {
+          if (isObj(row) && row.type === 'movie' && row.movie === null) {
+            const gone = playRef(row.id);
+            if (gone !== null) unplaced.add(gone);
+          }
           // The movie first, so even a repeated row can fill a year or IMDb id.
           const acc = movieOf(row, where, deleted, true);
           if (!acc) return;
@@ -497,8 +504,16 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
             warnings.push(`${where} (${describe(acc.title)}): a play with no Trakt play id, so it was not kept as a play`);
             return;
           }
-          if (seenPlays.has(ref)) return;
-          seenPlays.add(ref);
+          const film = seenPlays.get(ref);
+          if (film !== undefined) {
+            // The export can repeat a play; one play id on two films is damage, so the history is not whole.
+            if (film !== acc.traktId) {
+              historyDoubt = true;
+              warnings.push(`${where} (${describe(acc.title)}): play id ${ref} is listed for two different movies, so this import adds and removes no play`);
+            }
+            return;
+          }
+          seenPlays.set(ref, acc.traktId);
           acc.plays.push({ t: playTime((row as Row).watched_at), ref });
         } else if (kind === 'watched-movies') {
           const plays = isObj(row) ? row.plays : undefined;
@@ -564,6 +579,8 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   // holds under another date or without its ref (a release before 0.4.0
   // kept none), and nothing here could tell, so it would count twice.
   const historyComplete = historyRead && !incomplete.has('watch history') && !historyDoubt;
+  // One list for every record (a big export can hold many such rows).
+  const unplacedRefs = [...unplaced];
   let heldBack = 0;
   let noHistoryPlay = 0;
   let bulkDated = 0;
@@ -609,6 +626,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       } else rec.myRating = a.ratings[0] as number;
     }
     if (a.notes) rec.notes = a.notes;
+    if (rec.viewingsComplete && unplacedRefs.length) rec.keepRefs = unplacedRefs;
     if (!watched && !a.watchlist && !a.ratings.length && !a.collected) continue;
     records.push(rec);
   }

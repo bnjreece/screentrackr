@@ -101,6 +101,12 @@ export interface ImportRecord {
    */
   viewingsComplete?: boolean;
   /**
+   * Refs of this source's plays that a complete set must never delete: plays
+   * the source still lists but could not place on a film (a Trakt history row
+   * whose title was deleted from Trakt). Only used with `viewingsComplete`.
+   */
+  keepRefs?: string[] | null;
+  /**
    * ScreenTrackr JSON v1 only: the record is ScreenTrackr's own record of an
    * item, so its plays are matched only to the very same stored plays (never
    * folded into another play of that day; see planViewingSync) and its
@@ -380,6 +386,8 @@ function foldGroup(group: ImportRecord[], warn: (message: string) => void): Impo
   const names = new Map<string, string>();
   for (const r of group) for (const n of r.lists ?? []) if (typeof n === 'string' && !names.has(n.trim().toLowerCase())) names.set(n.trim().toLowerCase(), n);
   set('lists', names.size ? [...names.values()] : undefined);
+  const keep = [...new Set(group.flatMap((r) => r.keepRefs ?? []))];
+  set('keepRefs', keep.length ? keep : undefined);
 
   for (const key of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'fromTvApp', 'imdbIdExact', 'clearWatchedAtIfOwn', 'viewingsComplete', 'exact'] as const) {
     const vs = group.map((r) => r[key]).filter((v): v is boolean => typeof v === 'boolean');

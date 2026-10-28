@@ -367,15 +367,16 @@ function cleanRecord(r: ImportRecord): CleanRecord {
     externalIds: canonicalIds(r.externalIds),
     plays: viewings,
     complete: complete ? new Set([r.source]) : new Set(),
+    keep: new Set((r.keepRefs ?? []).filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim())),
     listNames: [...names.values()],
   };
 }
 
 /** A record after cleanRecord: its plays with sources filled in, the sources it gives whole, and its list names. */
-type CleanRecord = ImportRecord & { plays: NewViewing[]; complete: ReadonlySet<string>; listNames: string[] };
+type CleanRecord = ImportRecord & { plays: NewViewing[]; complete: ReadonlySet<string>; keep: ReadonlySet<string>; listNames: string[] };
 
 /** How the record's plays meet the item's stored ones. */
-const planFor = (cur: PoolItem, r: CleanRecord): ViewingPlan => planViewingSync(cur.viewings, r.plays, r.complete, { exact: r.exact === true });
+const planFor = (cur: PoolItem, r: CleanRecord): ViewingPlan => planViewingSync(cur.viewings, r.plays, r.complete, { exact: r.exact === true, keepRefs: r.keep });
 
 /** An era the record gives (or, for JSON v1, its null) is its word; otherwise the era follows the plays (refreshWatched). */
 const eraLocked = (r: CleanRecord): boolean => r.watchedEra != null || r.exact === true;
