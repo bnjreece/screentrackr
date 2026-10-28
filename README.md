@@ -327,11 +327,32 @@ Both exports leave your library unchanged and write owner-only files (`0600`). T
 
 ## Sync
 
-<!-- 0.4.0: re-running your saved sources with one command. Written with the feature. -->
+Save your Plex, Jellyfin and TV app sources once, then bring the library up to date with one command:
+
+```sh
+screentrackr sync add plex --url http://127.0.0.1:32400 --section Movies
+screentrackr sync add jellyfin --url http://localhost:8096 --user alex --ratings
+screentrackr sync add apple-tv
+screentrackr sync              # every saved source, in order
+screentrackr sync --dry-run    # what each would change; nothing is written
+screentrackr sync status       # each source's last run
+```
 
 ```text
-screentrackr sync [add <kind> | list | remove <kind> | status | launchd] [--only <kind>] [--dry-run]
+screentrackr sync [add <plex|jellyfin|apple-tv> | list | remove <kind> | status | launchd [--every <interval>] [--wrapper]] [--only <kind>] [--dry-run]
 ```
+
+- `sync add` takes the options of the matching `import` (`--section`, `--include-other-videos`, `--unwatched-status`, `--no-ratings` and `--history` for Plex; `--user`, `--user-id`, `--ratings`, `--strict-played` and `--timeout` for Jellyfin; `--timeout` for the TV app), checks them the same way, and saves them in `config.json` in the data home (owner-only, mode `0600`). One source per kind; adding a kind again replaces it. `sync list` shows them and `sync remove <kind>` drops one.
+- Tokens are never saved. Plex reads `PLEX_TOKEN` and Jellyfin `JELLYFIN_TOKEN` when the sync runs. A sync never prompts, so Jellyfin needs the token (there is no password sign-in under sync), and a missing token fails that source with the same message `import` gives. `config.json` refuses any key that looks like a secret.
+- Every run is a merge import, never `--replace`. Each source prints its own block, then a total. A source that fails (a server that is down, a missing token) is reported and the others still run. `sync` exits 0 when every source succeeded and 1 when any failed. `--only <kind>` runs one source.
+- Only one sync runs at a time (`sync.lock` in the data home). A sync and `setup` never overlap: a sync started while `setup` runs exits 1 and says to try again, and a `setup` started during a sync refuses to start until it ends (its message says setup is already running, naming the sync's process). `--dry-run` changes nothing, not even by creating or upgrading the library (a library from an older screentrackr is upgraded by any normal command first, such as `screentrackr doctor`).
+- `sync` contacts the same servers `import plex` and `import jellyfin` do, and nothing else.
+
+### Run it on a schedule (macOS)
+
+`screentrackr sync launchd [--every 6h]` prints a LaunchAgent plist on stdout and the commands to install it on stderr. It never writes the plist or runs `launchctl`; you do, with the printed commands (`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.screentrackr.sync.plist`). The plist runs the absolute paths of node and the installed screentrackr, logs to `logs/sync.log` in the data home, and holds no secrets. Install screentrackr with `npm install -g screentrackr` first: the command refuses to run from npx, whose cache path changes.
+
+When a saved source needs a token, the plist runs a small wrapper script instead (`screentrackr sync launchd --wrapper` prints it) that reads each token from your login Keychain with `security find-generic-password -w -s screentrackr-plex` (or `screentrackr-jellyfin`). You create those Keychain items yourself (`security add-generic-password -a "$USER" -s screentrackr-plex -w` asks for the token), and the wrapper holds no token either. Run `screentrackr sync` once by hand before you install the job: macOS asks once to allow access to the TV app, and a background job cannot answer that prompt.
 
 ## Use it from Claude Code
 

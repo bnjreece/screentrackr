@@ -801,8 +801,8 @@ describe('0.4.0 foundation surface', () => {
     for (const c of ['log', 'history', 'lists', 'list', 'pick', 'where', 'config', 'sync']) {
       expect(help.stdout).toMatch(new RegExp(`^  ${c} `, 'm'));
     }
-    // lists, list (Track E), pick, where and config (Track D) are built; the rest are stubs until their tracks land.
-    for (const c of ['log', 'history', 'sync']) {
+    // lists, list (Track E), pick, where and config (Track D) and sync (Track C) are built; the rest are stubs until their tracks land.
+    for (const c of ['log', 'history']) {
       const r = run([c], { home });
       expect(r.code, c).toBe(1);
       expect(r.stderr).toContain('not built yet');
