@@ -885,3 +885,30 @@ describe('the fallback never adds a play it could not match later (0.4.0, Astra 
     expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([[null, '123']]);
   });
 });
+
+describe('plays with nothing to match them by later (0.4.0, Astra r4)', () => {
+  it('loose watched-movies never adds a play beside one the history kept without its bulk date', () => {
+    const at = '2019-01-01T00:00:00.000Z';
+    applyImport(db, parse({ 'watched-history.json': bulkPlays(10, at) }).records, { mode: 'merge' });
+    const id = (byTitle('Bulk Reel 1')[0] as LibraryItem).id;
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([[null, '20000']]);
+    const one = (bulkPlays(1, at) as { movie: unknown }[]).map((p) => ({ plays: 1, last_watched_at: at, movie: p.movie }));
+    for (const opts of [{ wholeExport: false }, {}]) {
+      applyImport(db, parse({ 'watched-movies.json': one }, opts).records, { mode: 'merge' });
+      expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([[null, '20000']]);
+    }
+  });
+
+  it('a history row with no play id is watched but not kept as a play, and the history is not whole', () => {
+    const row = (id?: number) => ({ ...(id !== undefined ? { id } : {}), watched_at: '1970-01-01T00:00:00.000Z', action: 'watch', type: 'movie', movie: GLASS });
+    const res = parse({ 'watched-history.json': [row(), row(0)] }, { wholeExport: false });
+    expect(rec(res.records, 101)).toMatchObject({ status: 'watched', viewings: [] });
+    expect(rec(res.records, 101)?.viewingsComplete).toBeUndefined();
+    expect(res.warnings.filter((w) => /no Trakt play id/.test(w))).toHaveLength(2);
+    expect(parse({ 'watched-history.json': [row(5), row()] }).records[0]?.viewingsComplete).toBeUndefined();
+    applyImport(db, res.records, { mode: 'merge' });
+    applyImport(db, parse({ 'watched-history.json': [row(123)] }, { wholeExport: false }).records, { mode: 'merge' });
+    const id = (byTitle('The Glass Harbor')[0] as LibraryItem).id;
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([[null, '123']]);
+  });
+});

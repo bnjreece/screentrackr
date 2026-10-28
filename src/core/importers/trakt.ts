@@ -24,9 +24,13 @@
  *   10 or more plays share one second (a bulk "I've seen these" log) those
  *   dates are dropped too, unless asked. The history is the movie's whole
  *   Trakt history (`viewingsComplete`), so a play deleted on Trakt goes,
- *   unless `_errors.json` (or a damaged page) says the history is incomplete
- *   or the export has none: then the plays it does have, plus one play at
- *   watched-movies' last_watched_at, are added and nothing is removed.
+ *   unless the export cannot show it is whole (loose files, a missing page, a
+ *   row or error list that can't be read, or `_errors.json` naming the
+ *   history): then the plays it does have are added and nothing is removed.
+ *   When a whole export's `_errors.json` names the history, watched-movies'
+ *   last_watched_at adds one play (dated, not bulk-logged) per movie too. A
+ *   history row with no play id is not kept as a play (it could never be
+ *   told from the same play once it has one).
  * - The watchlist puts a NEW movie in the queue (`statusIfNew`), so it never
  *   moves an existing item, a watched one included. Watched beats watchlist.
  * - A rating is just a rating (1 to 10); it never means watched.
@@ -258,6 +262,8 @@ interface Acc {
   watchlist: boolean;
   notes: string | null;
   collected: boolean;
+  /** History rows of this movie with no usable play id: watched, but not kept as plays. */
+  idless: number;
 }
 
 /** Epoch ms for a Trakt timestamp, or null when it is missing, invalid, at the epoch or before 1900 (an unknown date). */
@@ -444,6 +450,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
         watchlist: false,
         notes: null,
         collected: false,
+        idless: 0,
       };
       accs.set(traktId, acc);
     }
@@ -480,10 +487,17 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
           if (!acc) return;
           // A repeated play (the export can fetch past the last page) counts once.
           const ref = playRef((row as Row).id);
-          if (ref !== null) {
-            if (seenPlays.has(ref)) return;
-            seenPlays.add(ref);
+          if (ref === null) {
+            // A play with no id could never be told from the same play once it
+            // has one, so it is not kept; the movie still counts as watched, and
+            // the history can't be whole.
+            acc.idless++;
+            unread++;
+            warnings.push(`${where} (${describe(acc.title)}): a play with no Trakt play id, so it was not kept as a play`);
+            return;
           }
+          if (seenPlays.has(ref)) return;
+          seenPlays.add(ref);
           acc.plays.push({ t: playTime((row as Row).watched_at), ref });
         } else if (kind === 'watched-movies') {
           const plays = isObj(row) ? row.plays : undefined;
@@ -548,6 +562,9 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   if (historyRead && !historyComplete && !incomplete.has('watch history')) {
     notices.push('The Trakt history may not be whole (loose files, a missing page, or rows or an error list that could not be read), so its plays were added and none were removed.');
   }
+  // watched-movies' last play stands in only in a whole export whose watched-movies is whole, and
+  // only for a history the export says is incomplete, or (in a whole history) a movie it has no play of.
+  const fallbackOk = opts.wholeExport !== false && !incomplete.has('watched movies');
   let bulkDated = 0;
   let bulkLeftOut = 0;
   const records: ImportRecord[] = [];
@@ -560,7 +577,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       rec.sourceOwnedRaw = 'trakt:collection';
     } else rec.ownedIfNew = false;
 
-    const watched = a.plays.length > 0 || a.wmPlays > 0;
+    const watched = a.plays.length > 0 || a.wmPlays > 0 || a.idless > 0;
     if (watched) {
       rec.status = 'watched' satisfies Status;
       const day = (t: number | null) => (usable(t) ? localDate(t, fmt) : null);
@@ -571,13 +588,15 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       const keep = (p: { t: number | null }) => historyComplete || p.t === null || !bulk.has(Math.floor(p.t / 1000));
       bulkLeftOut += a.plays.filter((p) => !keep(p)).length;
       const viewings: ImportViewing[] = a.plays.filter(keep).map((p) => ({ watchedAt: day(p.t), sourceRef: p.ref }));
-      if (!historyComplete || !a.plays.length) {
-        // No whole history to go by: watched-movies' last play stands in (once
-        // per day; the history's play of that day, when it has one, is it).
-        // A bulk-logged last play is left out, as history plays are without a
-        // whole history. So is one with no usable date: a dateless play with
-        // no ref could never be matched to the history play it is (that one
-        // has a ref), so it would count twice once the history comes in.
+      if (fallbackOk && (incomplete.has('watch history') || (historyComplete && !a.plays.length))) {
+        // The export says its history is incomplete (or has no play of this
+        // movie, which watched-movies says was watched): watched-movies' last play
+        // stands in (once per day; the history's play of that day, when it has
+        // one, is it). Only then, and only from a whole export whose
+        // watched-movies is whole, since this play has no ref: the same play
+        // seen later with its ref can only meet it on its day, so a bulk-logged
+        // last play (which the history keeps without a date) and one with no
+        // usable date are left out too.
         const last = day(a.wmLast);
         const bulkLast = a.wmLast !== null && bulk.has(Math.floor(a.wmLast / 1000));
         if (bulkLast && a.wmPlays > 0 && !a.plays.length) bulkLeftOut++;
