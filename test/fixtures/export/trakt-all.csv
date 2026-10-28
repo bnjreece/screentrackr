@@ -1,0 +1,9 @@
+type,action,title,year,imdb,trakt,watched_at,rating,rated_at,listed_at
+movie,history,The Glass Harbor,1978,tt9000001,9007199254740993,2020-05-01,,,
+movie,history,The Glass Harbor,1978,tt9000001,9007199254740993,2021-01-01T20:15,,,
+movie,history,The Glass Harbor,1978,tt9000001,9007199254740993,2023-10-31T21:30:00Z,,,
+movie,history,"Say ""Hi"", Café",2001,,,unknown,,,
+movie,ratings,The Glass Harbor,1978,tt9000001,9007199254740993,,8,2024-03-04T05:06:07.000Z,
+movie,ratings,"Say ""Hi"", Café",2001,,,,6,2024-02-02T10:00:00.000Z,
+movie,watchlist,"Night, Again",1999,tt9000002,,,,,2024-05-06T07:08:09.000Z
+movie,watchlist,Echo Valley,2005,,,,,,2024-02-01T10:00:00.000Z

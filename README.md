@@ -237,7 +237,26 @@ screentrackr list <create|add|remove|show|rename|delete> <name> [<id|tconst|titl
 
 ## Export to Letterboxd and Trakt
 
-<!-- 0.4.0: files in the formats their importers read. Written with the feature. -->
+`screentrackr export` can also write files for Letterboxd's and Trakt's own importers, built to their published import formats. It only writes files on your machine; you upload them yourself. It never signs in to either service or sends them anything.
+
+```text
+screentrackr export --format letterboxd --out-dir <dir> [--what watched|watchlist|list] [--list <name>] [--lists-as-tags]
+screentrackr export --format trakt --out <file.csv> [--what all|history|ratings|watchlist]
+```
+
+**Letterboxd** reads a CSV of at most 1 MB, so the export is split into files under that size, each with its own header, named `letterboxd-watched-1.csv`, `letterboxd-watched-2.csv` and so on. The command prints where to upload each one.
+
+- `--what watched` (the default) is for the account import at letterboxd.com/import/. Each night you watched a movie becomes one diary entry, with its date, whether it was a rewatch (the source's own flag, or an earlier play of the same movie) and that night's rating. A night with no rating of its own gets your rating for the movie, on the latest night only. A watched movie with no dated play gets one row with no date, which marks it watched with your rating.
+- `--what watchlist` is for the import on your Letterboxd watchlist page: movies in your queue, priority or someday. A movie with another edition marked watched is left out.
+- `--what list --list <name>` is for the import when you create or edit a list: the movies on one of your lists.
+- `--lists-as-tags` puts each movie's lists in its diary entries' tags. Letterboxd keeps tags only on diary entries, so a movie with no dated play gets none.
+- Each row carries the movie's IMDb id (when it is matched or linked by hand), its title and year, and its Letterboxd link when it came from a Letterboxd import, which makes a round trip exact. A movie without an IMDb id also carries the director from your import, to help Letterboxd find it by title.
+- Two editions of one movie (both linked to the same IMDb id) are one movie here, so a film you own twice is logged once. The same night recorded by two sources is one diary entry.
+- Letterboxd's CSV quoting can't hold a backslash right before a quote in a quoted value (a title with a comma that ends in a backslash, say). Such a movie is left out, and the command names it so you can add it by hand.
+
+**Trakt** takes one CSV file, with a `type`, `action`, `title`, `year`, `imdb`, `trakt`, `watched_at`, `rating`, `rated_at` and `listed_at` column. `--what all` (the default) writes all three kinds of rows: one `history` row per play (the same night from two sources, or on two editions, is one play), one `ratings` row per rated movie, and one `watchlist` row per movie in your queue, priority or someday (as for Letterboxd). A date is written as stored (Trakt reads a bare date as noon in your time zone), and a play with no date is written as `unknown`, as is a movie marked watched with no play at all. The Trakt id is written when the movie came from a Trakt import. A movie with no IMDb id, no Trakt id and no year is left out and counted, since Trakt's importer can't match it.
+
+Both exports leave your library unchanged and write owner-only files (`0600`). They carry only your own records (statuses, dates, ratings, lists) plus an IMDb id: never IMDb's ratings, votes, cast or genres, and never your notes. A title or year comes from your import, and from the catalog only when your import left it blank. An export with nothing in it writes no file and says so.
 
 ## Sync
 
@@ -308,7 +327,7 @@ screentrackr set <id|tconst|title> [--status <s>] [--era <e>] [--rating <1-10> |
 screentrackr match [--review] [--all]
 screentrackr link <id> <tconst>
 screentrackr stats
-screentrackr export [--out <file>]
+screentrackr export [--format json-v1|letterboxd|trakt] [--out <file>] [--out-dir <dir>] [--what <what>] [--list <name>] [--lists-as-tags]
 screentrackr mcp
 screentrackr doctor
 ```
@@ -325,7 +344,7 @@ screentrackr doctor
 | `match` | Retries matching for items that need it. `--review` lists them with candidates. |
 | `link` | Matches a library item to an IMDb id by hand. Manual links are never changed by later matching. |
 | `stats` | Counts by status, genre, decade and director, and how many items are unmatched. |
-| `export` | Writes ScreenTrackr JSON v1 to stdout or `--out <file>`. |
+| `export` | Writes ScreenTrackr JSON v1 to stdout or `--out <file>`, or with `--format letterboxd` or `--format trakt` files for those services' importers (see [Export to Letterboxd and Trakt](#export-to-letterboxd-and-trakt)). |
 | `mcp` | Starts the MCP server on stdio. |
 | `doctor` | Checks Node, the database, the catalog and the library. |
 
