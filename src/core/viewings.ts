@@ -456,6 +456,7 @@ export function planViewingSync(
   const sources = [...new Set([...incoming.map((v) => v.source), ...complete])] as ItemSource[];
   const dayOf = (d: string | null) => (d === null ? null : calendarDate(d));
   for (const source of sources) {
+    const start = { inserts: plan.inserts.length, updates: plan.updates.length, deletes: plan.deletes.length };
     const mine = stored.filter((v) => v.source === source);
     const inc = incoming.filter((v) => v.source === source);
     const used = new Set<number>();
@@ -542,10 +543,16 @@ export function planViewingSync(
       else insert(v);
     }
     if (complete.has(source) && source !== 'manual') {
-      // A play the source still lists, though it could not say for which film, stays; so does
-      // a play with no ref then, since it could be one of those.
-      const kept = (s: Viewing) => keepRefs.size > 0 && (s.sourceRef === null || keepRefs.has(s.sourceRef));
-      for (const s of mine) if (!used.has(s.id) && !kept(s)) plan.deletes.push(s.id);
+      // A play the source still lists, though it could not say for which film (keepRefs), stays.
+      // A stored play with no ref that nothing matched could then be one of those, or the same
+      // play as one this plan inserts, and nothing tells which: this source then writes nothing.
+      if (keepRefs.size > 0 && mine.some((s) => !used.has(s.id) && s.sourceRef === null)) {
+        plan.inserts.length = start.inserts;
+        plan.updates.length = start.updates;
+        plan.deletes.length = start.deletes;
+        continue;
+      }
+      for (const s of mine) if (!used.has(s.id) && !(s.sourceRef !== null && keepRefs.has(s.sourceRef))) plan.deletes.push(s.id);
     }
   }
   plan.inserts.sort((x, y) => (insertedFrom.get(x) ?? 0) - (insertedFrom.get(y) ?? 0));

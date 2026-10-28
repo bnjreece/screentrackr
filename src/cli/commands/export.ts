@@ -159,7 +159,7 @@ export const exportCmd: Command = {
     'json-v1 (the default) prints to stdout unless --out is given.',
     'letterboxd writes letterboxd-<what>-1.csv and so on to --out-dir; --what watched (default), watchlist or list (with --list <name>).',
     'trakt writes one CSV to --out; --what all (default), history, ratings or watchlist.',
-    'Exports never include IMDb ratings, votes or genres, and nothing is uploaded.',
+    'The Letterboxd and Trakt files never include IMDb ratings, votes or genres. Nothing is uploaded.',
   ].join('\n'),
   options: {
     format: { type: 'string', short: 'f', value: '<format>', description: 'json-v1 (default), letterboxd or trakt' },

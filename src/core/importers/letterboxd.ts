@@ -354,6 +354,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
   // Films a diary entry may belong to but could not be attached to: their date is unknown, not absent.
   const unsure = new Set<string>();
   let unplaced = 0;
+  let conflicting = 0;
   if (inp.diary) {
     const at = reader(inp.diary.rows[0] ?? []);
     inp.diary.rows.slice(1).forEach((cells, i) => {
@@ -396,7 +397,14 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
         return;
       }
       entriesOf.set(film.uri, [...(entriesOf.get(film.uri) ?? []), entry]);
-      if (entry.uri) entryFilm.set(entry.uri, film.uri);
+      if (entry.uri) {
+        const owner = entryFilm.get(entry.uri);
+        // One entry is one night of one film: the same link on two films is damage, so no film's diary is whole.
+        if (owner !== undefined && owner !== film.uri) {
+          conflicting++;
+          warnings.push(`${where}: entry ${entry.uri} is listed for two different films, so no Letterboxd play was added or removed`);
+        } else entryFilm.set(entry.uri, film.uri);
+      }
     });
   }
   if (unplaced) {
@@ -456,7 +464,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
     // Letterboxd play of the film); plays you logged and other sources' plays
     // stay. From anything less, a play could be the one an earlier import
     // holds under another date or without its link, so none is written.
-    if (inp.diary && !unsure.has(f.uri) && unplaced === 0 && linked === entries.length) {
+    if (inp.diary && !unsure.has(f.uri) && unplaced === 0 && conflicting === 0 && linked === entries.length) {
       rec.viewings = entries.map((e): ImportViewing => ({ watchedAt: e.watchedDate, rewatch: e.rewatch, rating: e.rating ?? null, sourceRef: e.uri }));
       rec.viewingsComplete = true;
     } else heldBack += entries.length;

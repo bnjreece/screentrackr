@@ -652,3 +652,22 @@ describe('a diary entry with no link (0.4.0, Astra r6)', () => {
     expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([['2024-01-02', 'https://boxd.it/e1']]);
   });
 });
+
+describe('one entry link on two films (0.4.0 release review, Astra r3)', () => {
+  it("makes no film's diary whole, so no play is removed or doubled", () => {
+    const head = 'Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date';
+    const watched = {
+      name: 'watched.csv',
+      text: 'Date,Name,Year,Letterboxd URI\n2024-04-02,Quiet Ledger,1999,https://boxd.it/zZ5e\n2024-04-02,Paper Comet,2001,https://boxd.it/zZ6f\n',
+    };
+    const diary = (...rows: string[]) => ({ name: 'diary.csv', text: `${head}\n${rows.join('\n')}\n` });
+    applyImport(db, parseLetterboxdFiles([watched, diary('2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,,,,2019-01-01', '2020-01-02,Paper Comet,2001,https://boxd.it/e2,,,,2020-01-01')]).records, { mode: 'merge' });
+    const refs = (t: string) => viewingsOf(db, (item(t)[0] as LibraryItem).id).map((v) => v.sourceRef);
+    expect([refs('Quiet Ledger'), refs('Paper Comet')]).toEqual([['https://boxd.it/e1'], ['https://boxd.it/e2']]);
+    const res = parseLetterboxdFiles([watched, diary('2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,,,,2019-01-01', '2020-01-02,Paper Comet,2001,https://boxd.it/e1,,,,2020-01-01')]);
+    expect(res.records.some((r) => r.viewingsComplete)).toBe(false);
+    expect(res.warnings.join('\n')).toMatch(/listed for two different films/);
+    applyImport(db, res.records, { mode: 'merge' });
+    expect([refs('Quiet Ledger'), refs('Paper Comet')]).toEqual([['https://boxd.it/e1'], ['https://boxd.it/e2']]);
+  });
+});

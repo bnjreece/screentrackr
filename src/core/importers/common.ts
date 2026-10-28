@@ -103,10 +103,11 @@ export interface ImportRecord {
   /**
    * Refs of this source's plays that a complete set must never delete: plays
    * the source still lists but could not place on a film (a Trakt history row
-   * whose title was deleted from Trakt). When it has any, the complete set
-   * also never deletes a stored play of this source that has no ref (one
-   * carried over from a 0.3.0 date), since that could be one of them. Only
-   * used with `viewingsComplete`.
+   * whose title was deleted from Trakt). When it has any and a stored play of
+   * this source with no ref (one carried over from a 0.3.0 date) is left
+   * unmatched, that play could be one of them or the same play as an
+   * incoming one, so the record writes and removes none of this source's
+   * plays. Only used with `viewingsComplete`.
    */
   keepRefs?: string[] | null;
   /**

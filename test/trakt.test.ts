@@ -976,6 +976,21 @@ describe('history rows that name a play but no film it can place (0.4.0 release 
     }
   });
 
+  it('with a deleted title in the history, a migrated play nothing matches is never doubled (Astra release r3)', () => {
+    db.sql.exec('DELETE FROM library_items');
+    applyImport(db, [{ sourceTitle: 'Bulk Reel 1', sourceYear: 2001, status: 'watched', source: 'trakt', externalIds: { trakt: '600' } }], { mode: 'merge' });
+    const id = (byTitle('Bulk Reel 1')[0] as LibraryItem).id;
+    addViewing(db, id, { watchedAt: '2019-01-01', source: 'trakt' });
+    const gone = { id: 99_999, watched_at: '2017-03-03T12:00:00.000Z', action: 'watch', type: 'movie', movie: null };
+    const res = parse({ 'watched-history.json': [...bulkPlays(10, '2019-01-01T00:00:00.000Z'), gone] });
+    expect(rec(res.records, 600)).toMatchObject({ viewingsComplete: true, keepRefs: ['99999'] });
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([['2019-01-01', null]]);
+    // Without the deleted title, the whole history settles it as before.
+    applyImport(db, parse({ 'watched-history.json': bulkPlays(10, '2019-01-01T00:00:00.000Z') }).records, { mode: 'merge' });
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([[null, '20000']]);
+  });
+
   it('one play id listed for two films makes the history doubtful, so no play is removed', () => {
     applyImport(db, parse({ 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z', SALT)] }).records, { mode: 'merge' });
     expect(saltRefs()).toEqual(['1']);
