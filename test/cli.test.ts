@@ -796,16 +796,14 @@ describe('0.4.0 foundation surface', () => {
     expect(clear.stdout).toMatch(/removed 1 play/);
   });
 
-  it('registers the 0.4.0 commands, each saying it is not built yet', () => {
+  it('registers every 0.4.0 command, none of them a stub', () => {
     const help = run(['--help']);
     for (const c of ['log', 'history', 'lists', 'list', 'pick', 'where', 'config', 'sync']) {
       expect(help.stdout).toMatch(new RegExp(`^  ${c} `, 'm'));
     }
-    // lists, list (Track E), pick, where and config (Track D) and sync (Track C) are built; the rest are stubs until their tracks land.
-    for (const c of ['log', 'history']) {
+    for (const c of ['log', 'history', 'lists', 'list', 'pick', 'where', 'config', 'sync']) {
       const r = run([c], { home });
-      expect(r.code, c).toBe(1);
-      expect(r.stderr).toContain('not built yet');
+      expect(r.stderr, c).not.toContain('not built yet');
     }
   });
 

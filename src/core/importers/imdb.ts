@@ -22,7 +22,10 @@
  * - A rating means watched, with that rating. Date Rated is not a watch date.
  * - A watchlist row puts a NEW item in the queue (`statusIfNew`), so it never
  *   moves an existing item, a watched one included. A custom list sets no
- *   status. Check-ins are watched; their date is used only when asked.
+ *   status. Check-ins are watched; each one is a play on its date only when
+ *   asked (not a complete set: plays from elsewhere are never removed).
+ * - `toList` (with a custom list) puts the file's movies in that ScreenTrackr
+ *   list, add-only, alongside or instead of `collection`.
  * - IMDb has no idea of ownership: `ownedIfNew: false`, never `owned`.
  * - Descriptive fields only fill blanks on an existing item (`fillOnly`).
  * - Runtime (mins) depends on the account's location, and a runtime more than
@@ -50,8 +53,10 @@ export interface ImdbOptions {
   collection?: string;
   /** Title types to bring in besides Movie. */
   includeTypes?: readonly ImdbIncludeType[];
-  /** With `as: 'checkins'`: use each check-in's Created date as the watched date. */
+  /** With `as: 'checkins'`: each check-in row is a play on its Created date. */
   checkinDates?: boolean;
+  /** With `as: 'list'`: the name of a ScreenTrackr list to put the file's movies in (add-only). */
+  toList?: string;
   /** List exports: use a row's Description (your note on it) as the movie's notes (fills blank notes only). */
   notesFromDescription?: boolean;
 }
@@ -285,11 +290,13 @@ function parseFile(file: ImdbFile, opts: ImdbOptions, out: { records: ImportReco
     if (kind === 'checkins') {
       rec.status = 'watched';
       if (opts.checkinDates) {
+        // One play per check-in row; rows for one film across files fold, keeping every play.
         const date = toIsoDate(at(cells, 'created'), order);
-        if (date) rec.watchedAt = date;
+        if (date) rec.viewings = [{ watchedAt: date }];
       }
     }
     if (kind === 'list' && opts.collection?.trim()) rec.collection = opts.collection.trim();
+    if (kind === 'list' && opts.toList?.trim()) rec.lists = [opts.toList.trim()];
     if (opts.notesFromDescription) {
       const note = cleanText(at(cells, 'description'));
       if (note) rec.notes = note;

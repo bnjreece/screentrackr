@@ -22,6 +22,8 @@ import {
   type LetterboxdSource,
 } from '../src/core/importers/letterboxd.js';
 import { LIBRARY_COLUMNS, rowToItem, type LibraryRow } from '../src/core/library.js';
+import { createList, listsOfItem } from '../src/core/lists.js';
+import { addViewing, viewingsOf } from '../src/core/viewings.js';
 import type { LibraryItem } from '../src/core/types.js';
 import { folderFiles } from './fixtures/folder-files.js';
 import { makeZip } from './fixtures/make-zip.js';
@@ -98,17 +100,25 @@ describe('reading an export', () => {
     expect(rec(records, 'zZ8h')?.myRating).toBe(4);
   });
 
-  it('takes the watched date and era from the latest diary Watched Date only', () => {
+  // 0.4.0: each diary entry is a play (Watched Date only, Rewatch, rating,
+  // entry URI as its ref) instead of one watched date and era per film; the
+  // era now follows the latest play in the library (core/viewings.ts).
+  it('makes each diary entry a play, from its Watched Date only, with its flag, rating and URI', () => {
     const { records } = parseFolder();
-    expect(rec(records, 'zZ1a')).toMatchObject({ status: 'watched', watchedAt: '2025-01-10', watchedEra: '2020s' });
-    expect(rec(records, 'zZ1b')).toMatchObject({ watchedAt: '2009-06-01', watchedEra: 'long-ago' });
+    const glass = rec(records, 'zZ1a');
+    expect(glass).toMatchObject({ status: 'watched', viewingsComplete: true });
+    expect(glass?.viewings).toEqual([
+      { watchedAt: '2025-01-10', rewatch: true, rating: 7, sourceRef: 'https://boxd.it/aB9xY2' },
+      { watchedAt: '2024-03-02', rewatch: false, rating: 8, sourceRef: 'https://boxd.it/aB3cD4' },
+    ]);
+    expect(glass).not.toHaveProperty('watchedAt');
+    expect(glass).not.toHaveProperty('watchedEra');
+    expect(rec(records, 'zZ1b')?.viewings).toEqual([{ watchedAt: '2009-06-01', rewatch: false, rating: null, sourceRef: 'https://boxd.it/aB1111' }]);
     // Logged 2016-01-01, watched 2015-12-31.
-    expect(rec(records, 'zZ4d')).toMatchObject({ watchedAt: '2015-12-31', watchedEra: '2010s' });
-    // In watched.csv with no diary entry: watched, no date (watched.csv's Date is when it was logged).
+    expect(rec(records, 'zZ4d')?.viewings?.map((v) => v.watchedAt)).toEqual(['2015-12-31']);
+    // In watched.csv with no diary entry: watched, and no Letterboxd play at all (watched.csv's Date is when it was logged).
     const quiet = rec(records, 'zZ5e');
-    expect(quiet?.status).toBe('watched');
-    expect(quiet?.watchedAt).toBeUndefined();
-    expect(quiet?.watchedEra).toBeUndefined();
+    expect(quiet).toMatchObject({ status: 'watched', viewings: [], viewingsComplete: true });
   });
 
   it('puts watchlist-only films in the queue only as new items, and watched wins over the watchlist', () => {
@@ -129,7 +139,8 @@ describe('reading an export', () => {
     for (const code of ['zZ7a', 'zZ7b']) {
       const twin = rec(records, code);
       expect(twin?.status).toBe('watched');
-      expect(twin?.watchedAt).toBeUndefined();
+      expect(twin?.viewings).toBeUndefined();
+      expect(twin?.viewingsComplete).toBeUndefined();
       expect(twin?.myRating).toBeUndefined();
     }
     expect(warnings.join('\n')).toMatch(/2 films are called "Twin Rivers" \(2001\)/);
@@ -298,8 +309,9 @@ describe('loose files and detection', () => {
   it('reads several loose files together, and named list files', () => {
     const files = ['watched.csv', 'ratings.csv', 'diary.csv', 'lists/my-blu-rays.csv', 'lists/favourites.csv'].map((n) => ({ name: n, text: text(n) }));
     const res = parseLetterboxdFiles(files, { ownedLists: ['my-blu-rays'] });
-    expect(rec(res.records, 'zZ1a')).toMatchObject({ myRating: 9, watchedAt: '2025-01-10', owned: true });
-    expect(res.warnings.join('\n')).toMatch(/favourites.csv: a list that --owned-list does not name/); // chooseLooseFiles keeps the CLI from opening it
+    expect(rec(res.records, 'zZ1a')).toMatchObject({ myRating: 9, owned: true });
+    expect(rec(res.records, 'zZ1a')?.viewings?.[0]?.watchedAt).toBe('2025-01-10');
+    expect(res.warnings.join('\n')).toMatch(/favourites.csv: a list that --owned-list and --list do not name/); // chooseLooseFiles keeps the CLI from opening it
     expect(() => parseLetterboxdFiles(files.slice(0, 2), { ownedLists: ['my-blu-rays'] })).toThrow(/pass its file/);
     expect(() => parseLetterboxdFiles([files[0] as { name: string; text: string }, files[0] as { name: string; text: string }])).toThrow(/two watched files/);
   });
@@ -334,12 +346,14 @@ describe('loose files and detection', () => {
     expect(item('Night Ferry')[0]?.myRating).toBe(9);
   });
 
-  it('treats every file in lists/ as a list, gated only by --owned-list', () => {
+  it('treats every file in lists/ as a list, gated only by --owned-list, --list and --lists', () => {
     const lists = ['x/lists/watchlist.csv', 'x/lists/ratings.csv', 'x/lists/diary.csv', 'x/lists/watched.csv', 'x/lists/reviews.csv'];
     const none = chooseLooseFiles([...lists, 'x/watched.csv']);
     expect(none.open).toEqual(['x/watched.csv']);
-    expect(none.warnings.filter((w) => /--owned-list does not name/.test(w))).toHaveLength(5);
+    expect(none.warnings.filter((w) => /--owned-list and --list do not name/.test(w))).toHaveLength(5);
     expect(chooseLooseFiles(lists, { ownedLists: ['reviews', 'watchlist'], watchlist: false }).open).toEqual(['x/lists/watchlist.csv', 'x/lists/reviews.csv']);
+    expect(chooseLooseFiles(lists, { memberLists: ['diary'] }).open).toEqual(['x/lists/diary.csv']);
+    expect(chooseLooseFiles(lists, { allLists: true }).open).toEqual(lists);
   });
 
   it('detects a header with quoted cells and imports it as Letterboxd', () => {
@@ -459,14 +473,15 @@ describe('importing into a library', () => {
     expect(item('Quiet Ledger')).toHaveLength(1);
   });
 
-  it('asks to clear a watched date only when the diary was read and has no entry for the film', () => {
+  // 0.4.0: clearWatchedAtIfOwn became a complete set of the film's Letterboxd plays (viewingsComplete).
+  it('gives a film its whole Letterboxd history only when the diary was read and every entry could be placed', () => {
     const { records } = parseFolder();
-    expect(rec(records, 'zZ5e')?.clearWatchedAtIfOwn).toBe(true); // Quiet Ledger: watched, no diary entry
-    expect(rec(records, 'zZ1a')?.clearWatchedAtIfOwn).toBeUndefined(); // has a diary date
-    expect(rec(records, 'zZ7a')?.clearWatchedAtIfOwn).toBeUndefined(); // Twin Rivers: its entry fits two films
-    expect(rec(records, 'zZ7b')?.clearWatchedAtIfOwn).toBeUndefined();
+    expect(rec(records, 'zZ5e')).toMatchObject({ viewings: [], viewingsComplete: true }); // Quiet Ledger: watched, no diary entry
+    expect(rec(records, 'zZ1a')?.viewingsComplete).toBe(true); // has diary entries
+    expect(rec(records, 'zZ7a')?.viewingsComplete).toBeUndefined(); // Twin Rivers: its entry fits two films
+    expect(rec(records, 'zZ7b')?.viewingsComplete).toBeUndefined();
     const loose = parseLetterboxdFiles([{ name: 'watched.csv', text: text('watched.csv') }]);
-    expect(loose.records.some((r) => r.clearWatchedAtIfOwn)).toBe(false);
+    expect(loose.records.some((r) => r.viewingsComplete || r.viewings || r.clearWatchedAtIfOwn)).toBe(false);
   });
 
   it('clears a date an earlier Letterboxd import set once its diary entry is gone, and keeps any other date', () => {
@@ -486,5 +501,154 @@ describe('importing into a library', () => {
     applyImport(db, [{ sourceTitle: 'Quiet Ledger', sourceYear: 1999, status: 'watched', watchedAt: '2023-05-05', source: 'paste' }], { mode: 'merge' });
     applyImport(db, parseFolder().records, { mode: 'merge' });
     expect(item('Quiet Ledger')[0]?.watchedAt).toBe('2023-05-05');
+  });
+});
+
+describe('diary plays and lists (0.4.0)', () => {
+  const DIARY_HEAD = 'Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date';
+  const watched = { name: 'watched.csv', text: 'Date,Name,Year,Letterboxd URI\n2024-04-02,Quiet Ledger,1999,https://boxd.it/zZ5e\n' };
+  const diary = (...rows: string[]) => ({ name: 'diary.csv', text: `${DIARY_HEAD}\n${rows.join('\n')}\n` });
+  const plays = () => {
+    const it = item('Quiet Ledger')[0] as LibraryItem;
+    return viewingsOf(db, it.id).map((v) => [v.watchedAt, v.source, v.sourceRef, v.rewatch, v.rating]);
+  };
+
+  it('stores two diary entries as two plays with their flags, and a repeat import changes nothing', () => {
+    const files = [watched, diary('2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,3,,,2019-01-01', '2024-10-31,Quiet Ledger,1999,https://boxd.it/e2,4.5,Yes,,2024-10-31')];
+    expect(applyImport(db, parseLetterboxdFiles(files).records, { mode: 'merge' })).toMatchObject({ added: 1 });
+    expect(plays()).toEqual([
+      ['2024-10-31', 'letterboxd', 'https://boxd.it/e2', true, 9],
+      ['2019-01-01', 'letterboxd', 'https://boxd.it/e1', false, 6],
+    ]);
+    expect(item('Quiet Ledger')[0]).toMatchObject({ watchedAt: '2024-10-31', watchedEra: '2020s', myRating: 9 });
+    expect(applyImport(db, parseLetterboxdFiles(files).records, { mode: 'merge' })).toMatchObject({ added: 0, updated: 0, unchanged: 1 });
+  });
+
+  it('a newer export with one entry deleted removes exactly that play and keeps a play you logged', () => {
+    const e1 = '2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,,,,2019-01-01';
+    const e2 = '2024-10-31,Quiet Ledger,1999,https://boxd.it/e2,,Yes,,2024-10-31';
+    applyImport(db, parseLetterboxdFiles([watched, diary(e1, e2)]).records, { mode: 'merge' });
+    const id = (item('Quiet Ledger')[0] as LibraryItem).id;
+    addViewing(db, id, { watchedAt: '2022-02-02', source: 'manual', sourceRef: 'manual:0123456789abcdef' });
+    addViewing(db, id, { watchedAt: '2023-03-03', source: 'trakt', sourceRef: '55' });
+    expect(applyImport(db, parseLetterboxdFiles([watched, diary(e1)]).records, { mode: 'merge' })).toMatchObject({ updated: 1 });
+    expect(plays()).toEqual([
+      ['2023-03-03', 'trakt', '55', null, null],
+      ['2022-02-02', 'manual', 'manual:0123456789abcdef', null, null],
+      ['2019-01-01', 'letterboxd', 'https://boxd.it/e1', false, null],
+    ]);
+    expect(item('Quiet Ledger')[0]?.watchedAt).toBe('2023-03-03');
+    // Every entry gone: every Letterboxd play goes, the others stay.
+    applyImport(db, parseLetterboxdFiles([watched, diary()]).records, { mode: 'merge' });
+    expect(plays().map((p) => p[1])).toEqual(['trakt', 'manual']);
+  });
+
+  it('upgrades a date an older release imported into the entry it was', () => {
+    // A 0.3.0 Letterboxd date migrates as a ref-less play of that day.
+    applyImport(db, [{ sourceTitle: 'Quiet Ledger', sourceYear: 1999, status: 'watched', source: 'letterboxd', externalIds: { letterboxd: 'https://boxd.it/zZ5e' } }], { mode: 'merge' });
+    const id = (item('Quiet Ledger')[0] as LibraryItem).id;
+    addViewing(db, id, { watchedAt: '2024-10-31', source: 'letterboxd' });
+    applyImport(db, parseLetterboxdFiles([watched, diary('2024-10-31,Quiet Ledger,1999,https://boxd.it/e2,,Yes,,2024-10-31')]).records, { mode: 'merge' });
+    expect(plays()).toEqual([['2024-10-31', 'letterboxd', 'https://boxd.it/e2', true, null]]);
+  });
+
+  it('--lists brings in every list by its own name, owned lists only as owned; --list picks some', () => {
+    const all = parseFolder({ allLists: true, ownedLists: ['my-blu-rays'] });
+    expect(rec(all.records, 'zZ5e')?.lists).toEqual(['Favourites']);
+    expect(rec(all.records, 'zZ1a')?.lists).toBeUndefined(); // My Blu-rays is the owned list
+    expect(rec(all.records, 'zZ1a')?.owned).toBe(true);
+    expect(all.lists?.map((l) => l.name)).toEqual(['Favourites']);
+    expect(all.warnings.join('\n')).toMatch(/old-shelf.csv: a Letterboxd list export of a version this tool doesn't know \(v6\), so the list was skipped$/m);
+    expect(all.notices).toContain('lists/favourites.csv: 1 film in the list "Favourites"');
+
+    const both = parseFolder({ ownedLists: ['my-blu-rays'], memberLists: ['my-blu-rays'] });
+    expect(rec(both.records, 'zZ1a')).toMatchObject({ owned: true, lists: ['My Blu-rays'] });
+    expect(both.lists).toEqual([{ name: 'My Blu-rays', description: 'Shelf A\n\nPosition,Name,Year,URL,Description\nand shelf B' }]);
+    // Night Ferry is only in the list: a new queue item, not owned unless the list is owned.
+    const member = parseFolder({ memberLists: ['my-blu-rays'] });
+    expect(rec(member.records, 'zZ0n')).toMatchObject({ statusIfNew: 'queue', ownedIfNew: false, lists: ['My Blu-rays'] });
+    expect(() => parseFolder({ memberLists: ['no-such-list'] })).toThrow(/No list "no-such-list"/);
+  });
+
+  it('imports lists into the library, merging into an existing list whatever its case', () => {
+    createList(db, 'favourites', { description: 'Mine' });
+    const res = parseFolder({ allLists: true });
+    const summary = applyImport(db, res.records, { mode: 'merge', lists: res.lists ?? [] });
+    expect(summary.listsCreated).toEqual(['My Blu-rays']);
+    expect(listsOfItem(db, (item('Quiet Ledger')[0] as LibraryItem).id)).toEqual(['favourites']);
+    expect(listsOfItem(db, (item('Night Ferry')[0] as LibraryItem).id)).toEqual(['My Blu-rays']);
+    expect(item('Night Ferry')[0]).toMatchObject({ owned: false, status: 'queue' });
+    const again = parseFolder({ allLists: true });
+    expect(applyImport(db, again.records, { mode: 'merge', lists: again.lists ?? [] })).toMatchObject({ added: 0, updated: 0 });
+    db.sql.exec('DELETE FROM lists');
+  });
+
+  it('--tags-as-lists makes each diary tag a list', () => {
+    const { records } = parseFolder({ tagsAsLists: true });
+    expect(rec(records, 'zZ1a')?.lists).toEqual(['cinema', '35mm']);
+    expect(rec(records, 'zZ1b')?.lists).toBeUndefined();
+    expect(parseFolder().records.some((r) => r.lists)).toBe(false);
+  });
+});
+
+describe('when the diary cannot say it is whole (0.4.0, Astra r1)', () => {
+  const DIARY_HEAD = 'Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date';
+  const watched = (title = 'Quiet Ledger') => ({ name: 'watched.csv', text: `Date,Name,Year,Letterboxd URI\n2024-04-02,${title},1999,https://boxd.it/zZ5e\n` });
+  const diary = (...rows: string[]) => ({ name: 'diary.csv', text: `${DIARY_HEAD}\n${rows.join('\n')}\n` });
+
+  it('an entry no film fits (a film renamed since) removes no play of any film', () => {
+    applyImport(db, parseLetterboxdFiles([watched(), diary('2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,,,,2019-01-01')]).records, { mode: 'merge' });
+    const id = (item('Quiet Ledger')[0] as LibraryItem).id;
+    // The film's own row now has a new title, its diary rows the old one.
+    const renamed = parseLetterboxdFiles([watched('Quiet Ledger (Restored)'), diary('2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,,,,2019-01-01')]);
+    expect(renamed.warnings.join('\n')).toMatch(/no Letterboxd play was added or removed/);
+    expect(renamed.records.some((r) => r.viewingsComplete)).toBe(false);
+    applyImport(db, renamed.records, { mode: 'merge' });
+    expect(viewingsOf(db, id).map((v) => v.sourceRef)).toEqual(['https://boxd.it/e1']);
+  });
+
+  it('keeps no play for entries without a link, and sends no complete set (Astra r6)', () => {
+    const res = parseLetterboxdFiles([watched(), diary('2019-01-02,Quiet Ledger,1999,,3,,,2019-01-01', '2019-01-02,Quiet Ledger,1999,,4,Yes,,2019-01-01')]);
+    expect(res.warnings.join('\n')).toMatch(/2 diary entries have no entry link/);
+    expect(res.records[0]).toMatchObject({ status: 'watched' });
+    expect(res.records[0]?.viewings).toBeUndefined();
+    expect(res.warnings.join('\n')).toMatch(/2 diary entries were not imported as plays/);
+  });
+});
+
+describe('a diary row without a name (0.4.0, Astra r2)', () => {
+  it('counts as an entry no film fits, so no play is removed', () => {
+    const head = 'Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date';
+    const watched = { name: 'watched.csv', text: 'Date,Name,Year,Letterboxd URI\n2024-04-02,Quiet Ledger,1999,https://boxd.it/zZ5e\n' };
+    applyImport(db, parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,,,,2019-01-01\n` }]).records, { mode: 'merge' });
+    const res = parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,,1999,https://boxd.it/e1,,,,2019-01-01\n\n` }]);
+    expect(res.warnings.join('\n')).toMatch(/row 1: no film name/);
+    expect(res.records.some((r) => r.viewingsComplete)).toBe(false);
+    applyImport(db, res.records, { mode: 'merge' });
+    expect(viewingsOf(db, (item('Quiet Ledger')[0] as LibraryItem).id)).toHaveLength(1);
+  });
+});
+
+describe('a diary entry with no link (0.4.0, Astra r6)', () => {
+  it('is not kept as a play, so the same entry with its link later is one play', () => {
+    const head = 'Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date';
+    const watched = { name: 'watched.csv', text: 'Date,Name,Year,Letterboxd URI\n2024-04-02,Quiet Ledger,1999,https://boxd.it/zZ5e\n' };
+    const bare = parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,Quiet Ledger,1999,,3,,,2024-01-01\n` }]);
+    expect(bare.warnings.join('\n')).toMatch(/no entry link/);
+    expect(bare.records[0]).toMatchObject({ status: 'watched' });
+    expect(bare.records[0]?.viewings).toBeUndefined();
+    expect(bare.records[0]?.viewingsComplete).toBeUndefined();
+    applyImport(db, bare.records, { mode: 'merge' });
+    // The same entry with its link and a corrected date, next to an entry no film fits (so no complete set): one play.
+    applyImport(
+      db,
+      parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,3,,,2024-01-02\n2019-01-02,Nowhere Film,2000,https://boxd.it/e9,,,,2020-01-01\n` }]).records,
+      { mode: 'merge' },
+    );
+    const id = (item('Quiet Ledger')[0] as LibraryItem).id;
+    // Not a whole diary (an entry no film fits), so no play yet (Astra r7); the whole one brings it in once.
+    expect(viewingsOf(db, id)).toEqual([]);
+    applyImport(db, parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,3,,,2024-01-02\n` }]).records, { mode: 'merge' });
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([['2024-01-02', 'https://boxd.it/e1']]);
   });
 });

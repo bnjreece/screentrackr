@@ -155,3 +155,40 @@ describe('import letterboxd', () => {
     }
   }, 60_000);
 });
+
+describe('import letterboxd: plays and lists (0.4.0)', () => {
+  it('keeps every diary entry as a play, and --lists and --tags-as-lists bring in lists', () => {
+    const r = run(['import', 'letterboxd', zip, '--lists', '--tags-as-lists', '--json']);
+    expect(r.code, r.stderr).toBe(0);
+    expect(json<{ listsCreated: string[] }>(r).listsCreated.sort()).toEqual(['35mm', 'cinema', 'Favourites', 'My Blu-rays'].sort());
+    const db = openDb(home);
+    try {
+      const plays = db.sql
+        .prepare("SELECT li.source_title AS t, v.watched_at AS at, v.rewatch AS rw FROM viewings v JOIN library_items li ON li.id = v.item_id WHERE v.source = 'letterboxd' ORDER BY v.watched_at")
+        .all() as { t: string; at: string; rw: number }[];
+      expect(plays.filter((p) => p.t === 'The Glass Harbor').map((p) => [p.at, p.rw])).toEqual([
+        ['2009-06-01', 0],
+        ['2024-03-02', 0],
+        ['2025-01-10', 1],
+      ]);
+    } finally {
+      db.close();
+    }
+    const again = run(['import', 'letterboxd', zip, '--lists', '--tags-as-lists', '--json']);
+    expect(json<Summary>(again)).toMatchObject({ added: 0, updated: 0 });
+    expect(again.stderr).toMatch(/Added to lists you already have: /);
+    const history = run(['history', 'The Glass Harbor (1978)']);
+    expect(history.stdout).toMatch(/^2025-01-10 {2}R {2}The Glass Harbor \(1978\) {2}letterboxd {2}rated 7/m);
+  });
+
+  it('takes --lists with --list, and refuses list flags that do not fit', () => {
+    // --lists with an owned list also named by --list: that one is a list too, and still marks owned.
+    const both = run(['import', 'letterboxd', zip, '--lists', '--owned-list', 'my-blu-rays', '--list', 'my-blu-rays', '--json']);
+    expect(both.code, both.stderr).toBe(0);
+    expect(json<{ listsCreated: string[] }>(both).listsCreated.sort()).toEqual(['Favourites', 'My Blu-rays']);
+    const csv = join(tmp, 'plain.csv');
+    writeFileSync(csv, 'title,year\nPale Rooftops,1994\n');
+    expect(run(['import', csv, '--list', 'favourites']).stderr).toMatch(/only apply to Letterboxd exports/);
+    expect(run(['import', 'letterboxd', zip, '--list', 'no-such-list']).stderr).toMatch(/No list "no-such-list"/);
+  });
+});

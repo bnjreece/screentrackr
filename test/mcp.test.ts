@@ -89,8 +89,11 @@ describe('tools/list', () => {
         'list_add',
         'list_lists',
         'list_remove',
+        'list_viewings',
+        'log_viewing',
         'pick_movie',
         'remove_from_library',
+        'remove_viewing',
         'search_movies',
         'setup_catalog',
         'update_movie',
@@ -350,7 +353,7 @@ describe('stdio session (Review Focus #1)', () => {
     for (const m of msgs) expect(m.jsonrpc).toBe('2.0');
     expect(msgs.map((m) => m.id)).toEqual([1, 2, 3]);
     expect((msgs[0]!.result as { serverInfo: { name: string } }).serverInfo.name).toBe('screentrackr');
-    expect((msgs[1]!.result as { tools: unknown[] }).tools).toHaveLength(16);
+    expect((msgs[1]!.result as { tools: unknown[] }).tools).toHaveLength(19);
     expect((msgs[2]!.result as { isError?: boolean }).isError).toBeFalsy();
   }, 30_000);
 });
