@@ -116,6 +116,12 @@ describe('dropFutureDates', () => {
     expect(() => applyImport(db, res.records, { mode: 'merge' })).toThrow(/invalid watched date/);
   });
 
+  it('a complete set that loses a future play removes nothing (Astra r7)', () => {
+    const res = dropFutureDates([{ sourceTitle: 'Pale Rooftops', source: 'trakt', viewings: [{ watchedAt: '2099-01-01', sourceRef: '12345' }], viewingsComplete: true }], now);
+    expect(res.records[0]?.viewings).toEqual([]);
+    expect(res.records[0]).not.toHaveProperty('viewingsComplete');
+  });
+
   it('leaves records without future dates as they are', () => {
     const recs: ImportRecord[] = [{ sourceTitle: 'Pale Rooftops', source: 'csv', watchedAt: '2020-01-01' }];
     const res = dropFutureDates(recs, now);

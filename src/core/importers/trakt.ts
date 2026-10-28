@@ -26,7 +26,8 @@
  *   Trakt history (`viewingsComplete`), so a play deleted on Trakt goes,
  *   unless the export cannot show it is whole (loose files, a missing page, a
  *   row or error list that can't be read, or `_errors.json` naming the
- *   history): then the plays it does have are added and nothing is removed.
+ *   history): then no play is added or removed (movies are still watched),
+ *   since part of a history can't be told from plays stored earlier.
  *   watched-movies says a movie was watched, but its last_watched_at never
  *   becomes a play (it has no play id, so the same play seen later in the
  *   history could not be told from it). A history row with no play id is not kept as a play (it could never be
@@ -45,7 +46,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { Status } from '../types.js';
 import { listZip } from '../zip.js';
-import { cleanTconst, ImportError, type ImportRecord, type ImportViewing, type ParsedImport } from './common.js';
+import { cleanTconst, ImportError, type ImportRecord, type ParsedImport } from './common.js';
 
 /** The export files the importer reads, by name stem. */
 export const TRAKT_KINDS = ['watched-history', 'watched-movies', 'ratings-movies', 'lists-watchlist', 'collection-movies'] as const;
@@ -557,14 +558,15 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   }
   const usable = (t: number | null): t is number => t !== null && !bulk.has(Math.floor(t / 1000));
 
-  // The history is each movie's whole Trakt history only when it was read and nothing says or suggests it is incomplete.
+  // The history is each movie's whole Trakt history only when it was read and
+  // nothing says or suggests it is incomplete. Plays come only from such a
+  // history: from part of one, a play could be the one an earlier import
+  // holds under another date or without its ref (a release before 0.4.0
+  // kept none), and nothing here could tell, so it would count twice.
   const historyComplete = historyRead && !incomplete.has('watch history') && !historyDoubt;
-  if (historyRead && !historyComplete && !incomplete.has('watch history')) {
-    notices.push('The Trakt history may not be whole (loose files, a missing page, or rows or an error list that could not be read), so its plays were added and none were removed.');
-  }
+  let heldBack = 0;
   let noHistoryPlay = 0;
   let bulkDated = 0;
-  let bulkLeftOut = 0;
   const records: ImportRecord[] = [];
   for (const a of accs.values()) {
     const rec: ImportRecord = { sourceTitle: a.title, source: 'trakt', externalIds: { trakt: String(a.traktId) }, fillOnly: true };
@@ -578,24 +580,20 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
     const watched = a.plays.length > 0 || a.wmPlays > 0 || a.idless > 0;
     if (watched) {
       rec.status = 'watched' satisfies Status;
-      const day = (t: number | null) => (usable(t) ? localDate(t, fmt) : null);
-      // Without a whole history, a bulk-logged play is left out: an earlier
-      // import may hold it with a date (a release before 0.4.0 kept no
-      // ref), and nothing could tell the two apart, so it would count twice.
-      // A whole history settles it (by ref, and removing the old play).
-      const keep = (p: { t: number | null }) => historyComplete || p.t === null || !bulk.has(Math.floor(p.t / 1000));
-      bulkLeftOut += a.plays.filter((p) => !keep(p)).length;
-      const viewings: ImportViewing[] = a.plays.filter(keep).map((p) => ({ watchedAt: day(p.t), sourceRef: p.ref }));
-      // watched-movies' last play never becomes a play: it has no play id,
-      // so the same play seen later in the history (with its id, maybe
-      // without its bulk date) could not be told from it and would count
-      // twice. The movie is watched; its plays come from the history.
-      if (!a.plays.length && a.wmPlays > 0) noHistoryPlay++;
-      rec.viewings = viewings;
-      if (historyComplete && a.plays.length) rec.viewingsComplete = true;
-      // Its dates were all left out as bulk-logged (counted once per movie).
-      const known = a.plays.filter((p) => p.t !== null);
-      if (known.length && !viewings.some((v) => v.watchedAt !== null) && known.every((p) => bulk.has(Math.floor((p.t as number) / 1000)))) bulkDated++;
+      if (!historyComplete) heldBack += a.plays.length;
+      else if (a.plays.length) {
+        const day = (t: number | null) => (usable(t) ? localDate(t, fmt) : null);
+        rec.viewings = a.plays.map((p) => ({ watchedAt: day(p.t), sourceRef: p.ref }));
+        rec.viewingsComplete = true;
+        // Every date it had was left out as bulk-logged (counted once per movie).
+        const known = a.plays.filter((p) => p.t !== null);
+        if (known.length && known.every((p) => !usable(p.t))) bulkDated++;
+      } else {
+        // watched-movies' last play never becomes a play: it has no play id,
+        // so the same play seen later in the history could not be told from
+        // it. The movie is watched; its plays come from the history.
+        noHistoryPlay++;
+      }
     } else {
       if (a.watchlist) rec.statusIfNew = 'queue';
       // In the export but with no play in a whole history: no Trakt play of it is left.
@@ -625,9 +623,9 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
       `${noHistoryPlay} watched movie${noHistoryPlay === 1 ? ' has' : 's have'} no play in the history this export holds, so ${noHistoryPlay === 1 ? 'it is' : 'they are'} marked watched with no play or date. A complete export brings the plays in.`,
     );
   }
-  if (bulkLeftOut) {
+  if (historyRead && !historyComplete) {
     notices.push(
-      `Left out ${bulkLeftOut} bulk-logged play${bulkLeftOut === 1 ? '' : 's'}, since the history is not whole; import a complete export to bring ${bulkLeftOut === 1 ? 'it' : 'them'} in.`,
+      `The Trakt history here can't be shown to be whole (loose files, a missing page, rows or an error list that could not be read, or _errors.json naming the history), so none of its ${heldBack} play${heldBack === 1 ? '' : 's'} were imported and no play was removed; the movies are still marked watched. Import the export's ZIP or folder to bring your plays in.`,
     );
   }
   if (skippedTv) notices.push(`Skipped ${skippedTv} TV row${skippedTv === 1 ? '' : 's'} (only movies are imported).`);

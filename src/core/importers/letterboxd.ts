@@ -401,7 +401,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
   }
   if (unplaced) {
     warnings.push(
-      `${unplaced} diary entr${unplaced === 1 ? 'y has' : 'ies have'} no film with the same name and year in watched.csv, ratings.csv or the watchlist, so ${unplaced === 1 ? 'it was' : 'they were'} not used, and no Letterboxd play was removed (any film could be ${unplaced === 1 ? 'its' : 'theirs'}). Import the whole export to include ${unplaced === 1 ? 'it' : 'them'}.`,
+      `${unplaced} diary entr${unplaced === 1 ? 'y has' : 'ies have'} no film with the same name and year in watched.csv, ratings.csv or the watchlist, so ${unplaced === 1 ? 'it was' : 'they were'} not used, and no Letterboxd play was added or removed (any film could be ${unplaced === 1 ? 'its' : 'theirs'}). Import the whole export to include ${unplaced === 1 ? 'it' : 'them'}.`,
     );
   }
 
@@ -431,6 +431,7 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
 
   const records: ImportRecord[] = [];
   let unidentified = 0;
+  let heldBack = 0;
   for (const f of films.values()) {
     const entries = [...(entriesOf.get(f.uri) ?? [])].sort(latestFirst);
     const rec: ImportRecord = { sourceTitle: f.title, source: 'letterboxd', fillOnly: true, externalIds: { letterboxd: f.uri } };
@@ -446,23 +447,19 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
     // by, so it is not kept as a play: the same entry seen later with its
     // link (and maybe a corrected date) could not be matched to it. The film
     // is still watched, and it gets no complete set.
-    const kept = entries.filter((e) => e.uri !== null);
-    unidentified += entries.length - kept.length;
-    if (entries.length) {
-      rec.viewings = kept.map(
-        (e): ImportViewing => ({ watchedAt: e.watchedDate, rewatch: e.rewatch, rating: e.rating ?? null, sourceRef: e.uri }),
-      );
-    }
-    // The diary was read and every entry was attached (none could be
-    // this film's but missed): these are its whole Letterboxd history, so an entry deleted
-    // on Letterboxd goes (and with no entry left, every Letterboxd play of
-    // the film). Plays you logged and other sources' plays stay.
-    // An entry that could not be attached anywhere may be this film's
-    // (renamed since), so then no film gets a complete set.
-    if (inp.diary && !unsure.has(f.uri) && unplaced === 0 && kept.length === entries.length) {
-      rec.viewings ??= [];
+    const linked = entries.filter((e) => e.uri !== null).length;
+    unidentified += entries.length - linked;
+    // Plays come only from a diary that is the film's whole Letterboxd
+    // history: read, every entry attached (an entry no film fits may be this
+    // film's, renamed since, so then no film's is) and every entry linked.
+    // Then an entry deleted on Letterboxd goes (and with no entry left, every
+    // Letterboxd play of the film); plays you logged and other sources' plays
+    // stay. From anything less, a play could be the one an earlier import
+    // holds under another date or without its link, so none is written.
+    if (inp.diary && !unsure.has(f.uri) && unplaced === 0 && linked === entries.length) {
+      rec.viewings = entries.map((e): ImportViewing => ({ watchedAt: e.watchedDate, rewatch: e.rewatch, rating: e.rating ?? null, sourceRef: e.uri }));
       rec.viewingsComplete = true;
-    }
+    } else heldBack += entries.length;
     if (opts.tagsAsLists) {
       for (const e of entries) {
         for (const tag of e.tags) {
@@ -485,9 +482,10 @@ function buildRecords(inp: Inputs, opts: LetterboxdOptions, warnings: string[], 
     }
     records.push(rec);
   }
-  if (unidentified) {
+  if (unidentified) warnings.push(`${unidentified} diary entr${unidentified === 1 ? 'y has' : 'ies have'} no entry link (Letterboxd URI)`);
+  if (heldBack) {
     warnings.push(
-      `${unidentified} diary entr${unidentified === 1 ? 'y has' : 'ies have'} no entry link (Letterboxd URI), so ${unidentified === 1 ? 'it was' : 'they were'} not kept as plays (${unidentified === 1 ? 'its film is' : 'their films are'} still watched, and no Letterboxd play of ${unidentified === 1 ? 'it' : 'them'} was removed)`,
+      `${heldBack} diary entr${heldBack === 1 ? 'y was' : 'ies were'} not imported as plays, since the diary can't be shown to be the whole history of ${heldBack === 1 ? 'its film' : 'their films'} (an entry with no film or no link, or a name two films share); no Letterboxd play was removed and the films are still watched. Import the whole export to bring them in.`,
     );
   }
   return { records, lists: [...lists.values()] };

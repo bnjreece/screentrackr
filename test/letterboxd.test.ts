@@ -601,7 +601,7 @@ describe('when the diary cannot say it is whole (0.4.0, Astra r1)', () => {
     const id = (item('Quiet Ledger')[0] as LibraryItem).id;
     // The film's own row now has a new title, its diary rows the old one.
     const renamed = parseLetterboxdFiles([watched('Quiet Ledger (Restored)'), diary('2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,,,,2019-01-01')]);
-    expect(renamed.warnings.join('\n')).toMatch(/no Letterboxd play was removed/);
+    expect(renamed.warnings.join('\n')).toMatch(/no Letterboxd play was added or removed/);
     expect(renamed.records.some((r) => r.viewingsComplete)).toBe(false);
     applyImport(db, renamed.records, { mode: 'merge' });
     expect(viewingsOf(db, id).map((v) => v.sourceRef)).toEqual(['https://boxd.it/e1']);
@@ -610,8 +610,9 @@ describe('when the diary cannot say it is whole (0.4.0, Astra r1)', () => {
   it('keeps no play for entries without a link, and sends no complete set (Astra r6)', () => {
     const res = parseLetterboxdFiles([watched(), diary('2019-01-02,Quiet Ledger,1999,,3,,,2019-01-01', '2019-01-02,Quiet Ledger,1999,,4,Yes,,2019-01-01')]);
     expect(res.warnings.join('\n')).toMatch(/2 diary entries have no entry link/);
-    expect(res.records[0]).toMatchObject({ status: 'watched', viewings: [] });
-    expect(res.records[0]?.viewingsComplete).toBeUndefined();
+    expect(res.records[0]).toMatchObject({ status: 'watched' });
+    expect(res.records[0]?.viewings).toBeUndefined();
+    expect(res.warnings.join('\n')).toMatch(/2 diary entries were not imported as plays/);
   });
 });
 
@@ -634,7 +635,8 @@ describe('a diary entry with no link (0.4.0, Astra r6)', () => {
     const watched = { name: 'watched.csv', text: 'Date,Name,Year,Letterboxd URI\n2024-04-02,Quiet Ledger,1999,https://boxd.it/zZ5e\n' };
     const bare = parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,Quiet Ledger,1999,,3,,,2024-01-01\n` }]);
     expect(bare.warnings.join('\n')).toMatch(/no entry link/);
-    expect(bare.records[0]).toMatchObject({ status: 'watched', viewings: [] });
+    expect(bare.records[0]).toMatchObject({ status: 'watched' });
+    expect(bare.records[0]?.viewings).toBeUndefined();
     expect(bare.records[0]?.viewingsComplete).toBeUndefined();
     applyImport(db, bare.records, { mode: 'merge' });
     // The same entry with its link and a corrected date, next to an entry no film fits (so no complete set): one play.
@@ -643,6 +645,10 @@ describe('a diary entry with no link (0.4.0, Astra r6)', () => {
       parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,3,,,2024-01-02\n2019-01-02,Nowhere Film,2000,https://boxd.it/e9,,,,2020-01-01\n` }]).records,
       { mode: 'merge' },
     );
-    expect(viewingsOf(db, (item('Quiet Ledger')[0] as LibraryItem).id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([['2024-01-02', 'https://boxd.it/e1']]);
+    const id = (item('Quiet Ledger')[0] as LibraryItem).id;
+    // Not a whole diary (an entry no film fits), so no play yet (Astra r7); the whole one brings it in once.
+    expect(viewingsOf(db, id)).toEqual([]);
+    applyImport(db, parseLetterboxdFiles([watched, { name: 'diary.csv', text: `${head}\n2019-01-02,Quiet Ledger,1999,https://boxd.it/e1,3,,,2024-01-02\n` }]).records, { mode: 'merge' });
+    expect(viewingsOf(db, id).map((v) => [v.watchedAt, v.sourceRef])).toEqual([['2024-01-02', 'https://boxd.it/e1']]);
   });
 });

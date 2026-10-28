@@ -375,7 +375,8 @@ export async function readAppleTvImport(ctx: Ctx, opts: AppleTvImportOptions = {
 /**
  * Plays dated more than a day ahead (a clock or export error) are dropped,
  * with one warning per movie, so no future date ever reaches the library.
- * Returns the records with those plays (and such a watchedAt) left out.
+ * A record that loses a play is no longer a complete set (it removes no
+ * stored play). Returns the records with those plays (and such a watchedAt) left out.
  */
 export function dropFutureDates(records: ImportRecord[], now: Date = new Date()): { records: ImportRecord[]; warnings: string[] } {
   const warnings: string[] = [];
@@ -387,6 +388,9 @@ export function dropFutureDates(records: ImportRecord[], now: Date = new Date())
     if (Array.isArray(r.viewings) && r.viewings.some((v) => future(v?.watchedAt))) {
       dropped.push(...r.viewings.filter((v) => future(v?.watchedAt)).map((v) => v.watchedAt as string));
       next = { ...next, viewings: r.viewings.filter((v) => !future(v?.watchedAt)) };
+      // A set with a play left out is no longer the source's whole set, so it removes nothing.
+      delete next.viewingsComplete;
+      delete next.clearWatchedAtIfOwn;
     }
     if (future(r.watchedAt)) {
       dropped.push(r.watchedAt as string);
