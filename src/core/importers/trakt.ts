@@ -390,10 +390,11 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   }
 
   const accs = new Map<number, Acc>();
-  /** Each play id seen in the history, with the Trakt id of its film. */
-  const seenPlays = new Map<string, number>();
   /** Play ids of history rows whose title was deleted from Trakt: a complete set never removes them. */
   const unplaced = new Set<string>();
+  /** Each play id seen in the history, with the Trakt id of its film. */
+  const seenPlays = new Map<string, number>();
+
   let historyRead = false;
 
   /**
@@ -487,8 +488,10 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
         const where = `${page.name} row ${i + 1}`;
         if (kind === 'watched-history') {
           if (isObj(row) && row.type === 'movie' && row.movie === null) {
+            // A play of a title deleted from Trakt: kept safe by its id; without one, it could be any stored play.
             const gone = playRef(row.id);
             if (gone !== null) unplaced.add(gone);
+            else historyDoubt = true;
           }
           // The movie first, so even a repeated row can fill a year or IMDb id.
           const acc = movieOf(row, where, deleted, true);
@@ -643,7 +646,7 @@ export function parseTrakt(files: TraktFile[], opts: TraktOptions = {}): TraktPa
   }
   if (historyRead && !historyComplete) {
     notices.push(
-      `The Trakt history here can't be shown to be whole (loose files, a missing page, rows or an error list that could not be read, or _errors.json naming the history), so none of its ${heldBack} play${heldBack === 1 ? '' : 's'} were imported and no play was removed; the movies are still marked watched. Import the export's ZIP or folder to bring your plays in.`,
+      `The Trakt history here can't be shown to be whole (loose files, a missing page, rows or an error list that could not be read, a play of a title deleted from Trakt with no play id, or _errors.json naming the history), so none of its ${heldBack} play${heldBack === 1 ? '' : 's'} were imported and no play was removed; the movies are still marked watched. Import the export's ZIP or folder to bring your plays in.`,
     );
   }
   if (skippedTv) notices.push(`Skipped ${skippedTv} TV row${skippedTv === 1 ? '' : 's'} (only movies are imported).`);

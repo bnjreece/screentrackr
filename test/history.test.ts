@@ -171,3 +171,15 @@ describe('removePlay', () => {
     expect(() => removePlay(db, 0)).toThrow(/Invalid viewing id/);
   });
 });
+
+describe('rewatch on a night two sources recorded (release review, Astra r2)', () => {
+  it("a source's own flag wins over the derived one, as in stats and export", () => {
+    const id = item();
+    addViewing(db, id, { watchedAt: '2020-01-01', source: 'manual' });
+    addViewing(db, id, { watchedAt: '2024-01-01', source: 'letterboxd', rewatch: false, sourceRef: 'https://boxd.it/aaaa' });
+    addViewing(db, id, { watchedAt: '2024-01-01', source: 'trakt', sourceRef: '77' });
+    const night = historyPlays(db).plays.find((p) => p.date === '2024-01-01');
+    expect(night?.sources).toEqual(['letterboxd', 'trakt']);
+    expect(night?.rewatch).toBe(false);
+  });
+});

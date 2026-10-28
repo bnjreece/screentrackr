@@ -882,8 +882,8 @@ describe('more doubtful input (0.4.0, Astra r2)', () => {
       applyImport(db, res.records, { mode: 'merge' });
       expect(refs()).toEqual(['2', '1']);
     }
-    // An explicit null movie is a title deleted from Trakt: the rest stays a whole history.
-    expect(parse({ 'watched-history.json': [...one, { id: 8, watched_at: '2023-01-01T00:00:00.000Z', action: 'watch', type: 'movie', movie: null }] }).records[0]?.viewingsComplete).toBe(true);
+    // An explicit null movie is a title deleted from Trakt: the rest stays a whole history, and that play is kept safe by its id (release review r1).
+    expect(parse({ 'watched-history.json': [...one, { id: 8, watched_at: '2023-01-01T00:00:00.000Z', action: 'watch', type: 'movie', movie: null }] }).records[0]).toMatchObject({ viewingsComplete: true, keepRefs: ['8'] });
   });
 
   it('a bulk-logged last_watched_at is left out of the fallback too', () => {
@@ -949,16 +949,31 @@ describe('history rows that name a play but no film it can place (0.4.0 release 
   const glassRefs = () => viewingsOf(db, (byTitle('The Glass Harbor')[0] as LibraryItem).id).map((v) => v.sourceRef);
   const saltRefs = () => viewingsOf(db, (byTitle('Salt & Signal')[0] as LibraryItem).id).map((v) => v.sourceRef);
 
-  it('a play whose title was deleted from Trakt is kept, though the rest of the history is whole', () => {
+  it('a play whose title was deleted from Trakt is kept, and so is a migrated play, though the rest of the history is whole', () => {
     applyImport(db, parse({ 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z'), play(2, '2022-02-02T12:00:00.000Z')] }).records, { mode: 'merge' });
-    expect(glassRefs()).toEqual(['2', '1']);
+    const id = (byTitle('The Glass Harbor')[0] as LibraryItem).id;
+    // A play carried over from a 0.3.0 date: no ref (Astra release r2).
+    addViewing(db, id, { watchedAt: '2015-06-06', source: 'trakt' });
+    expect(glassRefs()).toEqual(['2', '1', null]);
     const res = parse({ 'watched-history.json': [{ ...play(1, '2018-04-04T12:00:00.000Z'), movie: null }, play(2, '2022-02-02T12:00:00.000Z')] });
-    expect(rec(res.records, 101)).toMatchObject({ viewingsComplete: true });
+    expect(rec(res.records, 101)).toMatchObject({ viewingsComplete: true, keepRefs: ['1'] });
     applyImport(db, res.records, { mode: 'merge' });
-    expect(glassRefs()).toEqual(['2', '1']);
-    // A play the history no longer lists at all still goes.
+    expect(glassRefs()).toEqual(['2', '1', null]);
+    // Once the history has no such row, a play it no longer lists goes, as does the migrated one.
     applyImport(db, parse({ 'watched-history.json': [play(2, '2022-02-02T12:00:00.000Z')] }).records, { mode: 'merge' });
     expect(glassRefs()).toEqual(['2']);
+  });
+
+  it('a deleted title with no readable play id makes the history doubtful, so no play is removed (Astra release r2)', () => {
+    applyImport(db, parse({ 'watched-history.json': [play(1, '2018-04-04T12:00:00.000Z'), play(2, '2022-02-02T12:00:00.000Z')] }).records, { mode: 'merge' });
+    for (const gone of [{ id: null }, {}]) {
+      const row: Record<string, unknown> = { ...play(1, '2018-04-04T12:00:00.000Z'), ...gone, movie: null };
+      if (!('id' in gone)) delete row.id;
+      const res = parse({ 'watched-history.json': [row, play(2, '2022-02-02T12:00:00.000Z')] });
+      expect(res.records.some((r) => r.viewingsComplete), JSON.stringify(gone)).toBe(false);
+      applyImport(db, res.records, { mode: 'merge' });
+      expect(glassRefs()).toEqual(['2', '1']);
+    }
   });
 
   it('one play id listed for two films makes the history doubtful, so no play is removed', () => {

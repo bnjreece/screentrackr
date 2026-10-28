@@ -191,6 +191,7 @@ function validate(records: ImportRecord[]): void {
     for (const flag of ['owned', 'ownedIfNew', 'fillOnly', 'editionStrict', 'imdbIdExact', 'clearWatchedAtIfOwn', 'viewingsComplete', 'exact'] as const) {
       if (r[flag] !== undefined && typeof r[flag] !== 'boolean') fail(`${flag} must be true or false`);
     }
+    if (r.keepRefs != null && (!Array.isArray(r.keepRefs) || r.keepRefs.some((x) => typeof x !== 'string'))) fail('keepRefs must be a list of play refs');
     if (r.watchedAtSource != null && !(ITEM_SOURCES as readonly string[]).includes(r.watchedAtSource)) {
       fail(`invalid watched date source "${String(r.watchedAtSource)}"`);
     }

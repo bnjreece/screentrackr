@@ -542,8 +542,10 @@ export function planViewingSync(
       else insert(v);
     }
     if (complete.has(source) && source !== 'manual') {
-      // A play the source still lists, though it could not say for which film, stays.
-      for (const s of mine) if (!used.has(s.id) && !(s.sourceRef !== null && keepRefs.has(s.sourceRef))) plan.deletes.push(s.id);
+      // A play the source still lists, though it could not say for which film, stays; so does
+      // a play with no ref then, since it could be one of those.
+      const kept = (s: Viewing) => keepRefs.size > 0 && (s.sourceRef === null || keepRefs.has(s.sourceRef));
+      for (const s of mine) if (!used.has(s.id) && !kept(s)) plan.deletes.push(s.id);
     }
   }
   plan.inserts.sort((x, y) => (insertedFrom.get(x) ?? 0) - (insertedFrom.get(y) ?? 0));

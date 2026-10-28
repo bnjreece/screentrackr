@@ -176,7 +176,10 @@ export function historyPlays(db: Db, q: HistoryQuery = {}): HistoryResult {
     const viewings = [...g.viewings].sort((a, b) => b.id - a.id);
     return {
       date: g.date,
-      rewatch: g.viewings.some((v) => rewatch.get(v.id) === true),
+      // A source's own flag wins (any of them saying rewatch); else the derived one, as stats and export judge it.
+      rewatch: g.viewings.some((v) => v.rewatch !== null)
+        ? g.viewings.some((v) => v.rewatch === true)
+        : g.viewings.some((v) => rewatch.get(v.id) === true),
       sources: g.sources,
       itemId: top.itemId,
       title: it?.source_title ?? '',
